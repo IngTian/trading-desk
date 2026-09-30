@@ -1,0 +1,109 @@
+/* Only Textual design tokens, no colour literals.
+
+   That is what makes every built-in theme work for free. The four semantic colours
+   that ARE literals live in widgets.py (GOOD/BAD/WARN/FAINT) and are deliberately
+   not themed: bare `red` resolves to #ff0000 and bare `green` to #008000, harsh and
+   nearly unreadable respectively on a dark warm-earth background. */
+
+Screen { background: $surface; }
+
+#bottom { dock: bottom; height: auto; }
+
+/* The theme picker sits above the footer, NOT in a modal: a ModalScreen would cover the
+   interface being previewed, which is the whole point of previewing. */
+#theme-picker {
+    height: 3;
+    border: round $accent;
+    border-title-align: left;
+    border-subtitle-align: left;
+    padding: 0 1;
+}
+
+#prompt {
+    height: 3;
+    border: round $accent;
+    border-title-align: left;
+    border-subtitle-align: left;
+}
+#prompt.error { border: round $error; }
+
+/* FOUR ROWS, NOT TWO: a status row plus one row per key group (write, view, nav).
+   The author:
+   "you can learn from daylogs to stack key options instead of laying them flat."
+   FIXED rather than auto, and daylogs' reason is the one that matters -- a footer that
+   collapses when a scope's groups happen to fit makes its height depend on which tab you
+   are on, so every tab switch reflows the table above it. A predictable frame is worth
+   the row. A scope with no `view` keys simply leaves that line blank. */
+#keyfooter {
+    height: 4;
+    padding: 0 1;
+    color: $text-muted;
+}
+
+/* AIR ABOVE THE PORTFOLIO. It follows the sleeve block directly, and without this its
+   title reads as another line of that block rather than the start of a section. */
+#port-head { margin-top: 1; }
+
+/* AIR BETWEEN SECTIONS. The author: "you should have some breadthing air between sections. now
+   everything is scrambled together."
+
+   They are right, and every gap was missing for the same reason: nothing here had a vertical
+   margin, so a pane title sat directly on its first figure, the capital ledger sat directly
+   on the last sleeve line, and the bets charts sat directly on the note. Blank lines inside
+   a Static would fix some of it, but not the boundaries BETWEEN widgets -- and those are
+   exactly the section boundaries. So the gaps live here, one rule per boundary, rather than
+   as padding smuggled into the text. */
+.pane-title {
+    color: $text;
+    text-style: bold;
+    padding: 0 1;
+    margin-bottom: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+.panel-body {
+    padding: 0 1;
+    height: auto;
+}
+
+/* The capital ledger is a section of the dashboard, not a continuation of the sleeves, so it
+   gets air above its heading as well as below.
+
+   BOTH SIDES ARE SPELLED OUT because an id selector out-specifies `.pane-title`, and setting
+   only `margin-top` here silently dropped the `margin-bottom: 1` that rule provides -- the
+   heading sat straight on its own column row while every other title had its gap. */
+#cap-head { margin-top: 1; margin-bottom: 1; }
+
+/* The note is about the row above it and the charts are about the whole table, so each
+   needs to be visibly separate from what precedes it. */
+#bet-note, #bet-charts, #bet-done { margin-top: 1; }
+
+.muted { color: $text-muted; padding: 0 1; }
+
+/* overflow-x hidden so left/right keep switching tabs rather than scrolling the
+   table sideways. */
+DataTable {
+    height: 1fr;
+    min-height: 5;
+    margin: 0 1;
+    overflow-x: hidden;
+}
+
+/* A table that SHARES a scroll container with something below it sizes to its own rows
+   instead of claiming the space. `1fr` there would push the charts and the ledger off the
+   bottom of a container that is already scrollable, which is the one place height:1fr is
+   actively wrong. */
+#bet-table, #cap-table { height: auto; }
+
+#help-body {
+    padding: 1 2;
+    background: $panel;
+    border: round $accent;
+    width: 70;
+    max-width: 90%;
+    height: auto;
+    max-height: 90%;
+}
+
+HelpScreen { align: center middle; }

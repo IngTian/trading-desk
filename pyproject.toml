@@ -1,0 +1,94 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# `trading-desk`, matching the repository and the daylogs pattern: repo `daylogs`,
+# package `daylogs`, command `day`. It was `trades`, which matched neither the repo
+# nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
+# along with `tradingdesk` and `trade-desk`.
+name = "trading-desk"
+version = "0.3.0"
+description = "A trading book in the terminal: SQLite, a Textual TUI, and a checker that will not let the record contradict itself"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["tui", "terminal", "textual", "trading", "portfolio", "bookkeeping", "sqlite"]
+dependencies = ["textual>=8.2,<9"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/IngTian/trading-desk"
+Repository = "https://github.com/IngTian/trading-desk"
+Issues = "https://github.com/IngTian/trading-desk/issues"
+
+# [dependency-groups] AND NOT [project.optional-dependencies], which is where this
+# diverges from daylogs deliberately. `uv sync` installs dependency groups BY DEFAULT
+# and extras only with --extra, so declaring the dev tools as an extra meant a plain
+# `uv sync` produced a venv with no pytest in it -- which is exactly what happened the
+# first time this project was made installable. CI therefore uses `uv sync` rather than
+# daylogs' `pip install -e '.[dev]'`; one declaration that cannot drift from a second.
+[dependency-groups]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6"]
+
+# THE POINT OF INSTALLING THIS: you type `desk`.
+#
+# Without it the only way in was `uv run python -m desk`, and a bare `python -m desk`
+# failed with ModuleNotFoundError for anyone whose `python` is not the project's --
+# which is what happened. Same shape as daylogs' `day`.
+#
+# A PyInstaller build path existed and was deleted on 2026-09-27; the benchmark that
+# argued against it lived in three places with three different sets of numbers, which is
+# one reason to have one owner for a fact.
+#
+# `desk-migrate` AND `desk-check` ship because an installed user needs them and had
+# neither: the book is created by `desk-migrate --new` (or by answering `desk`'s own
+# prompt on a first run), and a schema change since the book was built is reported by
+# `desk-migrate --check`. `prices` needs no entry point -- the desk refreshes marks on
+# its own timer, so a command would be a second surface for something already automatic.
+[project.scripts]
+desk = "desk.__main__:main"
+desk-migrate = "desk.migrate:main"
+desk-check = "desk.check:cli"
+
+[tool.setuptools.packages.find]
+include = ["desk*"]
+
+# TWO FILES THE WHEEL WOULD OTHERWISE DROP, and each has bitten a release once.
+#
+# `*.tcss`: Textual loads app.tcss via App.CSS_PATH at runtime, and setuptools ships no
+# non-Python files by default -- so without this a non-editable install starts with no
+# stylesheet at all. Copied from daylogs, which learned it the same way.
+#
+# `schema.sql`: the schema IS the tool, and it used to live in book/ which was not a
+# package. An installed copy resolved it to `site-packages/book/schema.sql`, which does
+# not exist -- so `pip install trading-desk` produced something that could not create a
+# book. Proven by installing the wheel in a clean venv. Both are asserted by CI against
+# a real built wheel, because an editable install reads the source tree and so cannot
+# catch a missing declaration.
+[tool.setuptools.package-data]
+"desk" = ["schema.sql"]
+"desk.tui" = ["*.tcss"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

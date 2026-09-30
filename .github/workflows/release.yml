@@ -1,0 +1,126 @@
+name: Release
+
+# Publishes `trading-desk` to PyPI when a version tag is pushed:
+#
+#     git tag v0.3.0 && git push origin v0.3.0
+#
+# Authentication is PyPI Trusted Publishing (OIDC), so there is no API token in the
+# repository or in Actions secrets -- nothing to leak and nothing to rotate. It needs a
+# one-time setup on PyPI: Publishing -> add a pending publisher with owner `IngTian`,
+# repository `trading-desk`, workflow `release.yml`, environment `pypi`. Until that exists
+# the publish step fails and the build artifacts are still attached to the GitHub release,
+# so a tag is never wasted.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The tag is the release's identity, so a tag that disagrees with the version in the
+      # package would publish something misnamed. Fail here rather than on PyPI, where a
+      # filename cannot be taken back.
+      - name: the tag matches the declared version
+        run: |
+          declared=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tagged="${GITHUB_REF_NAME#v}"
+          echo "tag=$tagged pyproject=$declared"
+          test "$tagged" = "$declared"
+
+      - run: uv build --sdist --wheel --out-dir dist
+
+      # THE SUITE, AFTER THE BUILD. ci.yml triggers on `push: branches: [main]` and
+      # `pull_request` -- a tag ref matches neither -- so without this, pushing a tag would
+      # publish to PyPI without running a single test.
+      #
+      # After the build, not before, on purpose: installing the project leaves .egg-info and
+      # __pycache__ in the tree, which is the dirty-tree class the wheel-shape check exists
+      # to catch. Build from a clean checkout, then test.
+      #
+      # No ruff here. Both later jobs are `needs: build`, so a lint failure would produce
+      # nothing and force a tag delete and re-push -- against this workflow's own rule that a
+      # tag is never wasted. Lint is CI's job, on the commit, before the tag.
+      - name: the suite passes on the tagged commit
+        run: |
+          uv sync
+          uv run pytest -q
+
+      - name: the wheel ships the schema and the stylesheet, and nothing else
+        run: |
+          python - <<'PY'
+          import glob, sys, zipfile
+          wheel = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(wheel).namelist()
+          for want in ("desk/schema.sql", "desk/tui/app.tcss"):
+              if want not in names:
+                  sys.exit(f"{want} missing from {wheel}")
+          tops = {n.split("/")[0] for n in names if "/" in n}
+          unexpected = {t for t in tops - {"desk"} if not t.endswith(".dist-info")}
+          if unexpected:
+              sys.exit(f"unexpected top-level packages in {wheel}: {sorted(unexpected)}")
+          print("schema.sql and app.tcss present, and only desk/ ships:", wheel)
+          PY
+
+      # The one step that proves the artifact about to be published is usable at all: a file
+      # uploaded to PyPI cannot be taken back, and the version before this refactor would
+      # have passed every check above while shipping a tool that could not create a book.
+      - name: the installed wheel creates a book and passes its own checker
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install -q dist/*.whl
+          /tmp/smoke/bin/desk --version
+          export TRADING_DESK_HOME=/tmp/freshbook
+          /tmp/smoke/bin/desk-migrate --new
+          /tmp/smoke/bin/desk-migrate --check
+          /tmp/smoke/bin/desk-check --quiet
+          /tmp/smoke/bin/python -c "import desk.tui.app, desk.migrate, desk.check, desk.prices; print('imports clean')"
+
+      # Publishing is what makes a leftover figure a leak, so the guard runs on the tag too.
+      - run: python tools/no_real_figures.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: attach the artifacts to a GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$REPO" --title "$GITHUB_REF_NAME" --generate-notes
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # the OIDC token trusted publishing exchanges for an upload
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

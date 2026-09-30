@@ -1,0 +1,79 @@
+# --- setuptools build output ---------------------------------------------
+# `uv build` writes here. KEPT after the PyInstaller path was deleted on 2026-09-27:
+# un-ignoring them means the next `git add -A` sweeps in a wheel and a second copy of desk/.
+# `*.spec` stays for the same reason -- PyInstaller prefers a stale spec once one exists.
+build/
+dist/
+*.spec
+
+# --- python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# --- not kept in the repo, by decision 2026-09-05 -----------------------
+# The pre-SQLite YAML ledger and the one-time migration that read it. Backed
+# up outside the repo; the book in book/hub.db is authoritative going forward.
+# The author: "we dont need the old archive going forward."
+archive/
+
+# Claude-generated design specs and process docs. The author: "we dont need that
+# superpower docs or anything claude generated design spec docs."
+docs/
+
+# Reviewer and agent scratch. `.probe/` is here because two subagent diagnostic
+# scripts were actually committed on 2026-09-07 (d6df16e): an audit workflow ran 45
+# agents with filesystem access, they wrote probes into .probe/ and scratch/, and a
+# blanket `git add -A` swept in the one that was not already ignored. scratch/ was
+# ignored and survived; .probe/ was not. The lesson is the pattern, not the two
+# files: anything a helper process writes belongs to a name git already refuses.
+tmpwork/
+scratch/
+.probe/
+# shots.py renders the REAL book -- every tab, with the real profile name -- as SVG, which is
+# greppable plaintext. It was not ignored, so one run plus `git add -A` would have committed a
+# picture of the positions into a repo that is about to be published.
+shots/
+.trash/
+probe*.db
+
+# --- THE DATA ------------------------------------------------------------
+# The author, 2026-09-07: "data is data and code is code. ideally i think it's better to
+# have the data and code separated. so this repo is pure tool instead of tool
+# combined with data."
+#
+# The book is the owner's positions and balances. It was tracked until 2026-09-07 and the
+# history is still in git, so nothing is lost -- but going forward the repo carries
+# the TOOL and the SCHEMA (book/schema.sql), never the record. Point the tool at a
+# book with $TRADING_DESK_BOOK; create one with `python3 book/migrate.py --new`.
+#
+# This also fixes a coupling that had already bitten: the tests read the live book
+# as a fixture, so recording a real trade turned three of them red.
+# BY EXTENSION, NOT BY PATH. `book/hub.db` only ignored the book at ITS path -- a book
+# created anywhere else in the tree, or under any other name, was committable. Nothing here
+# is a database that belongs in git: the schema is `book/schema.sql`, and every test and
+# screenshot builds its own in a temp directory. The author, 2026-09-25: "just make sure we dont
+# record it later on."
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# THE THESES HAD NO RULE, which is the gap that mattered most. 51 files of research notes,
+# observations and chart images were tracked until 2026-09-07 and then removed -- with
+# nothing stopping the next `git add -A` from putting them back. This is a tool repo; the
+# claims live wherever they write them.
+theses/
+
+# Broker statements, in any form. None has ever been committed; the point is that a PDF
+# dropped in the tree to be read from should not be a thing to notice afterwards.
+*.pdf
+statements/
+
+# --- obsidian -----------------------------------------------------------
+# Per-machine UI state, not content.
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.DS_Store
