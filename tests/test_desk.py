@@ -1535,8 +1535,19 @@ async def test_down_reaches_what_is_below_the_table(app, digit, scroll_id, word)
         # on how much history the fixture happens to hold -- the synthetic book marks one
         # date, so its chart block is the "no history yet" line -- and that is asserted by
         # the two tests that draw the charts. Here, without PaneTable handing the key back,
-        # scroll_y simply never leaves 0.
-        assert sc.scroll_y == 0, "the pane should open at the top"
+        # scroll_y simply never leaves the top.
+        #
+        # SET TO THE TOP, NOT ASSERTED TO BE THERE. This read `assert sc.scroll_y == 0` and
+        # failed on CI's 3.13 runner while passing on its 3.11 runner in the same run, and
+        # passing on 3.13 locally -- so it was nondeterminism, not a version difference:
+        # giving the table focus scrolls it into view, and whether that has settled by now
+        # depends on how fast the machine is. The starting position was never the property,
+        # it was the setup for the property asserted below, and establishing it makes that
+        # assertion STRONGER -- a pane that began at 1 because something auto-scrolled it
+        # proves less than one that began at 0 because it was told to.
+        sc.scroll_home(animate=False)
+        await pilot.pause()
+        assert sc.scroll_y == 0, "the pane did not go to the top when told to"
         for _ in range(30):
             await pilot.press("down")
         await pilot.pause()
