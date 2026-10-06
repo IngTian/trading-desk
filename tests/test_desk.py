@@ -5266,3 +5266,107 @@ def test_no_user_facing_string_names_an_unbound_key():
                 if key not in bound:
                     offenders.append(f"{rel}:{i} names `{key}`, which is bound to nothing")
     assert not offenders, "\n".join(offenders)
+
+
+# --------------------------------------------------------------------------- #
+# the price fetch: output on the user's terminal, 2026-10-06
+# --------------------------------------------------------------------------- #
+def test_prices_main_never_replaces_stdout(monkeypatch, tmp_path):
+    """IT USED TO BE CAPTURED WITH redirect_stdout, WHICH IS PROCESS-GLOBAL.
+
+    The desk runs prices.main on a worker thread. contextlib.redirect_stdout replaces
+    sys.stdout for the whole process, not for a thread, so two overlapping fetches
+    interleaved their save and restore:
+
+        A enters -> sys.stdout = buf_A        (A saved the real terminal)
+        B enters -> sys.stdout = buf_B        (B saved buf_A)
+        A exits  -> sys.stdout = the REAL TERMINAL, while B is still printing
+        B prints -> onto the terminal
+
+    The author saw six lines of fetch output on the shell after quitting -- which is when the
+    TUI stopped overdrawing it. `emit` removes the mechanism rather than narrowing the window.
+
+    Turns red if main() goes back to print(), or if the app reintroduces redirect_stdout.
+    """
+    from desk import prices
+
+    monkeypatch.setattr(prices, "DB", str(tmp_path / "hub.db"))
+    seed.build(tmp_path / "hub.db").close()
+    # No network: every symbol fails fast, which still exercises every say() path.
+    monkeypatch.setattr(prices, "fetch_one", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("no network in a test")))
+
+    import io
+
+    watched = []
+
+    class Watch(io.StringIO):
+        def write(self, s):
+            watched.append(s)
+            return len(s)
+
+    lines = []
+    real = sys.stdout
+    sys.stdout = Watch()
+    try:
+        prices.main(dry=True, days=1, emit=lines.append)
+    finally:
+        sys.stdout = real
+
+    assert not watched, (
+        f"prices.main wrote to sys.stdout even with emit= given: {watched[:3]!r} -- "
+        f"on a worker thread that lands on the user's terminal")
+    assert lines, "emit collected nothing, so the output went somewhere else"
+    assert sys.stdout is real, "sys.stdout was left replaced"
+
+
+def test_the_cli_path_still_prints(monkeypatch, tmp_path, capsys):
+    """`emit` DEFAULTS TO print, or `python -m desk.prices` goes silent.
+
+    The app passes a sink; the command line passes nothing. Both have to work, and it would
+    be easy to fix the leak by removing the output altogether.
+    """
+    from desk import prices
+
+    monkeypatch.setattr(prices, "DB", str(tmp_path / "hub.db"))
+    seed.build(tmp_path / "hub.db").close()
+    monkeypatch.setattr(prices, "fetch_one", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("no network in a test")))
+
+    prices.main(dry=True, days=1)
+    out = capsys.readouterr().out
+    assert out.strip(), "the CLI path prints nothing now"
+
+
+async def test_a_holdings_change_mid_fetch_is_queued_not_raced(app, con, goto):
+    """_tick GUARDED ON self.fetching AND THIS PATH DID NOT.
+
+    `@work(exclusive=True)` cancels the task but cannot stop a running OS thread, so the two
+    prices.main() calls genuinely overlapped: both hammering the same endpoint, each ignoring
+    the other's pacing, and the first to finish clearing `self.fetching` while the second was
+    still writing. That overlap is what put fetch output on the terminal.
+
+    The change is remembered rather than dropped, because a newly-held ticker has no mark at
+    all and the fetch it triggers is the one the user is waiting for.
+
+    Turns red if the `if self.fetching` guard or the _refetch_wanted replay is removed.
+    """
+    async with app.run_test() as pilot:
+        await goto(pilot, "positions")
+        started = []
+        app.POLL_DISABLED = False
+        app._fetch = lambda *, announce: started.append(announce)
+
+        app.fetching = True            # one already in flight
+        app._held = frozenset({"AAA"})
+        app.con.execute(
+            "SELECT 1")               # keep the connection warm; the query below is the point
+        app._fetch_if_holdings_changed()
+        assert started == [], "a second fetch was started while one was in flight"
+        assert app._refetch_wanted, "the change was dropped instead of remembered"
+
+        # When the in-flight run reports back, the remembered change fires exactly once.
+        app._fetch_done("", None, False)
+        await pilot.pause()
+        assert started == [False], f"expected one queued fetch, got {started}"
+        assert not app._refetch_wanted, "the flag was not cleared, so it would fire forever"

@@ -194,6 +194,9 @@ class DeskApp(App):
         # READ BY THE DASHBOARD HEADER, which is how a poll that announces nothing is
         # still visible. Set on the UI thread only.
         self.fetching = False
+        # A HOLDINGS CHANGE THAT ARRIVED WHILE A FETCH WAS RUNNING. Serialised rather than
+        # dropped: see _fetch_if_holdings_changed and _fetch_done.
+        self._refetch_wanted = False
 
     # -- clock is injected everywhere, never read inline ---------------------
     def now(self) -> dt.datetime:
@@ -307,8 +310,22 @@ class DeskApp(App):
         self._held = held
         # NOT ON THE FIRST CALL. on_mount already kicks a fetch, and firing again here would
         # cancel it before it finished -- the one case where `exclusive` bites.
-        if changed and not first and not self.POLL_DISABLED:
-            self._fetch(announce=False)
+        if not (changed and not first and not self.POLL_DISABLED):
+            return
+        # AND NOT WHILE ONE IS IN FLIGHT, which _tick has always checked and this did not.
+        # `@work(exclusive=True)` cancels the TASK but cannot stop a running OS thread, so
+        # without this the two ran concurrently: both hammering the same undocumented
+        # endpoint, each ignoring the other's 0.4s pacing, and the first to finish clearing
+        # `self.fetching` while the second was still writing. That overlap is also what put
+        # fetch output on the user's terminal -- see _run_prices.
+        #
+        # REMEMBERED, NOT DROPPED. A new ticker has no mark at all, so the fetch it triggers
+        # is the one the user is waiting for; firing it when the current run reports back
+        # keeps that promptness without a second run racing the first.
+        if self.fetching:
+            self._refetch_wanted = True
+            return
+        self._fetch(announce=False)
 
     # An open prompt swallows every other key, EXCEPT the two that get you out of it.
     # Without that exception the app could be wedged with no way back: `tab` moved focus
@@ -616,6 +633,12 @@ class DeskApp(App):
     def _fetch_done(self, out: str, err: str | None, announce: bool) -> None:
         self.fetching = False
         self.refresh_all()
+        # A HOLDINGS CHANGE ARRIVED MID-FETCH. Honour it now: the guard in
+        # _fetch_if_holdings_changed exists to SERIALISE these, not to lose one.
+        if self._refetch_wanted:
+            self._refetch_wanted = False
+            if not self.POLL_DISABLED:
+                self._fetch(announce=False)
         if err is not None:
             # A FAILED POLL IS STILL REPORTED. Swallowing it silently would leave the
             # header saying "marked 3 days ago" with no hint that the desk has been
@@ -733,22 +756,26 @@ class DeskApp(App):
         Textual's notify is not thread-safe and the caller re-enters the UI thread
         through call_from_thread.
         """
-        import contextlib
-        import io
-
         # A PLAIN IMPORT, for the reason in book.identify_quote: the two-branch version
         # could not find prices from an installed wheel at all.
         from .. import prices as mod
-        buf = io.StringIO()
+
+        # NO contextlib.redirect_stdout. It replaces PROCESS-GLOBAL sys.stdout, and this runs
+        # on a worker thread -- so two overlapping fetches interleaved their save/restore, the
+        # first to finish handed the real terminal back while the second was still printing,
+        # and the output landed on the user's shell. The author saw six lines of it after
+        # quitting, which is when the TUI stopped overdrawing it. prices.main takes an `emit`
+        # callable now: a thread patching global state was the bug, and a lock would only have
+        # narrowed the window rather than closing it.
+        lines: list[str] = []
         try:
-            with contextlib.redirect_stdout(buf):
-                # 7 DAYS, not 1. Same-day refetches REPLACE rather than append -- the
-                # prices primary key is (base, quote, kind, on_date) -- so a window costs
-                # no rows and covers a long weekend, which a 1-day window does not.
-                mod.main(dry=False, days=7)
+            # 7 DAYS, not 1. Same-day refetches REPLACE rather than append -- the
+            # prices primary key is (base, quote, kind, on_date) -- so a window costs
+            # no rows and covers a long weekend, which a 1-day window does not.
+            mod.main(dry=False, days=7, emit=lines.append)
         except Exception as exc:   # noqa: BLE001 - handed back, never swallowed
-            return buf.getvalue(), f"{type(exc).__name__}: {exc}"
-        return buf.getvalue(), None
+            return "\n".join(lines), f"{type(exc).__name__}: {exc}"
+        return "\n".join(lines), None
 
     def notify(self, message, **kwargs):   # noqa: A003
         """markup=False once here rather than at every call site: every toast
