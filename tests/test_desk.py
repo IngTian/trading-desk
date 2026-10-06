@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextlib
 import datetime as dt
+import json
 import pathlib
 import re
 import shutil
@@ -5370,3 +5371,109 @@ async def test_a_holdings_change_mid_fetch_is_queued_not_raced(app, con, goto):
         await pilot.pause()
         assert started == [False], f"expected one queued fetch, got {started}"
         assert not app._refetch_wanted, "the flag was not cleared, so it would fire forever"
+
+
+# --------------------------------------------------------------------------- #
+# the MCP server. The author, 2026-10-06: "i will give you account statements for
+# you to figure it out. so you should have MCP tools to add this reconcillation
+# via llm." Read-only, by their choice and by construction.
+# --------------------------------------------------------------------------- #
+def _mcp_server(tmp_path, monkeypatch):
+    """A server pointed at a throwaway seeded book."""
+    pytest.importorskip("mcp", reason="the mcp extra is not installed")
+    from desk import config
+    from desk import mcp as deskmcp
+
+    seed.build(tmp_path / "hub.db").close()
+    monkeypatch.setenv("TRADING_DESK_BOOK", str(tmp_path / "hub.db"))
+    config.config.cache_clear() if hasattr(config.config, "cache_clear") else None
+    return deskmcp
+
+
+async def _call(server, name, args=None):
+    res = await server.call_tool(name, args or {})
+    return res.content[0].text
+
+
+async def test_the_mcp_server_cannot_write_to_the_book(tmp_path, monkeypatch):
+    """READ-ONLY BY CONSTRUCTION, NOT BY CONVENTION -- the property the design rests on.
+
+    The author chose read-only over write access after being told it does not by itself get a
+    balance into the book. Everything the server exposes is DERIVED, so being wrong about it
+    costs a confusing answer; a write would be different in kind, because an invented fill is
+    a fabricated trade that nothing downstream contradicts.
+
+    So this asserts the GUARANTEE rather than the intent: the connection is opened `mode=ro`,
+    and SQLite itself refuses the write. A reviewer can forget an annotation; they cannot
+    forget this, because the test fails.
+
+    Turns red if _ro() stops using mode=ro -- e.g. if someone reuses book.connect().
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    con = deskmcp._ro()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("INSERT INTO flows(on_date,amount,kind,account_id,currency) "
+                        "VALUES ('2026-01-01',1.0,'deposit','tfsa','CAD')")
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("UPDATE bets SET name='hijacked'")
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("DELETE FROM fills")
+    finally:
+        con.close()
+
+
+async def test_every_mcp_tool_declares_itself_read_only(tmp_path, monkeypatch):
+    """The annotation is what a CLIENT sees, so a model is not asked to approve a write.
+
+    Separate from the connection guarantee above on purpose: that one stops a write, this one
+    stops a client believing one is possible. Both, or the honesty is one-sided.
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+    tools = await server.list_tools()
+    assert tools, "the server exposes no tools"
+    for t in tools:
+        assert t.annotations is not None, f"{t.name} carries no annotations"
+        assert t.annotations.read_only_hint is True, f"{t.name} is not marked read-only"
+        assert t.annotations.destructive_hint is False, f"{t.name} is marked destructive"
+
+
+async def test_every_mcp_tool_answers_against_a_real_book(tmp_path, monkeypatch):
+    """Each tool runs and returns something parseable. The shape, not the figures.
+
+    Pinning numbers here would restate the fixture; the arithmetic has its own tests. What
+    this catches is the class that actually breaks a server: a tool that raises because a
+    dataclass field was renamed under it -- which has happened twice in this codebase to
+    readers that nothing exercised.
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+
+    for name in ("book_info", "net_worth", "integrity_check"):
+        payload = json.loads(await _call(server, name))
+        assert isinstance(payload, dict) and payload, f"{name} returned nothing useful"
+
+    for name in ("positions", "bets", "closed_legs"):
+        rows = json.loads(await _call(server, name))
+        assert isinstance(rows, list), f"{name} did not return a list"
+        assert rows, f"{name} returned no rows against the seeded book"
+
+    text = await _call(server, "attribution")
+    assert "UNEXPLAINED" in text or "nothing to attribute" in text, text[:200]
+
+
+async def test_the_mcp_server_tells_a_model_what_null_means(tmp_path, monkeypatch):
+    """`null` MEANS NOT RECORDED, and a model has to be told or it will substitute zero.
+
+    This is the project's first rule and the one most likely to be undone by a reader that
+    hands figures to something eager to be helpful. The instructions are the only place the
+    rule can be stated to a client, so their absence is a defect rather than a docs gap.
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+    instructions = (server.instructions or "").lower()
+    assert "not recorded" in instructions, "the server never explains what null means"
+    assert "never means zero" in instructions or "never means parity" in instructions
+    assert "currency" in instructions, "the native-vs-home rule is not stated"
+    assert "cannot write" in instructions, "a model is not told the server is read-only"

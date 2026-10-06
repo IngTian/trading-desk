@@ -8,13 +8,14 @@ build-backend = "setuptools.build_meta"
 # nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
-version = "0.3.0"
+version = "0.4.0"
 description = "A trading book in the terminal: SQLite, a Textual TUI, and a checker that will not let the record contradict itself"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["tui", "terminal", "textual", "trading", "portfolio", "bookkeeping", "sqlite"]
+keywords = ["tui", "terminal", "textual", "trading", "portfolio", "bookkeeping",
+            "sqlite", "mcp"]
 dependencies = ["textual>=8.2,<9"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -29,6 +30,17 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+# AN EXTRA, SO A PLAIN INSTALL STAYS ONE DEPENDENCY. `textual` is all `pip install
+# trading-desk` pulls in; the MCP server is for one workflow -- handing a model a broker
+# statement and asking it what disagrees with the book -- so it is opt-in:
+#
+#     pip install 'trading-desk[mcp]'
+#
+# `mcp>=2` is not a guess: FastMCP was renamed MCPServer in 2.0, so v1 code does not import
+# and a floor below 2 would install an SDK this module cannot use.
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+
 [project.urls]
 Homepage = "https://github.com/IngTian/trading-desk"
 Repository = "https://github.com/IngTian/trading-desk"
@@ -41,7 +53,7 @@ Issues = "https://github.com/IngTian/trading-desk/issues"
 # first time this project was made installable. CI therefore uses `uv sync` rather than
 # daylogs' `pip install -e '.[dev]'`; one declaration that cannot drift from a second.
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "mcp>=2,<3"]
 
 # THE POINT OF INSTALLING THIS: you type `desk`.
 #
@@ -62,6 +74,11 @@ dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6"]
 desk = "desk.__main__:main"
 desk-migrate = "desk.migrate:main"
 desk-check = "desk.check:cli"
+# `desk-mcp` SPEAKS MCP OVER STDIO and is READ-ONLY -- see desk/mcp.py for why that is the
+# whole design rather than a first step. It is listed unconditionally because a console
+# script costs nothing when its extra is absent: running it without `[mcp]` installed fails
+# with a plain ModuleNotFoundError naming `mcp`, which is the right error.
+desk-mcp = "desk.mcp:main"
 
 [tool.setuptools.packages.find]
 include = ["desk*"]
