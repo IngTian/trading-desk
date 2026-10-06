@@ -141,7 +141,7 @@ def check(path: Path) -> int:
     # not a well-formed book: a non-database, a truncated file, or a book predating
     # the schema_version table.
     try:
-        live = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        live = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
         a = fingerprint(live)
     except sqlite3.DatabaseError as exc:
         print(f"FAIL: {path} is not a readable SQLite database — {exc}")
@@ -210,7 +210,12 @@ def upgrade(path: Path, *, note: str, apply: bool = False) -> int:
     if not path.exists():
         print(f"FAIL: no book at {path}")
         return 1
-    live = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # as_uri() for the reason in desk/mcp.py -- and here the stakes are higher: an
+    # unescaped `?` in the path made this open a NEW EMPTY file, so `was` came back None,
+    # `old_tables` was empty, the dry run announced all 16 existing tables as "new", the
+    # THIS DROPS DATA block never fired, the copy carried zero rows, and the swap below put
+    # the empty rebuild over the real book while printing "upgraded" and exiting 0.
+    live = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     try:
         was = live.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
     except sqlite3.OperationalError:
@@ -268,7 +273,10 @@ def upgrade(path: Path, *, note: str, apply: bool = False) -> int:
 
     # ---- copy every shared table, column intersection ---------------------
     out.execute("PRAGMA foreign_keys = OFF")
-    out.execute(f"ATTACH DATABASE '{path}' AS old")
+    # BOUND, NOT INTERPOLATED. As a SQL literal, a path containing an apostrophe --
+    # `~/Nat's books/hub.db` -- aborted the upgrade here with a raw syntax error, after the
+    # rebuild had been created and before anything was copied.
+    out.execute("ATTACH DATABASE ? AS old", (str(path),))
     copied = {}
     for t in sorted(new_tables & old_tables):
         cols = [c for c in _table_columns(out, t) if c in _table_columns(live, t)]
@@ -301,6 +309,19 @@ def upgrade(path: Path, *, note: str, apply: bool = False) -> int:
         print(f"\n  REFUSING TO SWAP: integrity_check={integrity}, "
               f"{len(problems)} problem(s). The rebuilt book is at {target} for "
               f"inspection; the original is untouched.")
+        return 1
+
+    # NOTHING COPIED MEANS NOTHING TO SWAP, and this guard is the one that would have
+    # contained the URI bug above rather than merely fixing it. If the source opened as an
+    # empty database -- a mis-escaped path, a truncated file, a book from the future with no
+    # tables in common -- every check above passes vacuously: no rows to mismatch, no columns
+    # to lose, integrity_check "ok" on an empty file. The swap then replaces a real book with
+    # a blank one and prints "upgraded". A rebuild that carried no rows at all is never what
+    # anyone meant.
+    if not copied or not any(copied.values()):
+        print(f"\n  REFUSING TO SWAP: the rebuild carried no rows at all, which means the "
+              f"source read as empty. The original is untouched; the rebuild is at {target} "
+              f"for inspection. Check that {path} is really a book.")
         return 1
 
     keep = path.with_suffix(f".pre-v{SCHEMA_VERSION}.db")

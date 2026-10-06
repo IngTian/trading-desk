@@ -29,10 +29,8 @@ a server, and keeping them apart is what lets `mcp` be an optional extra: a plai
 """
 from __future__ import annotations
 
-import io
 import json
 import sqlite3
-from contextlib import redirect_stdout
 from typing import Any
 
 from . import book, config
@@ -51,7 +49,10 @@ def _ro() -> sqlite3.Connection:
         raise FileNotFoundError(
             f"no book at {path}. Create one with `desk-migrate --new`, or set "
             f"$TRADING_DESK_BOOK to an existing one.")
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    # `as_uri()`, NOT an f-string: a path containing `?` or `#` makes SQLite parse the
+    # query early and SILENTLY DISCARD mode=ro, handing back a WRITABLE connection to a
+    # different, newly created file. Measured, not theorised -- CREATE TABLE succeeded.
+    con = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     # Foreign keys are irrelevant to a reader, but the row factory is not: desk/book.py reads
     # every column BY NAME, and a plain tuple factory makes it raise "tuple indices must be
@@ -227,17 +228,24 @@ def build_server() -> Any:
     def attribution() -> str:
         from . import check as bookcheck
         con = _ro()
-        buf = io.StringIO()
+        # A SINK, NOT redirect_stdout, and this file got that wrong first time round. The
+        # comment here used to claim redirecting was safe "because this runs on the server's
+        # own thread with nothing else printing". It does not: the SDK dispatches each call as
+        # its own task and runs sync tool bodies on worker threads. Six concurrent calls
+        # returned five different lengths, one of them the string "attribution printed
+        # nothing" -- a false answer about the one thing this server exists to report -- and
+        # sys.stdout was left replaced for the life of the process.
+        #
+        # A lock would only narrow that window. desk/prices.py made the same mistake and the
+        # same fix; check.attribution takes `emit` now for exactly this caller.
+        lines: list[str] = []
         try:
-            # redirect_stdout IS SAFE HERE and is not in the desk: this runs on the server's
-            # own thread with nothing else printing, whereas the TUI called it from a worker
-            # while a second fetch could be printing, and sys.stdout is process-global. See
-            # desk/prices.py's `emit`.
-            with redirect_stdout(buf):
-                bookcheck.attribution(con)
+            bookcheck.attribution(con, emit=lines.append)
         finally:
             con.close()
-        return buf.getvalue() or "attribution printed nothing, which it explains above"
+        # NO "printed nothing" FALLBACK. An empty capture was a symptom of the bug above, and
+        # paraphrasing it as a result is how a model was handed a confident non-answer.
+        return "\n".join(lines)
 
     @server.tool(
         name="integrity_check",

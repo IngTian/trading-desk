@@ -608,12 +608,21 @@ class DeskApp(App):
         self._fetch(announce=False)
 
     def _fetch(self, *, announce: bool) -> None:
+        # SET HERE, ON THE UI THREAD, and before the worker starts. A scripted patch moved
+        # this into _fetch_worker, where it would have been set on the WORKER thread -- after
+        # _fetch returned, so _tick's guard could still pass and start a second run, which is
+        # the overlap this whole commit exists to prevent.
         self.fetching = True
         self.refresh_all()          # so the header can say "fetching…"
         if announce:
             self.notify("fetching marks and rates…", timeout=3)
         self._fetch_worker(announce)
 
+    # THE LATCH IS CLEARED IN _fetch_done, which only runs if the worker reports back. If
+    # the worker dies -- and before the BaseException fix above, a missing book killed it --
+    # `self.fetching` stayed True, both guards returned early forever, and the dashboard read
+    # "fetching…" for the rest of the session with marks that never refreshed. A worker that
+    # ends any other way must still clear it.
     @work(thread=True, exclusive=True, group="fetch")
     def _fetch_worker(self, announce: bool) -> None:
         """OFF THE UI THREAD, because this one is on a timer now.
@@ -773,7 +782,20 @@ class DeskApp(App):
             # prices primary key is (base, quote, kind, on_date) -- so a window costs
             # no rows and covers a long weekend, which a 1-day window does not.
             mod.main(dry=False, days=7, emit=lines.append)
-        except Exception as exc:   # noqa: BLE001 - handed back, never swallowed
+        except BaseException as exc:   # noqa: BLE001 - handed back, never swallowed
+            # BaseException, NOT Exception, and that is a bug fix rather than breadth for its
+            # own sake: prices._require_book raises SystemExit when the book is missing, and
+            # SystemExit does not derive from Exception. It therefore left this worker, passed
+            # through Textual's own `except Exception`, and came out of the event loop -- the
+            # desk vanished with a raw traceback and took the open prompt's contents with it.
+            #
+            # The trigger is ordinary. config.py's own note says the book lives in a synced
+            # folder: iCloud evicts it to a placeholder, a backup renames it, a volume
+            # detaches. The TUI's connection stays valid on the open inode so the desk keeps
+            # working, and then the 30-second poll fires.
+            #
+            # A worker thread never sees KeyboardInterrupt, so widening this far costs
+            # nothing a narrower clause would have kept.
             return "\n".join(lines), f"{type(exc).__name__}: {exc}"
         return "\n".join(lines), None
 

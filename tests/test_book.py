@@ -16,6 +16,7 @@ which is what makes it safe to run against live data at all.
 from __future__ import annotations
 
 import os
+import pathlib
 import sqlite3
 import sys
 
@@ -36,7 +37,7 @@ def con():
         pytest.skip(
             f"no book at {DB}. This file audits a real record; the code tests live "
             f"in test_desk.py and need no data. Set TRADING_DESK_BOOK to audit one.")
-    c = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)   # read-only: an audit
+    c = sqlite3.connect(f"{pathlib.Path(DB).as_uri()}?mode=ro", uri=True)   # read-only: an audit
     # sqlite3.Row, because desk/book.py reads columns BY NAME. book.connect() sets this and
     # this fixture did not, so calling any book.* function from an audit raised
     # "tuple indices must be integers" -- a fixture defect that looked like a library one.

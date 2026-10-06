@@ -9,6 +9,7 @@ destructive keys without touching book/hub.db.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import datetime as dt
 import json
@@ -5477,3 +5478,126 @@ async def test_the_mcp_server_tells_a_model_what_null_means(tmp_path, monkeypatc
     assert "never means zero" in instructions or "never means parity" in instructions
     assert "currency" in instructions, "the native-vs-home rule is not stated"
     assert "cannot write" in instructions, "a model is not told the server is read-only"
+
+
+# --------------------------------------------------------------------------- #
+# the three CRITICALs an adversarial audit found in this branch, 2026-10-06
+# --------------------------------------------------------------------------- #
+async def test_concurrent_attribution_calls_do_not_shred_each_other(tmp_path, monkeypatch):
+    """I REINTRODUCED THE BUG I HAD JUST FIXED, forty lines into a new file.
+
+    desk/prices.py lost contextlib.redirect_stdout because it replaces PROCESS-GLOBAL
+    sys.stdout and a worker thread must not do that. desk/mcp.py then used it anyway, with a
+    comment asserting it was safe "because this runs on the server's own thread with nothing
+    else printing" -- a premise I never tested, and which the SDK falsifies: it dispatches
+    each tools/call as its own task and runs sync tool bodies on worker threads.
+
+    Measured before the fix, with six concurrent calls: five different response lengths, one
+    of them the literal string "attribution printed nothing" (a false answer about the one
+    thing this server exists to report), one response carrying six panels concatenated, 343
+    bytes escaped to the terminal, and sys.stdout left as a StringIO for the life of the
+    process. A truncated panel can lose the STALE: line or the UNEXPLAINED residual, so the
+    model is handed a reconciliation of two different days and calls it clean.
+
+    Turns red if desk/mcp.py goes back to redirect_stdout, or check.attribution loses `emit`.
+    """
+    import io as _io
+
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+
+    escaped = []
+
+    class Watch(_io.StringIO):
+        def write(self, s):
+            escaped.append(s)
+            return len(s)
+
+    real = sys.stdout
+    sys.stdout = Watch()
+    try:
+        results = await asyncio.gather(
+            *[server.call_tool("attribution", {}) for _ in range(6)])
+    finally:
+        left = sys.stdout
+        sys.stdout = real
+
+    texts = [r.content[0].text for r in results]
+    assert not escaped, (
+        f"{sum(len(s) for s in escaped)} bytes escaped to stdout -- on a real server that is "
+        f"the client's log file")
+    assert left.__class__ is Watch, "sys.stdout was replaced and not restored"
+    assert len(set(len(t) for t in texts)) == 1, (
+        f"six concurrent calls returned {len(set(len(t) for t in texts))} different lengths "
+        f"{sorted(set(len(t) for t in texts))} -- the panels interleaved")
+    for t in texts:
+        assert t.count("where the P&L came from") == 1, (
+            f"a response carried {t.count('where the P&L came from')} panels")
+        assert "printed nothing" not in t, "a call was told the panel printed nothing"
+
+
+def test_a_book_path_with_a_question_mark_is_still_read_only(tmp_path, monkeypatch):
+    """THE READ-ONLY BYPASS, and the module docstring calls mode=ro "the whole security model".
+
+    `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` does not escape the path, so SQLite
+    parses a `?` in it as the start of the query string, treats the rest as an unrecognised
+    key and SILENTLY IGNORES IT -- then creates a brand-new WRITABLE file at the truncated
+    path. Measured: with a book at `hub?v2.db`, the connection opened a new file called `hub`,
+    saw no trades table, and `CREATE TABLE` SUCCEEDED. `path.exists()` passes on the real
+    file, so nothing warns.
+
+    `Path.as_uri()` percent-encodes `?`, `#` and `%`.
+
+    Turns red if _ro() goes back to an f-string URI.
+    """
+    pytest.importorskip("mcp", reason="the mcp extra is not installed")
+    from desk import mcp as deskmcp
+
+    odd = tmp_path / "hub?v2.db"
+    seed.build(odd).close()
+    monkeypatch.setenv("TRADING_DESK_BOOK", str(odd))
+
+    con = deskmcp._ro()
+    try:
+        opened = con.execute("PRAGMA database_list").fetchall()[0][2]
+        assert pathlib.Path(opened) == odd, (
+            f"opened {opened!r}, not the book at {odd!r} -- the URI was mis-parsed")
+        assert con.execute("SELECT COUNT(*) FROM trades").fetchone()[0] > 0, (
+            "the connection sees no trades, so it opened the wrong file")
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("CREATE TABLE wrote(x)")
+    finally:
+        con.close()
+
+
+def test_an_upgrade_that_copied_nothing_refuses_to_swap(tmp_path, capsys, monkeypatch):
+    """"COPIED NOTHING" MUST NEVER REPLACE A BOOK, and every check above it passes vacuously.
+
+    If the source opens as an empty database -- a mis-escaped path, a truncated file -- then
+    there are no rows to mismatch, no columns to report losing, and integrity_check says "ok"
+    on the empty rebuild. The swap then put a blank book over the real one and printed
+    "upgraded", exiting 0. Recoverable only from the .pre-vN.db backup, and only if noticed.
+
+    Turns red if the `not any(copied.values())` guard is removed from migrate.upgrade().
+    """
+    from desk import migrate
+
+    book_path = tmp_path / "hub.db"
+    seed.build(book_path).close()
+    # Make the source read as empty the way the URI bug did: no tables in common.
+    con = sqlite3.connect(book_path)
+    con.execute("PRAGMA writable_schema = ON")
+    for (t,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'").fetchall():
+        con.execute(f'DROP TABLE IF EXISTS "{t}"')
+    con.commit()
+    con.close()
+
+    before = book_path.read_bytes()
+    rc = migrate.upgrade(book_path, note="test", apply=True)
+    out = capsys.readouterr().out
+
+    assert rc == 1, f"an upgrade that copied nothing returned {rc}, so it swapped"
+    assert "REFUSING TO SWAP" in out, out[-400:]
+    assert book_path.read_bytes() == before, "the original book was replaced anyway"
