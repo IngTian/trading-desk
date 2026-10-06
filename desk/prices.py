@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import pathlib
 import sqlite3
@@ -161,6 +162,13 @@ def fetch_one(symbol: str, since_epoch: int) -> list[dict]:
     for ts, close in zip(stamps, closes, strict=True):
         if close is None:
             continue          # a holiday or a hole; a null close is not a zero price
+        # NOT FINITE, NOT A PRICE. json.load accepts the literals Infinity and NaN by
+        # default, and `CHECK (amount > 0)` passes for Infinity -- so one odd payload could
+        # put a non-finite REAL in `prices`, and from there into every derived figure and
+        # into the MCP server's JSON, where `Infinity` is not even valid JSON. desk/parse.py
+        # already guards the hand-typed path for exactly this reason.
+        if not math.isfinite(close):
+            continue
         out.append({
             "date": dt.datetime.fromtimestamp(
                 ts + offset, dt.UTC).strftime("%Y-%m-%d"),

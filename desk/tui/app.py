@@ -781,7 +781,17 @@ class DeskApp(App):
             # 7 DAYS, not 1. Same-day refetches REPLACE rather than append -- the
             # prices primary key is (base, quote, kind, on_date) -- so a window costs
             # no rows and covers a long weekend, which a 1-day window does not.
-            mod.main(dry=False, days=7, emit=lines.append)
+            # THE RETURN CODE IS THE POINT. prices.main counts per-symbol failures and
+            # returns 1 if any were skipped; discarding it meant a poll in which EVERY symbol
+            # failed reported success, so the header went on reading "marked 1 day ago" with
+            # no warning until the marks were a week old. The collected lines already name
+            # each failure, which is what a toast needs.
+            rc = mod.main(dry=False, days=7, emit=lines.append)
+            if rc:
+                failed = [ln.strip() for ln in lines if ln.strip().startswith("!")]
+                return "\n".join(lines), (
+                    "; ".join(failed)[:200] if failed
+                    else "some symbols could not be priced")
         except BaseException as exc:   # noqa: BLE001 - handed back, never swallowed
             # BaseException, NOT Exception, and that is a bug fix rather than breadth for its
             # own sake: prices._require_book raises SystemExit when the book is missing, and

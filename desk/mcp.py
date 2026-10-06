@@ -36,6 +36,38 @@ from typing import Any
 from . import book, config
 
 
+def _fail(message: str):
+    """Raise so the CLIENT sees `message`, not the SDK's placeholder.
+
+    THE SDK REPLACES AN UNCAUGHT TOOL EXCEPTION WITH THE BARE STRING "Error executing tool
+    <name>". Verified over real stdio: `book_info` against a missing book returned exactly
+    that and nothing else, while the remediation text went to stderr where no model can read
+    it. So 'no book', 'locked', 'corrupt', 'evicted by iCloud' and 'schema older than the
+    code' were one indistinguishable string -- in a server whose entire purpose is telling
+    someone what is wrong.
+    """
+    from mcp.server.mcpserver.exceptions import ToolError
+    raise ToolError(message)
+
+
+def _answers(fn):
+    """Turn a database failure into something the client can read. See _fail.
+
+    sqlite3.Error and OSError only: a bug in this module should still surface as a traceback
+    in the server log rather than being dressed up as a user-facing explanation.
+    """
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        try:
+            return fn(*a, **k)
+        except (sqlite3.Error, OSError) as exc:
+            _fail(f"{type(exc).__name__} reading {config.book_path()}: {exc}")
+
+    return wrapper
+
+
 def _ro() -> sqlite3.Connection:
     """A read-only connection to the resolved book.
 
@@ -46,9 +78,13 @@ def _ro() -> sqlite3.Connection:
     """
     path = config.book_path()
     if not path.exists():
-        raise FileNotFoundError(
-            f"no book at {path}. Create one with `desk-migrate --new`, or set "
-            f"$TRADING_DESK_BOOK to an existing one.")
+        # _fail, NOT raise FileNotFoundError: the SDK would turn that into "Error executing
+        # tool book_info" and drop every word of this. An MCP client also launches the server
+        # with a stripped environment, so a $TRADING_DESK_BOOK set in the user's shell is
+        # invisible here -- which makes this the single most likely error a new user hits, and
+        # the one that most needs to say what to do.
+        _fail(f"no book at {path} (chosen by: {config.book_source()}). Create one with "
+              f"`desk-migrate --new`, or set $TRADING_DESK_BOOK for this server's process.")
     # `as_uri()`, NOT an f-string: a path containing `?` or `#` makes SQLite parse the
     # query early and SILENTLY DISCARD mode=ro, handing back a WRITABLE connection to a
     # different, newly created file. Measured, not theorised -- CREATE TABLE succeeded.
@@ -115,6 +151,7 @@ def build_server() -> Any:
         name="book_info",
         description="Which book is open, its schema version, and row counts. Start here.",
         annotations=ro)
+    @_answers
     def book_info() -> str:
         con = _ro()
         try:
@@ -130,7 +167,7 @@ def build_server() -> Any:
                 "counts": counts,
                 "newest_balance_as_of": con.execute(
                     "SELECT MAX(as_of) FROM account_snapshots").fetchone()[0],
-            }, indent=2)
+            }, indent=2, allow_nan=False)
         finally:
             con.close()
 
@@ -139,6 +176,7 @@ def build_server() -> Any:
         description=("Open legs. `*_native` figures are in the leg's own currency; "
                      "`*_base` are in the home currency. null means not recorded."),
         annotations=ro)
+    @_answers
     def positions() -> str:
         con = _ro()
         try:
@@ -151,7 +189,7 @@ def build_server() -> Any:
                 "pnl_native": _money(p.pnl_native), "pnl_pct": _pct(p.pnl_pct_native),
                 "cost_base": _money(p.cost_base), "value_base": _money(p.value_base),
                 "unconfirmed_fills": p.unconfirmed_fills,
-            } for p in book.positions(con)], indent=2)
+            } for p in book.positions(con)], indent=2, allow_nan=False)
         finally:
             con.close()
 
@@ -161,6 +199,7 @@ def build_server() -> Any:
                      "home currency), market value, and P&L. `filled_pct` is spent over "
                      "allocation."),
         annotations=ro)
+    @_answers
     def bets() -> str:
         con = _ro()
         try:
@@ -176,7 +215,7 @@ def build_server() -> Any:
                 "closed_legs": b.closed_legs,
                 "legs_that_cannot_be_priced": b.unpriced_legs,
                 "note": b.note,
-            } for b in book.bets(con)], indent=2)
+            } for b in book.bets(con)], indent=2, allow_nan=False)
         finally:
             con.close()
 
@@ -184,6 +223,7 @@ def build_server() -> Any:
         name="closed_legs",
         description="Finished round trips: what each cost, what it returned, and when.",
         annotations=ro)
+    @_answers
     def closed_legs() -> str:
         con = _ro()
         try:
@@ -191,7 +231,7 @@ def build_server() -> Any:
                 "trade_id": c.trade_id, "ticker": c.ticker, "bet_id": c.bet_id,
                 "currency": c.currency, "opened": c.opened, "closed": c.closed,
                 "cost": _money(c.cost), "realised": _money(c.realised),
-            } for c in book.closed_legs(con)], indent=2)
+            } for c in book.closed_legs(con)], indent=2, allow_nan=False)
         finally:
             con.close()
 
@@ -201,6 +241,7 @@ def build_server() -> Any:
                      "entirely (null) rather than computed partially when a leg cannot be "
                      "valued."),
         annotations=ro)
+    @_answers
     def net_worth() -> str:
         con = _ro()
         try:
@@ -212,7 +253,13 @@ def build_server() -> Any:
                 "positions_at_mark": _money(n.positions),
                 "contributed": _money(n.contributed),
                 "parked_in_money_market": _money(book.parked(con)),
-            }, indent=2)
+                # WHY, not just null. book.net() builds `unknown` precisely to say what is
+                # missing -- ('no USD->CAD rate recorded',), or ('no mark: AEM.TO',) naming
+                # the ticker to go and fetch -- and dropping it left the model, which these
+                # instructions tell to "say it is unknown", with nothing actionable to say.
+                "why_these_are_null": list(n.unknown),
+                "marks_as_of": n.as_of,
+            }, indent=2, allow_nan=False)
         finally:
             con.close()
 
@@ -225,6 +272,7 @@ def build_server() -> Any:
                      "Reports STALE when the balance predates recent fills, in which case "
                      "the residual compares two different days and means nothing."),
         annotations=ro)
+    @_answers
     def attribution() -> str:
         from . import check as bookcheck
         con = _ro()
@@ -253,23 +301,39 @@ def build_server() -> Any:
                      "see, like a closed trade still holding shares. Returns the failures, "
                      "or says all of them hold."),
         annotations=ro)
+    @_answers
     def integrity_check() -> str:
         from . import check as bookcheck
         con = _ro()
         try:
-            failures = []
-            for name, query, why in bookcheck.INVARIANTS:
-                rows = query(con) if callable(query) else con.execute(query).fetchall()
-                if rows:
-                    failures.append({
-                        "invariant": name, "why_it_matters": why,
-                        "offending": [r if isinstance(r, str) else r[0] for r in rows][:20],
-                    })
+            # BOTH GROUPS. Running only INVARIANTS made this answer "all hold" on a book
+            # that declares an unresolved hole, because that check lives in WARNINGS -- and
+            # check.py's own rationale for it is "A store that hides its own holes is worse
+            # than no store". The other missed warning, `_overspent`'s "spend NOT
+            # MEASURABLE", is the most reconciliation-relevant string the checker produces,
+            # which is exactly what a model is here to read.
+            failures, attention = [], []
+            for group, bucket in ((bookcheck.INVARIANTS, failures),
+                                  (bookcheck.WARNINGS, attention)):
+                for name, query, why in group:
+                    rows = (query(con) if callable(query)
+                            else con.execute(query).fetchall())
+                    if rows:
+                        bucket.append({
+                            "name": name, "why_it_matters": why,
+                            "offending": [r if isinstance(r, str) else r[0]
+                                          for r in rows][:20],
+                        })
             return json.dumps({
                 "invariants_checked": len(bookcheck.INVARIANTS),
+                "warnings_checked": len(bookcheck.WARNINGS),
                 "failures": failures,
-                "verdict": "all hold" if not failures else f"{len(failures)} failed",
-            }, indent=2)
+                # SEPARATE FROM failures: going past your own plan is a decision, not a
+                # corrupt record. check.py makes the same split for the same reason.
+                "attention": attention,
+                "verdict": ("all invariants hold" if not failures
+                            else f"{len(failures)} invariant(s) FAILED"),
+            }, indent=2, allow_nan=False)
         finally:
             con.close()
 
