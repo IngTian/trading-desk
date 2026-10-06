@@ -87,14 +87,46 @@ pip install trading-desk        # or: uv tool install trading-desk
 desk                            # it offers to create a book, and says where
 ```
 
-Three commands are installed. `desk` is the whole tool; the other two exist because a book
-has to come from somewhere and has to be checkable:
+Four commands are installed. `desk` is the whole tool; the next two exist because a book
+has to come from somewhere and has to be checkable, and `desk-mcp` needs the optional extra
+below before it will run:
 
 | | |
 |---|---|
 | `desk` | the TUI. Everything is done in here |
 | `desk-migrate --new` | create a book. `--check` compares one against the schema, `--upgrade` rebuilds it at the current version carrying every row |
 | `desk-check` | the invariants, then an attribution panel. `--quiet` for invariants only; exits non-zero if one fails |
+
+## Handing the book to a model
+
+```sh
+pip install 'trading-desk[mcp]'
+desk-mcp                        # speaks MCP over stdio
+```
+
+`desk-mcp` exposes the book to an MCP client — positions, bets, closed round trips, derived
+net worth, the invariants, and the attribution panel. The task it exists for is
+reconciliation: give a model your broker statement, let it compare the two, and have it tell
+you what disagrees.
+
+**It is read-only, and that is the design rather than a first step.** Everything it exposes
+is *derived*, so being wrong about it costs a confusing answer. A write would be different in
+kind: an invented fill is a fabricated trade, and unlike a wrong balance nothing downstream
+contradicts it — the book would simply believe it, which is the confident-wrong-figure failure
+every rule here exists to prevent. So the model reads and reports; a human records.
+
+Read-only **by construction**: the connection is opened `mode=ro`, so SQLite refuses a write
+and a bug in a tool raises instead of corrupting. The tools also carry `read_only_hint` for
+the client's benefit — one of those can be forgotten in review and the other cannot, and
+there is a test for each.
+
+The server's instructions tell the model the two rules it would otherwise break: that `null`
+means **not recorded** and never zero, and that rows are in their own currency while only
+totals are in the home currency. A reader that hands figures to something eager to be helpful
+is exactly where those get undone.
+
+`mcp` is an optional extra, so a plain `pip install trading-desk` still pulls in nothing but
+Textual.
 
 **The first run offers to create a book**, printing the path it would use and what chose
 that path before it writes anything — four things can decide it, and a mistyped

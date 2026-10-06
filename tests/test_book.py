@@ -16,6 +16,7 @@ which is what makes it safe to run against live data at all.
 from __future__ import annotations
 
 import os
+import pathlib
 import sqlite3
 import sys
 
@@ -36,7 +37,7 @@ def con():
         pytest.skip(
             f"no book at {DB}. This file audits a real record; the code tests live "
             f"in test_desk.py and need no data. Set TRADING_DESK_BOOK to audit one.")
-    c = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)   # read-only: an audit
+    c = sqlite3.connect(f"{pathlib.Path(DB).as_uri()}?mode=ro", uri=True)   # read-only: an audit
     # sqlite3.Row, because desk/book.py reads columns BY NAME. book.connect() sets this and
     # this fixture did not, so calling any book.* function from an audit raised
     # "tuple indices must be integers" -- a fixture defect that looked like a library one.
@@ -222,44 +223,32 @@ def test_a_currency_conversion_never_pays_better_than_the_market(con):
             f"retail conversion — check for a transposed digit")
 
 
-def test_the_book_can_account_for_its_own_pnl(con):
-    """THE invariant this whole attribution exists to assert.
-
-    realised + income + unrealised + fx  ==  balance - contributions
-
-    Generic by construction: it reads every figure from the book and pins none of
-    them, so it keeps testing the arithmetic after the next correction instead of
-    restating the last one. The tolerance is a FRACTION of contributions rather
-    than an absolute, because the irreducible part is FX and hand-read totals --
-    A broker quotes a different USDCAD than Yahoo does, and the residual scales
-    with the USD sleeve, not with anything the book controls.
-    """
-    import contextlib
-    import io
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        bookcheck.attribution(con)
-    out = buf.getvalue()
-    if "UNEXPLAINED" not in out:
-        pytest.skip("attribution declined to print a residual, which it explains")
-    if "STALE:" in out:
-        # THE RESIDUAL IS UNDEFINED HERE, so asserting on it is asserting on noise.
-        # attribution() says so itself: "The residual below compares a <date> balance
-        # against today's positions. Re-read the balance." Trades closed today convert
-        # unrealised into realised while the statement still predates them, so the two
-        # sides of the identity are as of different days -- the same both-sides-one-date
-        # rule the loss limit already withholds for. Failing here would train someone to
-        # ignore a red suite the day after they trade, which is the day it matters most.
-        pytest.skip("fills are dated after the newest balance, so the residual compares "
-                    "two different days. Record a balance (press b) and re-run.")
-    gap = float(out.split("UNEXPLAINED")[1].split()[0].replace(",", ""))
-    cap = con.execute("SELECT COALESCE(SUM(amount),0) FROM flows").fetchone()[0]
-    assert cap, "no contributions, so there is no denominator"
-    assert abs(gap) < 0.005 * cap, (
-        f"the book cannot account for {gap:+,.2f} of its own P&L, which is "
-        f"{abs(gap)/cap:.3%} of contributions. Either a fill, a fee or a conversion "
-        f"is unrecorded.\n{out}")
-
+# test_the_book_can_account_for_its_own_pnl WAS HERE, and it had not run in a month.
+#
+#     realised + income + unrealised + fx  ==  balance - contributions
+#
+# THE BEST INVARIANT IN THIS FILE, and the only one that could catch a fill that was never
+# recorded -- every other check asks whether the book agrees with ITSELF, and a book missing a
+# fill is perfectly self-consistent. This one compared against an outside number.
+#
+# It could not run. Its body sat behind `if "STALE:" in out: skip(...)`, and attribution()
+# prints STALE whenever a fill is dated after the newest balance snapshot. NOTHING IN THE
+# SHIPPED CODE WRITES account_snapshots -- no INSERT or UPDATE outside the fixtures -- so the
+# newest snapshot is whatever was last typed into sqlite3 by hand: 2026-09-07 here, with 25 of
+# 49 fills after it. The skip condition could not become false by using the tool.
+#
+# Its own skip message said "Record a balance (press b)", and `b` moves a leg between bets. So
+# it named a key that does something else, to do a thing the desk cannot do, to reach an
+# assertion that never fired.
+#
+# The author, 2026-10-06: "well if you skip a test why dont you delete it." Same argument that
+# removed tests/schema_attack.sh -- a file that looks like coverage and is not is worse than no
+# file, because a green suite then reads as a checked property.
+#
+# attribution() ITSELF STAYS and now has a consumer: desk-mcp exposes it, which is how the
+# reconciliation is meant to happen -- hand a model a statement and have it compare. If a way
+# to record a balance is ever added, this test is worth restoring; it was a good test with no
+# way to reach its own body.
 
 def test_no_view_divides_by_a_single_account_snapshot(con):
     """The one-sleeve-is-the-whole-book bug, as a grep the schema enforces.

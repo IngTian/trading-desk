@@ -362,7 +362,19 @@ def panel(con):
     attribution(con)
 
 
-def attribution(con):
+def attribution(con, emit=None):
+    """Where the P&L came from, and what the book cannot account for.
+
+    `emit` TAKES THE OUTPUT INSTEAD OF print(), for the reason prices.main carries the same
+    parameter: contextlib.redirect_stdout replaces PROCESS-GLOBAL sys.stdout, so capturing
+    this function that way is only safe when nothing else in the process can print. desk/mcp.py
+    assumed that and was wrong -- the MCP SDK runs sync tool bodies on worker threads and
+    dispatches calls concurrently, which shredded six overlapping panels and left sys.stdout
+    replaced for the life of the server.
+
+    So a caller that wants the text asks for it. The CLI passes nothing and keeps printing.
+    """
+    say = emit if emit is not None else print
     """How much of the P&L the book can EXPLAIN, leg by leg.
 
     The balance says what the portfolio is worth. This says where that came from,
@@ -390,11 +402,11 @@ def attribution(con):
     # balance, and counting it manufactures a loss of exactly its own size.
     cap = None
 
-    print("\n  where the P&L came from")
+    say("\n  where the P&L came from")
     if asof is None:
-        print("      no balance recorded, so there is nothing to attribute")
+        say("      no balance recorded, so there is nothing to attribute")
         return
-    print(f"      {'valued as of':<44}{asof:>12}")
+    say(f"      {'valued as of':<44}{asof:>12}")
     # PER CURRENCY, because `flows.amount` is native and this figure is compared to a CAD
     # balance. One blind SUM added a USD deposit at par: a single US$10,000 contribution
     # against a correct C$13,800 statement made the checker print "UNEXPLAINED +3,800.00",
@@ -419,9 +431,9 @@ def attribution(con):
         "       (SELECT COUNT(*) FROM income WHERE on_date > ?)", (asof, asof)
     ).fetchone()
     if any(after):
-        print(f"        STALE: {after[0]} fill(s) and {after[1]} income row(s) are "
+        say(f"        STALE: {after[0]} fill(s) and {after[1]} income row(s) are "
               f"dated after this balance.")
-        print(f"        The residual below compares a {asof} balance against today's "
+        say(f"        The residual below compares a {asof} balance against today's "
               f"positions. Re-read the balance.")
 
     # ---- the rate, AS OF that date. No par fallback: an unconvertible USD sleeve
@@ -452,9 +464,9 @@ def attribution(con):
         "   OR EXISTS (SELECT 1 FROM fx_conversions "
         "                WHERE to_ccy='USD' OR from_ccy='USD')").fetchone() is not None
     if fxrow is None and has_usd:
-        print("      the USD sleeve cannot be converted: no USD/CAD rate on or "
+        say("      the USD sleeve cannot be converted: no USD/CAD rate on or "
               "before this date")
-        print("      so no attribution is printed -- a par rate would be wrong by "
+        say("      so no attribution is printed -- a par rate would be wrong by "
               "the whole FX factor")
         return
     # A THIRD CURRENCY WOULD BE BOOKED AT PAR. to_cad below returns anything that is not
@@ -467,15 +479,15 @@ def attribution(con):
         "SELECT DISTINCT currency FROM trades "
         "WHERE currency NOT IN ('CAD', 'USD') ORDER BY currency")]
     if odd:
-        print(f"      no attribution is printed: {', '.join(odd)} "
+        say(f"      no attribution is printed: {', '.join(odd)} "
               f"{'legs are' if len(odd) > 1 else 'leg is'} in a currency this "
               f"attribution cannot convert")
-        print("      valuing them at par would be wrong by the whole FX factor")
+        say("      valuing them at par would be wrong by the whole FX factor")
         return
 
     fx = fxrow[0] if fxrow else 1.0
     if fxrow and fxrow[1] != asof:
-        print(f"        rate is {fxrow[1]}'s, the newest on or before {asof}")
+        say(f"        rate is {fxrow[1]}'s, the newest on or before {asof}")
 
     # Every USD amount that passes through here is multiplied by ONE rate, so the
     # total of them is the residual's exact sensitivity to that rate: move fx by one
@@ -496,7 +508,7 @@ def attribution(con):
     cap = sum(to_cad(amt, ccy) for ccy, amt in cap_native)
     later = sum(to_cad(amt, ccy) for ccy, amt in later_native)
     if later:
-        print(f"        {later:+,.2f} of contributions arrived AFTER this date and are "
+        say(f"        {later:+,.2f} of contributions arrived AFTER this date and are "
               f"not counted in it")
 
     # ---- realised, per leg, average cost
@@ -588,33 +600,33 @@ def attribution(con):
         derived = derived or src == "derived"
 
     explained = realised + inc + unreal + fxterm
-    print(f"      {'realised on closed and trimmed legs':<44}{realised:>+12,.2f}")
-    print(f"      {'dividends and lending income':<44}{inc:>+12,.2f}")
-    print(f"      {'unrealised on open legs at the mark':<44}{unreal:>+12,.2f}")
+    say(f"      {'realised on closed and trimmed legs':<44}{realised:>+12,.2f}")
+    say(f"      {'dividends and lending income':<44}{inc:>+12,.2f}")
+    say(f"      {'unrealised on open legs at the mark':<44}{unreal:>+12,.2f}")
     if fxterm or missing_fx or unvaluable:
-        print(f"      {'currency conversion, spread and FX since':<44}{fxterm:>+12,.2f}")
+        say(f"      {'currency conversion, spread and FX since':<44}{fxterm:>+12,.2f}")
         if derived:
-            print("        BACKED OUT of the sleeve, so the residual does not test it")
+            say("        BACKED OUT of the sleeve, so the residual does not test it")
         if missing_fx:
-            print(f"        {missing_fx} conversion(s) with no destination amount "
+            say(f"        {missing_fx} conversion(s) with no destination amount "
                   f"recorded, so their cost is invisible")
         if unvaluable:
-            print(f"        NOT VALUED, no rate for: {', '.join(sorted(unvaluable))}")
+            say(f"        NOT VALUED, no rate for: {', '.join(sorted(unvaluable))}")
     if odd_ccy:
-        print(f"        income excluded, no rate for: {', '.join(sorted(odd_ccy))}")
-    print(f"      {'':<44}{'-'*12}")
-    print(f"      {'explained':<44}{explained:>+12,.2f}")
+        say(f"        income excluded, no rate for: {', '.join(sorted(odd_ccy))}")
+    say(f"      {'':<44}{'-'*12}")
+    say(f"      {'explained':<44}{explained:>+12,.2f}")
 
     # ---- actual. Refuses the same cross-date pooling panel() refuses: summing
     # sleeves read on different days is not a portfolio total at any moment.
     if not cap:
-        print(f"      {'actual':<44}{'—':>12}   no contributions on or before {asof}")
+        say(f"      {'actual':<44}{'—':>12}   no contributions on or before {asof}")
         return
     if accts != marked:
-        print(f"      {'actual':<44}{'—':>12}   a sleeve has no balance at all")
+        say(f"      {'actual':<44}{'—':>12}   a sleeve has no balance at all")
         return
     if len(set(dates)) > 1:
-        print(f"      {'actual':<44}{'—':>12}   sleeves were read on "
+        say(f"      {'actual':<44}{'—':>12}   sleeves were read on "
               f"{len(set(dates))} different dates ({', '.join(sorted(set(dates)))}), "
               f"so no total is a moment")
         return
@@ -623,9 +635,9 @@ def attribution(con):
                         (asof,)).fetchone()[0]
     actual = total - cap
     gap = actual - explained
-    print(f"      {'actual, balance minus contributions':<44}{actual:>+12,.2f}")
-    print(f"      {'':<44}{'-'*12}")
-    print(f"      {'UNEXPLAINED':<44}{gap:>+12,.2f}")
+    say(f"      {'actual, balance minus contributions':<44}{actual:>+12,.2f}")
+    say(f"      {'':<44}{'-'*12}")
+    say(f"      {'UNEXPLAINED':<44}{gap:>+12,.2f}")
 
     # A residual below its own resolution is not a clean book, it is a number that
     # cannot mean anything. FIVE PIPS of USDCAD is the floor: a broker and Yahoo
@@ -639,10 +651,10 @@ def attribution(con):
         # Printed ALWAYS, not only when the residual is inside it. The number is
         # meaningless without its resolution, and a reader who sees only "+11.93"
         # will read three significant figures into it.
-        print(f"        {abs(gap)/floor*5:.1f} pips of USDCAD on {usd_exposure:,.0f} "
+        say(f"        {abs(gap)/floor*5:.1f} pips of USDCAD on {usd_exposure:,.0f} "
               f"USD of exposure; 5 pips = {floor:,.2f} is the noise floor")
     if abs(gap) <= floor:
-        print("        WITHIN the noise floor — a broker and Yahoo do not quote "
+        say("        WITHIN the noise floor — a broker and Yahoo do not quote "
               "the same rate, and the balance is hand-read")
     elif gap < 0:
         # THE SIGN MATTERS. A positive residual means gains the legs do not account
@@ -650,15 +662,15 @@ def attribution(con):
         # dangerous direction: the legs claim profit the account does not have, so
         # recorded COSTS are incomplete and every per-leg verdict about whether a
         # strategy worked is flattered by exactly that much.
-        print(f"        NEGATIVE: the legs claim {-gap:,.2f} more profit than the "
+        say(f"        NEGATIVE: the legs claim {-gap:,.2f} more profit than the "
               f"account holds.")
-        print("        Costs are missing, not gains. Fees, a conversion, or a loss "
+        say("        Costs are missing, not gains. Fees, a conversion, or a loss "
               "nobody recorded.")
     if incomplete:
-        print(f"        legs with a fill price nobody recorded: "
+        say(f"        legs with a fill price nobody recorded: "
               f"{', '.join(incomplete)}")
     if unpriced:
-        print(f"        open legs with no entry or no mark: "
+        say(f"        open legs with no entry or no mark: "
               f"{', '.join(sorted(set(unpriced)))}")
 
 
