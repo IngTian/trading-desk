@@ -123,6 +123,15 @@ class Position:
     # attribution() already refuses this; positions() used to default it to 1.0.
     fx: float | None
     unconfirmed_fills: int
+    # WHAT THIS LEG'S EXITS HAVE ALREADY REALISED, in its own currency. None means not
+    # knowable (a sale with no recorded price), never zero -- 0.0 means nothing has been sold.
+    #
+    # THE REASON THIS FIELD EXISTS. The author, 2026-11-02: "when i exit, even partially, it
+    # should be shown and recorded. bc, that's giving a verdict to at least part of the trade.
+    # now it only shows a defeat after everything is closed." Until this, a Position carried
+    # only unrealised figures, so a leg that had banked a four-figure loss on a trim showed
+    # nothing about it -- the row reported its unrealised hundreds and stopped there.
+    realised_native: float | None = None
     account: str | None = None
 
     @property
@@ -168,6 +177,13 @@ class Position:
         if self.entry is None or self.fx is None:
             return None
         return self.qty * self.entry * self.fx
+
+    @property
+    def realised_base(self) -> float | None:
+        """Withheld when the rate is missing, like every other `_base` figure here."""
+        if self.realised_native is None or self.fx is None:
+            return None
+        return self.realised_native * self.fx
 
     @property
     def value_base(self) -> float | None:
@@ -659,7 +675,40 @@ def _acb_per_share(fills) -> float | None:
     is the only one of the three that needs no extra recorded data. A sell reduces shares and
     cost in the SAME proportion, which is the whole content of the rule.
     """
-    shares = cost = 0.0
+    walked = _walk_fills(fills)
+    if walked is None:
+        return None
+    shares, cost, _realised = walked
+    return None if shares <= 1e-9 else cost / shares
+
+
+def _walk_fills(fills) -> tuple[float, float, float | None] | None:
+    """(shares still held, their cost, what the exits realised). None if it cannot be known.
+
+    ONE WALK, THREE ANSWERS, and the third was being thrown away. This loop already stepped
+    through a leg's fills in order to get the cost basis, and already saw each sale's price --
+    which it ignored, correctly for a cost basis, with a comment explaining why. That is the
+    realised result of the exit, and nothing was keeping it.
+
+    WHAT A SELL REALISES is `units * (price - ACB at that moment)`. The ACB is the running
+    figure, so a trim is measured against what the shares cost when it happened rather than
+    against some later average -- which is the same rule that makes the cost basis right, and
+    the reason this has to be one walk rather than two functions.
+
+    WITHHOLDING IS UNCHANGED and shared: an undated fill means the order is unknown and order
+    changes every one of these figures; a buy with no price means the cost is not recorded; a
+    sell with nothing to sell means the record contradicts itself. In all three cases NO
+    figure is returned, not a partial one.
+
+    A SELL WITH NO PRICE does not withhold, and that asymmetry is deliberate: it cannot
+    change the cost of what remains, which is the cost basis's business. It DOES make the
+    realised figure unknowable, so it is reported as such -- see Position.realised_native.
+    """
+    shares = cost = realised = 0.0
+    # A PRICED SELL IS WHAT MAKES `realised` KNOWABLE. One sale with no recorded price makes
+    # the leg's realised total unknown, and this project's rule is that an unknown total is
+    # withheld rather than reported short -- so the flag, not a partial sum.
+    realised_unknown = False
     for f in fills:
         if f["on_date"] is None:
             return None                       # order is unknown, and order changes the answer
@@ -672,11 +721,19 @@ def _acb_per_share(fills) -> float | None:
         else:
             if shares <= 0:
                 return None                   # the record contradicts itself; say nothing
-            # PRO RATA, and a sell's own PRICE is deliberately irrelevant: what it realises
-            # belongs to realised P&L, not to the cost of what is left.
-            cost -= cost * (min(-s, shares) / shares)
+            sold = min(-s, shares)
+            if f["price"] is None:
+                realised_unknown = True
+            else:
+                # THE VERDICT ON THIS PART OF THE TRADE: proceeds less what those shares
+                # cost, at the ACB in force when they were sold.
+                realised += sold * (f["price"] - cost / shares)
+            # PRO RATA, and a sell's own PRICE is deliberately irrelevant HERE: what it
+            # realises is accounted for above; the cost of what is left is not affected by
+            # the price it fetched.
+            cost -= cost * (sold / shares)
             shares += s
-    return None if shares <= 1e-9 else cost / shares
+    return shares, cost, (None if realised_unknown else realised)
 
 
 def positions(con) -> list[Position]:
@@ -717,12 +774,21 @@ def positions(con) -> list[Position]:
             "ORDER BY f.trade_id, f.on_date, f.id"):
         fills_of.setdefault(f["trade_id"], []).append(f)
 
+    def _walked(trade_id):
+        """(entry per share, realised) for one leg, from a single pass over its fills."""
+        w = _walk_fills(fills_of.get(trade_id, []))
+        if w is None:
+            return None, None
+        shares, cost, realised = w
+        return (None if shares <= 1e-9 else cost / shares), realised
+
     out = []
     for r in rows:
+        entry, realised = _walked(r["id"])
         out.append(Position(
             trade_id=r["id"], bet_id=r["bet_id"], ticker=r["ticker"],
             currency=r["currency"], qty=r["shares_held"],
-            entry=_acb_per_share(fills_of.get(r["id"], [])),
+            entry=entry, realised_native=realised,
             opened=r["opened"], stop=r["stop"],
             target=r["target"], loss_limit_pct=r["loss_limit_pct"],
             mark=r["mark"], mark_date=r["mark_date"],
@@ -1063,6 +1129,34 @@ def bets(con) -> list[Bet]:
                 realised += leg.realised * rate
                 closed_cost += leg.cost * rate
 
+        # AND WHAT THE OPEN LEGS HAVE ALREADY BANKED, which this omitted entirely. A trim
+        # realises money without closing anything, so `done` never saw it: a bet reported
+        # realised 0.00 on a day one of its legs had banked a four-figure loss on a trim, and
+        # its pnl came out understated by more than twice the loss it did report. The author,
+        # who found this from the outside: "now it only shows a defeat after everything is
+        # closed."
+        #
+        # NOT ADDED TO closed_cost. `invested` is the denominator for pnl_pct and means
+        # capital PUT IN; a trim returns capital rather than committing more, and the cost of
+        # what is still held is already in `cost` above.
+        for leg in legs:
+            if realised is None:
+                break
+            if leg.realised_native is None:
+                # Unknowable, not zero -- a sale with no recorded price. Withhold, and say so
+                # through the same counter the closed legs use.
+                unvalued += 1
+                realised = closed_cost = None
+                break
+            if leg.realised_native == 0.0:
+                continue                      # nothing sold out of this leg
+            rate, _ = fx_rate(con, leg.currency, home)
+            if rate is None:
+                unvalued += 1
+                realised = closed_cost = None
+                break
+            realised += leg.realised_native * rate
+
         out.append(Bet(
             id=r["id"], name=r["name"], status=r["status"], opened=r["opened"],
             note=r["notes"],
@@ -1293,10 +1387,10 @@ def capital_in(con, as_of: str | None = None) -> float | None:
     THE as_of ARGUMENT IS THE FIX FOR A REAL AND DANGEROUS BUG. The loss limit is
     `contributed - balance`, and balance comes from a snapshot dated some day D. If
     contributed sums EVERY flow while the balance is D's, then a deposit made after
-    D manufactures a loss of exactly the deposit: C$6,000 in gave a C$4,465 "loss"
-    with C$535 of headroom left against a C$5,000 wall, on a portfolio where no price
-    had moved. One more deposit and the desk would have said "close the entire
-    portfolio and step away" because the author added money.
+    D manufactures a loss of exactly the deposit: paying in D showed a "loss" of D
+    on a portfolio where no price had moved, eating that much of the headroom against
+    the loss-limit wall. Enough deposits and the desk would have said "close the
+    entire portfolio and step away" because the author added money.
 
     "Flow-immune by construction" was true only if the balance is re-read in the same
     breath as the deposit -- which is what the test did and real life does not. The

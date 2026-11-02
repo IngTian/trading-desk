@@ -1034,16 +1034,28 @@ def test_every_bets_realised_sums_to_the_dashboards(con):
     """
     n = book.net(con)
     per_bet = sum(b.realised for b in book.bets(con) if b.realised is not None)
+
+    # `loose` IS WHAT BELONGS TO NO BET, and nothing else. It used to add
+    # `banked_in_open_legs()` wholesale, which was correct while Bet.realised counted CLOSED
+    # legs only -- and is double-counting now that it includes what a trim banked. That
+    # compensating term is exactly what the 2026-09-28 audit said to remove once the figure
+    # was attributed: "the sum-to-dashboard test then proves the tie instead of compensating
+    # for it with a loose term."
     loose = 0.0
     for leg in book.closed_legs(con):
         if leg.bet_id is None and leg.realised is not None:
             rate, _ = book.fx_rate(con, leg.currency, n.home)
             loose += leg.realised * rate
-    # A trim banks money inside a leg that is still open; it belongs to no closed leg.
-    for ccy, amount in book.banked_in_open_legs(con).items():
-        rate, _ = book.fx_rate(con, ccy, n.home)
-        loose += amount * rate
-    assert per_bet + loose == pytest.approx(n.realised, abs=0.01)
+    # A trim banks money inside a leg that is still open, and an open leg need not have a
+    # bet -- parked cash does not. No Bet can account for that, so it is loose too.
+    for leg in book.positions(con):
+        if leg.bet_id is None and leg.realised_native:
+            rate, _ = book.fx_rate(con, leg.currency, n.home)
+            loose += leg.realised_native * rate
+
+    assert per_bet + loose == pytest.approx(n.realised, abs=0.01), (
+        f"per-bet {per_bet:,.2f} + unattached {loose:,.2f} != dashboard "
+        f"{n.realised:,.2f}. Every realised dollar belongs to exactly one of those.")
 
 
 async def test_the_thesis_is_readable_under_its_own_heading(app, con, goto):
@@ -2333,8 +2345,24 @@ async def test_b_moves_the_leg_under_the_cursor_and_leaves_no_phantom(app, con, 
 # which is the reason this section exists: not one test read the value or P&L cell of a
 # positions row. Every test here would have failed on the old behaviour.
 # --------------------------------------------------------------------------- #
-POS = {"leg": 0, "qty": 1, "ccy": 2, "entry": 3, "last": 4, "date": 5, "sl": 6,
-       "value": 7, "pnl": 8, "pct": 9}
+# DERIVED FROM THE PANE, not hand-numbered. This was a literal dict and every index after
+# `last` shifted when `banked` arrived and `date`/`sl` went -- four tests then read the wrong
+# column and reported a value mismatch that was really an off-by-two. Reading the labels the
+# pane actually declares means the next column change moves these for free, and a renamed
+# column fails loudly here instead of silently comparing the wrong cell.
+def _pos_columns() -> dict[str, int]:
+    import inspect
+    import re
+
+    from desk.tui.panes import PositionsPane
+    src = inspect.getsource(PositionsPane.on_mount)
+    labels = re.findall(r'\("([^"]+)", \d+\)', src)
+    assert labels, "could not read the positions columns from the pane"
+    alias = {"P&L": "pnl", "%": "pct"}
+    return {alias.get(name, name): i for i, name in enumerate(labels)}
+
+
+POS = _pos_columns()
 
 
 def _cell_text(cell) -> str:
@@ -2583,8 +2611,12 @@ async def test_the_positions_columns_fit_the_terminal(app, goto):
     total = sum(widths) + 2 * len(cols)
     assert total <= 108, f"{total} cells over a 108-cell budget: {widths}"
     labels = [str(getattr(c.label, "plain", c.label)) for c in cols]
-    assert labels == ["leg", "qty", "ccy", "entry", "last", "date", "sl",
-                      "value", "P&L", "%"], labels
+    # `banked` ARRIVED and `date`/`sl` paid for it, 2026-11-02. `sl` was 6 cells of em dash
+    # (no leg has carried a stop since the curve went in v14); `date` was the open date, now
+    # on the detail line. The budget assertion above is the one that matters and it got
+    # looser, not tighter: 103 of 108.
+    assert labels == ["leg", "qty", "ccy", "entry", "last",
+                      "value", "banked", "P&L", "%"], labels
     # `value` AND `P&L` CARRY NO CURRENCY, and must not: they hold the home currency on an
     # open leg and the native one on a closed leg, so a label would be false for half the
     # table. The per-row `ccy` column is the only place that can be right for every row.
@@ -3157,7 +3189,7 @@ def test_pnl_is_flow_immune_whatever_the_deposit_is_dated(blank):
     _a_loss and test_a_withdrawal_after_the_balance_cannot_invent_a_gain -- three separate
     guards against one bug, which was that `balance` came from a statement dated D while
     `capital` summed flows up to D, so anything in between landed in P&L as a gain or loss
-    of exactly its own size. Real numbers: C$6,000 in gave a C$4,465 "loss".
+    of exactly its own size -- paying in D showed a "loss" of D, no price having moved.
 
     Derived net has no D. It contains every deposit already, so the two sides are the same
     moment by construction and the date cannot matter. Hence the second half: a deposit
@@ -5601,3 +5633,111 @@ def test_an_upgrade_that_copied_nothing_refuses_to_swap(tmp_path, capsys, monkey
     assert rc == 1, f"an upgrade that copied nothing returned {rc}, so it swapped"
     assert "REFUSING TO SWAP" in out, out[-400:]
     assert book_path.read_bytes() == before, "the original book was replaced anyway"
+
+
+# --------------------------------------------------------------------------- #
+# partial exits. The author, 2026-11-02: "when i exit, even partially, it should
+# be shown and recorded. bc, that's giving a verdict to at least part of the
+# trade. now it only shows a defeat after everything is closed."
+# --------------------------------------------------------------------------- #
+def test_a_trim_is_realised_against_the_cost_at_the_time(con):
+    """WHAT A SELL BANKS is units x (price - ACB when it happened), not a later average.
+
+    This is the same walk the cost basis uses, which is why it is one function: measuring a
+    trim against an average that later purchases moved would make the verdict on a past
+    decision depend on a future one.
+
+    Turns red if _walk_fills stops accumulating realised, or measures against the final ACB.
+    """
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('trim','forming','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=60.0, price=100.0, on_date="2026-06-01",
+                  account="tfsa", bet_id="trim")
+    book.add_fill(con, ticker="CADCO", shares=-20.0, price=110.0, on_date="2026-06-02",
+                  account="tfsa", bet_id="trim")
+    # A LATER, HIGHER BUY must not change what the earlier trim realised.
+    book.add_fill(con, ticker="CADCO", shares=20.0, price=150.0, on_date="2026-06-03",
+                  account="tfsa", bet_id="trim")
+
+    leg = next(p for p in book.positions(con) if p.bet_id == "trim")
+    assert leg.realised_native == pytest.approx(200.0), (
+        f"banked {leg.realised_native}: 20 sold at 110 against an ACB of 100 is +200, and "
+        f"the 150 purchase the day after cannot change that")
+    assert leg.entry == pytest.approx(7000.0 / 60.0, abs=1e-6), "the ACB moved"
+
+
+def test_a_leg_that_has_sold_nothing_banks_zero_not_none(con):
+    """0.0 AND None MEAN DIFFERENT THINGS, and this codebase is strict about it.
+
+    Nothing sold is a known quantity: zero. Unknowable is a sale with no recorded price. The
+    positions column renders those differently -- an em dash either way, but one in the
+    warning colour -- so the distinction has to survive into the figure.
+    """
+    leg = next(p for p in book.positions(con) if p.ticker == "CADCO" and p.bet_id == "parking")
+    assert leg.realised_native == 0.0, "an untrimmed leg should bank a known zero"
+
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('nopx','forming','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=10.0, price=10.0, on_date="2026-07-01",
+                  account="tfsa", bet_id="nopx")
+    book.add_fill(con, ticker="CADCO", shares=-4.0, price=9.0, on_date="2026-07-02",
+                  account="tfsa", bet_id="nopx")
+    tid = next(p.trade_id for p in book.positions(con) if p.bet_id == "nopx")
+    con.execute("UPDATE fills SET price=NULL WHERE trade_id=? AND shares<0", (tid,))
+
+    after = next(p for p in book.positions(con) if p.trade_id == tid)
+    assert after.realised_native is None, "an unpriced sale makes the figure unknowable"
+    # AND THE COST BASIS SURVIVES IT: a sale's price cannot change what the rest cost.
+    assert after.entry == pytest.approx(10.0), "the unpriced sale moved the cost basis"
+
+
+def test_a_bets_realised_counts_what_its_open_legs_banked(con):
+    """IT COUNTED CLOSED LEGS ONLY, so a bet reported 0.00 on the day it banked a loss.
+
+    On a real book one bet reported realised 0.00 while a leg under it had banked a
+    four-figure loss on a trim that same day, so its P&L was understated by more than twice
+    the loss it did report. The author found it from the outside: "now it only shows a defeat
+    after everything is closed."
+
+    Turns red if bets() goes back to summing `done` alone.
+    """
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('tb','live','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=100.0, price=10.0, on_date="2026-06-01",
+                  account="tfsa", bet_id="tb")
+    book.add_fill(con, ticker="CADCO", shares=-40.0, price=15.0, on_date="2026-06-02",
+                  account="tfsa", bet_id="tb")
+
+    b = next(x for x in book.bets(con) if x.id == "tb")
+    assert b.closed_legs == 0, "fixture: nothing has closed, which is the point"
+    assert b.realised == pytest.approx(200.0), (
+        f"realised {b.realised}: 40 sold at 15 against a cost of 10 banked +200, on a bet "
+        f"with no closed legs at all")
+    assert b.pnl is not None and b.pnl > 0, "a bet that banked money cannot show no P&L"
+
+
+async def test_the_positions_tab_shows_what_a_leg_has_banked(app, con, goto):
+    """THE COLUMN THE AUTHOR ASKED FOR, in its own cell rather than folded into P&L.
+
+    The author chose that over one combined total: money already banked and money still at
+    risk are different kinds of figure, and one number for both hides the distinction.
+
+    Turns red if the column goes, or stops reading Position.realised_native.
+    """
+    async with app.run_test(size=(126, 46)) as pilot:
+        await goto(pilot, "positions")
+        t = app.query_one("#pos-table", DataTable)
+        rows = {t.coordinate_to_cell_key((r, 0)).row_key.value: t.get_row_at(r)
+                for r in range(t.row_count)}
+
+    trimmed = [p for p in book.positions(con) if p.realised_native]
+    assert trimmed, "fixture has no trimmed open leg, so this proves nothing"
+    for leg in trimmed:
+        from desk.tui.widgets import signed
+        shown = _cell_text(rows[leg.trade_id][POS["banked"]])
+        assert signed(leg.realised_native) in shown, (
+            f"{leg.ticker}: banked {leg.realised_native:+,.2f} is not in {shown!r}")
+        # AND IT IS NOT THE SAME CELL AS P&L, which is the whole point of the column.
+        assert shown != _cell_text(rows[leg.trade_id][POS["pnl"]])
+
+    for leg in book.positions(con):
+        if leg.realised_native == 0.0:
+            assert _cell_text(rows[leg.trade_id][POS["banked"]]) == NA_DASH, (
+                f"{leg.ticker} sold nothing and should show an em dash, not a zero")

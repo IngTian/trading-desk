@@ -132,6 +132,10 @@ def build_server() -> Any:
         instructions=(
             "Read-only access to a trading book kept by trading-desk: positions, bets, "
             "closed round trips, derived net worth, and a reconciliation panel.\n\n"
+            "A leg's `banked_*` is what its PARTIAL exits have already realised, and it "
+            "is separate from its unrealised `pnl_*`: a trim settles part of a trade "
+            "without closing it. A bet's `realised` includes both its closed legs and "
+            "what its open legs have banked.\n\n"
             "THE TASK THIS EXISTS FOR: the user hands you a broker statement; you compare it "
             "against this book and say what disagrees. `attribution` is the check that "
             "matters -- it asks whether the book can account for its own P&L against a "
@@ -185,6 +189,12 @@ def build_server() -> Any:
                 "account": p.account, "currency": p.currency,
                 "qty": p.qty, "entry_per_share": p.entry, "mark": p.mark,
                 "mark_date": p.mark_date, "opened": p.opened,
+                # WHAT ITS EXITS HAVE ALREADY REALISED, in the leg's own currency. null
+                # means not knowable (a sale with no recorded price); 0 means nothing sold.
+                # A model handed a statement needs this to match a broker's realised line,
+                # which reports a trim the day it happens rather than on the final close.
+                "banked_native": _money(p.realised_native),
+                "banked_base": _money(p.realised_base),
                 "cost_native": _money(p.cost_native), "value_native": _money(p.value_native),
                 "pnl_native": _money(p.pnl_native), "pnl_pct": _pct(p.pnl_pct_native),
                 "cost_base": _money(p.cost_base), "value_base": _money(p.value_base),
