@@ -21,11 +21,11 @@ jobs:
       fail-fast: false
       # THE FLOOR AND THE CEILING. `requires-python = ">=3.11"` is a promise to anyone
       # installing from PyPI, and the only way to keep it is to run on 3.11 -- the dev
-      # machine is on 3.13, so a 3.12+ syntax or stdlib call would otherwise ship and fail
+      # machine is on 3.14, so a 3.12+ syntax or stdlib call would otherwise ship and fail
       # for the users the classifier invited. Two versions rather than four: the middle one
       # cannot break in a way the ends both miss.
       matrix:
-        python: ["3.11", "3.13"]
+        python: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
