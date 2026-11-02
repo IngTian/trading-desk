@@ -1832,7 +1832,7 @@ class BetsPane(Pane):
         elif b.allocation is not None and b.cost == 0:
             # ONLY WHEN THE COST IS GENUINELY ZERO. `cost` is 0.0 for a bet with no legs and
             # None when a leg cannot be translated, and this branch used to catch both -- so a
-            # bet holding C$11,125 across eight legs with one missing fx rate printed
+            # bet holding C$10,000 across eight legs with one missing fx rate printed
             # "allocated, nothing spent", which is a false statement about money sitting
             # directly above a HOLDINGS header quoting a percentage.
             facts.append(f"{money(b.allocation)} allocated, nothing spent")

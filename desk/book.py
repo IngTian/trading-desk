@@ -989,8 +989,8 @@ class Bet:
     def pnl_pct(self) -> float | None:
         """Against the capital this bet actually put to work, open and closed.
 
-        NOT against the frozen allocation. A bet that declared C$11,250 and spent C$644
-        has not made 5% of its plan -- it has made whatever it made on the C$644. The
+        NOT against the frozen allocation. A bet that declared C$10,000 and spent C$600
+        has not made 5% of its plan -- it has made whatever it made on the C$600. The
         allocation is a ceiling, not a denominator.
         """
         base = self.invested
