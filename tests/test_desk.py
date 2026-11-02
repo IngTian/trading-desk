@@ -5741,3 +5741,66 @@ async def test_the_positions_tab_shows_what_a_leg_has_banked(app, con, goto):
         if leg.realised_native == 0.0:
             assert _cell_text(rows[leg.trade_id][POS["banked"]]) == NA_DASH, (
                 f"{leg.ticker} sold nothing and should show an em dash, not a zero")
+
+
+def test_a_trims_cost_counts_toward_the_pnl_denominator(con):
+    """A LOSS CANNOT EXCEED EVERYTHING PUT IN unless the money is actually gone.
+
+    This shipped broken for a day. `Bet.realised` counts what a trim banked, but a sell
+    removes cost pro rata and `closed_cost` counts only legs that closed COMPLETELY -- so a
+    partly-sold leg handed its result to the numerator and none of its cost to the
+    denominator. One bet read -115.72% where the honest figure was -42.18%. The author, shown
+    both: "% of all capital put in".
+
+    Here: 1,000 in, 900 of it sold at a 90% loss, 100 still held. The denominator is the
+    1,000, so the percentage stays inside the only bound it has.
+
+    Turns red if `invested` stops adding `trimmed_cost` -- the percentage goes to about -795%.
+    """
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('den','live','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=100.0, price=10.00, on_date="2026-06-01",
+                  account="tfsa", bet_id="den")
+    book.add_fill(con, ticker="CADCO", shares=-90.0, price=1.00, on_date="2026-06-02",
+                  account="tfsa", bet_id="den")
+
+    b = next(x for x in book.bets(con) if x.id == "den")
+    assert b.closed_legs == 0, "fixture: nothing closed, so closed_cost cannot cover this"
+    assert b.trimmed_cost == pytest.approx(900.0), (
+        f"trimmed_cost {b.trimmed_cost}: 90 shares left at an ACB of 10.00 cost 900")
+    assert b.invested == pytest.approx(1_000.0), (
+        f"invested {b.invested}: 100 still held at cost plus the 900 that was sold")
+    assert b.pnl_pct is not None and b.pnl_pct > -100.0, (
+        f"pnl_pct {b.pnl_pct}: a bet cannot lose more than everything it committed while it "
+        f"still holds shares worth something")
+    assert b.pnl_pct == pytest.approx(100.0 * b.pnl / 1_000.0)
+
+
+def test_a_trims_cost_is_known_even_when_what_it_made_is_not(con):
+    """THE DENOMINATOR IS KNOWABLE MORE OFTEN THAN THE NUMERATOR, and the asymmetry is real.
+
+    An unpriced sale hides what a trim MADE -- there is no price to measure against -- but
+    never what it SOLD, because that comes from the running ACB. So `trimmed_cost` answers
+    where `realised` withholds. The two are computed in separate passes for exactly this
+    reason; sharing one loop is how the ratio got broken the first time.
+
+    Turns red if trimmed_cost starts following realised's withholding.
+    """
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('den2','live','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=100.0, price=10.00, on_date="2026-06-01",
+                  account="tfsa", bet_id="den2")
+    book.add_fill(con, ticker="CADCO", shares=-40.0, price=9.00, on_date="2026-06-02",
+                  account="tfsa", bet_id="den2")
+    tid = next(p.trade_id for p in book.positions(con) if p.bet_id == "den2")
+    con.execute("UPDATE fills SET price=NULL WHERE trade_id=? AND shares<0", (tid,))
+
+    leg = next(p for p in book.positions(con) if p.trade_id == tid)
+    assert leg.realised_native is None, "an unpriced sale hides what it made"
+    assert leg.sold_cost_native == pytest.approx(400.0), (
+        f"sold_cost {leg.sold_cost_native}: 40 shares at an ACB of 10.00, and no price is "
+        f"needed to know that")
+
+    b = next(x for x in book.bets(con) if x.id == "den2")
+    assert b.realised is None, "the numerator is withheld"
+    assert b.trimmed_cost == pytest.approx(400.0), "the denominator is not"
+    assert b.invested == pytest.approx(1_000.0), "600 still held plus the 400 sold"
+    assert b.pnl is None and b.pnl_pct is None, "no numerator, no ratio"

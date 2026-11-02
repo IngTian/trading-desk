@@ -132,6 +132,14 @@ class Position:
     # only unrealised figures, so a leg that had banked a four-figure loss on a trim showed
     # nothing about it -- the row reported its unrealised hundreds and stopped there.
     realised_native: float | None = None
+    # WHAT THE SHARES SOLD OUT OF THIS LEG COST, in its own currency, at the ACB in force
+    # when each sale happened. The DENOMINATOR half of `realised_native`: once a trim's
+    # result is counted as P&L, the capital it was earned on has to be counted as capital,
+    # or the ratio compares two different pots. See _walk_fills and Bet.invested.
+    #
+    # NEEDS NO PRICE, so unlike `realised_native` it is known whenever the walk returns --
+    # a sale with no recorded price still removes a known amount of cost.
+    sold_cost_native: float | None = None
     account: str | None = None
 
     @property
@@ -184,6 +192,13 @@ class Position:
         if self.realised_native is None or self.fx is None:
             return None
         return self.realised_native * self.fx
+
+    @property
+    def sold_cost_base(self) -> float | None:
+        """Withheld when the rate is missing, like every other `_base` figure here."""
+        if self.sold_cost_native is None or self.fx is None:
+            return None
+        return self.sold_cost_native * self.fx
 
     @property
     def value_base(self) -> float | None:
@@ -678,14 +693,14 @@ def _acb_per_share(fills) -> float | None:
     walked = _walk_fills(fills)
     if walked is None:
         return None
-    shares, cost, _realised = walked
+    shares, cost, _realised, _sold_cost = walked
     return None if shares <= 1e-9 else cost / shares
 
 
-def _walk_fills(fills) -> tuple[float, float, float | None] | None:
-    """(shares still held, their cost, what the exits realised). None if it cannot be known.
+def _walk_fills(fills) -> tuple[float, float, float | None, float] | None:
+    """(shares held, their cost, what the exits realised, what the exits COST). None if unknown.
 
-    ONE WALK, THREE ANSWERS, and the third was being thrown away. This loop already stepped
+    ONE WALK, FOUR ANSWERS, and two of them were being thrown away. This loop already stepped
     through a leg's fills in order to get the cost basis, and already saw each sale's price --
     which it ignored, correctly for a cost basis, with a comment explaining why. That is the
     realised result of the exit, and nothing was keeping it.
@@ -703,8 +718,17 @@ def _walk_fills(fills) -> tuple[float, float, float | None] | None:
     A SELL WITH NO PRICE does not withhold, and that asymmetry is deliberate: it cannot
     change the cost of what remains, which is the cost basis's business. It DOES make the
     realised figure unknowable, so it is reported as such -- see Position.realised_native.
+
+    THE FOURTH FIGURE IS THE DENOMINATOR, and leaving it out shipped a false percentage for
+    a day. Once `realised` counts what a trim banked, the P&L numerator covers capital that
+    `invested` did not: a sell removes cost pro rata and `closed_cost` only counts legs that
+    closed COMPLETELY, so a partly-sold leg contributed its result and none of its cost. One
+    bet read -115.72% -- a loss larger than everything put in, which can only happen if the
+    money is actually gone -- where the honest figure was -42.18%. A ratio whose halves
+    describe different capital is not a ratio. This is that cost, and it needs no price: it
+    comes from the running ACB, so it is known whenever the walk returns at all.
     """
-    shares = cost = realised = 0.0
+    shares = cost = realised = sold_cost = 0.0
     # A PRICED SELL IS WHAT MAKES `realised` KNOWABLE. One sale with no recorded price makes
     # the leg's realised total unknown, and this project's rule is that an unknown total is
     # withheld rather than reported short -- so the flag, not a partial sum.
@@ -731,9 +755,11 @@ def _walk_fills(fills) -> tuple[float, float, float | None] | None:
             # PRO RATA, and a sell's own PRICE is deliberately irrelevant HERE: what it
             # realises is accounted for above; the cost of what is left is not affected by
             # the price it fetched.
-            cost -= cost * (sold / shares)
+            out = cost * (sold / shares)
+            sold_cost += out
+            cost -= out
             shares += s
-    return shares, cost, (None if realised_unknown else realised)
+    return shares, cost, (None if realised_unknown else realised), sold_cost
 
 
 def positions(con) -> list[Position]:
@@ -775,20 +801,20 @@ def positions(con) -> list[Position]:
         fills_of.setdefault(f["trade_id"], []).append(f)
 
     def _walked(trade_id):
-        """(entry per share, realised) for one leg, from a single pass over its fills."""
+        """(entry per share, realised, cost of what was sold) from a single pass."""
         w = _walk_fills(fills_of.get(trade_id, []))
         if w is None:
-            return None, None
-        shares, cost, realised = w
-        return (None if shares <= 1e-9 else cost / shares), realised
+            return None, None, None
+        shares, cost, realised, sold_cost = w
+        return (None if shares <= 1e-9 else cost / shares), realised, sold_cost
 
     out = []
     for r in rows:
-        entry, realised = _walked(r["id"])
+        entry, realised, sold_cost = _walked(r["id"])
         out.append(Position(
             trade_id=r["id"], bet_id=r["bet_id"], ticker=r["ticker"],
             currency=r["currency"], qty=r["shares_held"],
-            entry=entry, realised_native=realised,
+            entry=entry, realised_native=realised, sold_cost_native=sold_cost,
             opened=r["opened"], stop=r["stop"],
             target=r["target"], loss_limit_pct=r["loss_limit_pct"],
             mark=r["mark"], mark_date=r["mark_date"],
@@ -964,6 +990,9 @@ class Bet:
     # `realised` rather than beside it, which is also how a broker statement reads.
     realised: float | None = None
     closed_cost: float | None = None     # what the closed legs cost, at close-date FX
+    # WHAT THE PARTLY-SOLD LEGS SOLD, at cost. The companion to the open-leg money inside
+    # `realised`, and the half that was missed for a day: see invested.
+    trimmed_cost: float | None = None
     closed_legs: int = 0
     unvalued_closed_legs: int = 0        # closed legs with no price or no rate on the day
 
@@ -1000,10 +1029,21 @@ class Bet:
 
     @property
     def invested(self) -> float | None:
-        """Cost of the open legs plus cost of the closed ones. The P&L denominator."""
-        if self.cost is None or self.closed_cost is None:
+        """Every dollar this bet has committed: open legs, closed legs, and trims.
+
+        THE DENOMINATOR MUST COVER THE SAME CAPITAL AS THE NUMERATOR, and for one day it did
+        not. `realised` counts what a trim banked, but a sell removes cost pro rata and
+        `closed_cost` counts only legs that closed COMPLETELY -- so a partly-sold leg handed
+        its result to the numerator and none of its cost to the denominator. A bet showed
+        -115.72%, a loss bigger than everything put into it, which is a thing that can only
+        happen if the capital is actually gone. It was not: the honest figure was -42.18%.
+
+        The author, shown both: "% of all capital put in". So a >100% loss is now impossible
+        unless the money really is gone, which is the property worth having.
+        """
+        if self.cost is None or self.closed_cost is None or self.trimmed_cost is None:
             return None
-        return self.cost + self.closed_cost
+        return self.cost + self.closed_cost + self.trimmed_cost
 
     @property
     def filled_pct(self) -> float | None:
@@ -1136,26 +1176,46 @@ def bets(con) -> list[Bet]:
         # who found this from the outside: "now it only shows a defeat after everything is
         # closed."
         #
-        # NOT ADDED TO closed_cost. `invested` is the denominator for pnl_pct and means
-        # capital PUT IN; a trim returns capital rather than committing more, and the cost of
-        # what is still held is already in `cost` above.
+        # NOT ADDED TO closed_cost, which means what the CLOSED legs cost and is read on its
+        # own elsewhere. The denominator gets it through `trimmed_cost` below instead.
+        # `realised` ONLY -- not closed_cost, not the counter, and the first version of this
+        # touched both. An open leg's unpriced sale says nothing about what the CLOSED legs
+        # cost, so nulling closed_cost there threw away a separately knowable figure and took
+        # `invested` with it. And `unvalued_closed_legs` is rendered as "N of them cannot be
+        # valued" directly after "N closed leg(s)" -- so incrementing it for an OPEN leg
+        # printed a sentence whose "them" had no antecedent, on bets with no closed legs at
+        # all. A withheld `pnl` is the honest signal here, and it needs no second channel.
         for leg in legs:
             if realised is None:
                 break
             if leg.realised_native is None:
-                # Unknowable, not zero -- a sale with no recorded price. Withhold, and say so
-                # through the same counter the closed legs use.
-                unvalued += 1
-                realised = closed_cost = None
+                realised = None               # a sale with no price: unknowable, not zero
                 break
             if leg.realised_native == 0.0:
                 continue                      # nothing sold out of this leg
             rate, _ = fx_rate(con, leg.currency, home)
             if rate is None:
-                unvalued += 1
-                realised = closed_cost = None
+                realised = None
                 break
             realised += leg.realised_native * rate
+
+        # THE DENOMINATOR HALF of the money just added, and it withholds on its OWN terms
+        # rather than following `realised`: an unpriced sale hides what a trim MADE, never
+        # what it SOLD, so this is knowable strictly more often. A separate pass for that
+        # reason -- entangling two withholding rules in one loop is how the first version of
+        # this got the ratio wrong. See Bet.invested.
+        trimmed_cost: float | None = 0.0
+        for leg in legs:
+            if leg.sold_cost_native is None:
+                trimmed_cost = None
+                break
+            if leg.sold_cost_native == 0.0:
+                continue                      # nothing sold out of this leg
+            rate, _ = fx_rate(con, leg.currency, home)
+            if rate is None:
+                trimmed_cost = None
+                break
+            trimmed_cost += leg.sold_cost_native * rate
 
         out.append(Bet(
             id=r["id"], name=r["name"], status=r["status"], opened=r["opened"],
@@ -1165,7 +1225,7 @@ def bets(con) -> list[Bet]:
             of_allocated_pct=(None if not home_alloc[r["id"]] or not allocated_total
                               else 100.0 * home_alloc[r["id"]] / allocated_total),
             unpriced_legs=len(blind), cost=cost,
-            realised=realised, closed_cost=closed_cost,
+            realised=realised, closed_cost=closed_cost, trimmed_cost=trimmed_cost,
             closed_legs=len(done), unvalued_closed_legs=unvalued))
     return out
 
