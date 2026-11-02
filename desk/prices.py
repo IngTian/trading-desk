@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import os
 import pathlib
 import sqlite3
@@ -161,6 +162,13 @@ def fetch_one(symbol: str, since_epoch: int) -> list[dict]:
     for ts, close in zip(stamps, closes, strict=True):
         if close is None:
             continue          # a holiday or a hole; a null close is not a zero price
+        # NOT FINITE, NOT A PRICE. json.load accepts the literals Infinity and NaN by
+        # default, and `CHECK (amount > 0)` passes for Infinity -- so one odd payload could
+        # put a non-finite REAL in `prices`, and from there into every derived figure and
+        # into the MCP server's JSON, where `Infinity` is not even valid JSON. desk/parse.py
+        # already guards the hand-typed path for exactly this reason.
+        if not math.isfinite(close):
+            continue
         out.append({
             "date": dt.datetime.fromtimestamp(
                 ts + offset, dt.UTC).strftime("%Y-%m-%d"),
@@ -293,7 +301,21 @@ def wanted(con) -> list[tuple[str, str, str]]:
     return rows
 
 
-def main(dry: bool, days: int) -> int:
+def main(dry: bool, days: int, emit=None) -> int:
+    """Fetch and store the latest close for everything held. Returns 1 if any symbol failed.
+
+    `emit` TAKES THE OUTPUT INSTEAD OF print(), and it exists because of a real leak. The desk
+    runs this on a worker thread and used to capture its output with
+    contextlib.redirect_stdout -- which replaces PROCESS-GLOBAL sys.stdout, not a thread's
+    own. Two overlapping fetches therefore interleaved their save/restore, the first one to
+    finish handed the real terminal back while the second was still printing, and six lines of
+    fetch output appeared on the shell the moment the TUI stopped overdrawing them.
+
+    A lock would not have been the fix. A thread should not be patching global stdout at all,
+    so the output is handed to the caller: the desk passes `lines.append`, the CLI passes
+    nothing and keeps printing.
+    """
+    say = emit if emit is not None else print
     _require_book(DB)
     # AUTOCOMMIT, AND THIS IS A BUG FIX, not a style choice. The author hit `OperationalError:
     # database is locked` recording a fill on 2026-09-25, and this function was why.
@@ -317,14 +339,14 @@ def main(dry: bool, days: int) -> int:
 
     cols = {r[1] for r in con.execute("PRAGMA table_info(instruments)")}
     if "quote_symbol" not in cols:
-        print("FAIL: instruments.quote_symbol does not exist. Add it first — the "
+        say("FAIL: instruments.quote_symbol does not exist. Add it first — the "
               "lookup symbol is not the ticker (ZNQ does not resolve; ZNQ.TO does).")
         return 1
 
     since = int((dt.datetime.now(dt.UTC) - dt.timedelta(days=days)).timestamp())
     targets = wanted(con)
     if not targets:
-        print("nothing held, nothing to price")
+        say("nothing held, nothing to price")
         return 0
 
     stored = skipped = 0
@@ -334,11 +356,11 @@ def main(dry: bool, days: int) -> int:
         try:
             bars = fetch_one(symbol, since)
         except Exception as exc:
-            print(f"  ! {symbol:<12} {type(exc).__name__}: {exc}")
+            say(f"  ! {symbol:<12} {type(exc).__name__}: {exc}")
             skipped += 1
             continue
         if not bars:
-            print(f"  ! {symbol:<12} no bars returned")
+            say(f"  ! {symbol:<12} no bars returned")
             skipped += 1
             continue
         last = bars[-1]
@@ -346,7 +368,7 @@ def main(dry: bool, days: int) -> int:
         # fetching CADUSD=X would have stored the row as base=CAD quote=CAD -- a rate
         # from a currency to itself, which fx_rate() would then have applied.
         quote = config.profile().home_currency if kind == "fx" else last["currency"]
-        print(f"  {base:<6} {symbol:<12} {last['date']}  {last['close']:>10.4f} "
+        say(f"  {base:<6} {symbol:<12} {last['date']}  {last['close']:>10.4f} "
               f"{quote}   ({len(bars)} bars)")
         if not dry:
             # ONE SHORT TRANSACTION PER INSTRUMENT, opened AFTER its fetch has returned and
@@ -362,7 +384,7 @@ def main(dry: bool, days: int) -> int:
                  for b in bars])
             con.execute("COMMIT")
             stored += len(bars)
-    print(f"\n{len(targets) - skipped}/{len(targets)} symbols"
+    say(f"\n{len(targets) - skipped}/{len(targets)} symbols"
           + (f", {stored} rows written" if not dry else ", DRY RUN — nothing written"))
     con.close()
     return 1 if skipped else 0

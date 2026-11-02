@@ -75,7 +75,7 @@ def test_the_live_book_matches_the_schema_in_the_repo():
     If this fails, one of the two moved: re-extract schema.sql if the book is right,
     migrate the book if the file is.
     """
-    live = sqlite3.connect(f"file:{config.book_path()}?mode=ro", uri=True)
+    live = sqlite3.connect(f"{config.book_path().as_uri()}?mode=ro", uri=True)
     ref = sqlite3.connect(":memory:")
     ref.executescript(config.schema_sql().read_text())
     a, b = objects(live), objects(ref)

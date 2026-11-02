@@ -1020,9 +1020,15 @@ def bets(con) -> list[Bet]:
     # and silently restating what someone declared is worse than declining to divide by it.
     home_alloc = {r["id"]: (r["allocation_base"] if r["allocation_ccy"] == home else None)
                   for r in rows}
-    allocated_total = sum(
-        home_alloc[r["id"]] for r in rows
-        if home_alloc[r["id"]] and is_live(r["status"]))
+    # THE DENOMINATOR WITHHOLDS TOO, and it did not -- so the numerator obeyed this
+    # project's cardinal rule while the denominator quietly broke it. A live bet whose
+    # allocation could not be read in the home currency was dropped from this SUM as well as
+    # from its own figure, so a remaining bet divided by a total that excluded it and printed
+    # a confident "100.0% of plan" while holding a fraction of it. Now every of_allocated_pct
+    # goes None, which is the honest answer when one of the budgets cannot be read.
+    _live = [home_alloc[r["id"]] for r in rows
+             if is_live(r["status"]) and r["allocation_base"] is not None]
+    allocated_total = None if any(v is None for v in _live) else sum(_live)
 
     done_of: dict[str | None, list] = {}
     for leg in closed_legs(con):

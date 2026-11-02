@@ -9,8 +9,10 @@ destructive keys without touching book/hub.db.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import datetime as dt
+import json
 import pathlib
 import re
 import shutil
@@ -5266,3 +5268,336 @@ def test_no_user_facing_string_names_an_unbound_key():
                 if key not in bound:
                     offenders.append(f"{rel}:{i} names `{key}`, which is bound to nothing")
     assert not offenders, "\n".join(offenders)
+
+
+# --------------------------------------------------------------------------- #
+# the price fetch: output on the user's terminal, 2026-10-06
+# --------------------------------------------------------------------------- #
+def test_prices_main_never_replaces_stdout(monkeypatch, tmp_path):
+    """IT USED TO BE CAPTURED WITH redirect_stdout, WHICH IS PROCESS-GLOBAL.
+
+    The desk runs prices.main on a worker thread. contextlib.redirect_stdout replaces
+    sys.stdout for the whole process, not for a thread, so two overlapping fetches
+    interleaved their save and restore:
+
+        A enters -> sys.stdout = buf_A        (A saved the real terminal)
+        B enters -> sys.stdout = buf_B        (B saved buf_A)
+        A exits  -> sys.stdout = the REAL TERMINAL, while B is still printing
+        B prints -> onto the terminal
+
+    The author saw six lines of fetch output on the shell after quitting -- which is when the
+    TUI stopped overdrawing it. `emit` removes the mechanism rather than narrowing the window.
+
+    Turns red if main() goes back to print(), or if the app reintroduces redirect_stdout.
+    """
+    from desk import prices
+
+    monkeypatch.setattr(prices, "DB", str(tmp_path / "hub.db"))
+    seed.build(tmp_path / "hub.db").close()
+    # No network: every symbol fails fast, which still exercises every say() path.
+    monkeypatch.setattr(prices, "fetch_one", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("no network in a test")))
+
+    import io
+
+    watched = []
+
+    class Watch(io.StringIO):
+        def write(self, s):
+            watched.append(s)
+            return len(s)
+
+    lines = []
+    real = sys.stdout
+    sys.stdout = Watch()
+    try:
+        prices.main(dry=True, days=1, emit=lines.append)
+    finally:
+        sys.stdout = real
+
+    assert not watched, (
+        f"prices.main wrote to sys.stdout even with emit= given: {watched[:3]!r} -- "
+        f"on a worker thread that lands on the user's terminal")
+    assert lines, "emit collected nothing, so the output went somewhere else"
+    assert sys.stdout is real, "sys.stdout was left replaced"
+
+
+def test_the_cli_path_still_prints(monkeypatch, tmp_path, capsys):
+    """`emit` DEFAULTS TO print, or `python -m desk.prices` goes silent.
+
+    The app passes a sink; the command line passes nothing. Both have to work, and it would
+    be easy to fix the leak by removing the output altogether.
+    """
+    from desk import prices
+
+    monkeypatch.setattr(prices, "DB", str(tmp_path / "hub.db"))
+    seed.build(tmp_path / "hub.db").close()
+    monkeypatch.setattr(prices, "fetch_one", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("no network in a test")))
+
+    prices.main(dry=True, days=1)
+    out = capsys.readouterr().out
+    assert out.strip(), "the CLI path prints nothing now"
+
+
+async def test_a_holdings_change_mid_fetch_is_queued_not_raced(app, con, goto):
+    """_tick GUARDED ON self.fetching AND THIS PATH DID NOT.
+
+    `@work(exclusive=True)` cancels the task but cannot stop a running OS thread, so the two
+    prices.main() calls genuinely overlapped: both hammering the same endpoint, each ignoring
+    the other's pacing, and the first to finish clearing `self.fetching` while the second was
+    still writing. That overlap is what put fetch output on the terminal.
+
+    The change is remembered rather than dropped, because a newly-held ticker has no mark at
+    all and the fetch it triggers is the one the user is waiting for.
+
+    Turns red if the `if self.fetching` guard or the _refetch_wanted replay is removed.
+    """
+    async with app.run_test() as pilot:
+        await goto(pilot, "positions")
+        started = []
+        app.POLL_DISABLED = False
+        app._fetch = lambda *, announce: started.append(announce)
+
+        app.fetching = True            # one already in flight
+        app._held = frozenset({"AAA"})
+        app.con.execute(
+            "SELECT 1")               # keep the connection warm; the query below is the point
+        app._fetch_if_holdings_changed()
+        assert started == [], "a second fetch was started while one was in flight"
+        assert app._refetch_wanted, "the change was dropped instead of remembered"
+
+        # When the in-flight run reports back, the remembered change fires exactly once.
+        app._fetch_done("", None, False)
+        await pilot.pause()
+        assert started == [False], f"expected one queued fetch, got {started}"
+        assert not app._refetch_wanted, "the flag was not cleared, so it would fire forever"
+
+
+# --------------------------------------------------------------------------- #
+# the MCP server. The author, 2026-10-06: "i will give you account statements for
+# you to figure it out. so you should have MCP tools to add this reconcillation
+# via llm." Read-only, by their choice and by construction.
+# --------------------------------------------------------------------------- #
+def _mcp_server(tmp_path, monkeypatch):
+    """A server pointed at a throwaway seeded book."""
+    pytest.importorskip("mcp", reason="the mcp extra is not installed")
+    from desk import config
+    from desk import mcp as deskmcp
+
+    seed.build(tmp_path / "hub.db").close()
+    monkeypatch.setenv("TRADING_DESK_BOOK", str(tmp_path / "hub.db"))
+    config.config.cache_clear() if hasattr(config.config, "cache_clear") else None
+    return deskmcp
+
+
+async def _call(server, name, args=None):
+    res = await server.call_tool(name, args or {})
+    return res.content[0].text
+
+
+async def test_the_mcp_server_cannot_write_to_the_book(tmp_path, monkeypatch):
+    """READ-ONLY BY CONSTRUCTION, NOT BY CONVENTION -- the property the design rests on.
+
+    The author chose read-only over write access after being told it does not by itself get a
+    balance into the book. Everything the server exposes is DERIVED, so being wrong about it
+    costs a confusing answer; a write would be different in kind, because an invented fill is
+    a fabricated trade that nothing downstream contradicts.
+
+    So this asserts the GUARANTEE rather than the intent: the connection is opened `mode=ro`,
+    and SQLite itself refuses the write. A reviewer can forget an annotation; they cannot
+    forget this, because the test fails.
+
+    Turns red if _ro() stops using mode=ro -- e.g. if someone reuses book.connect().
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    con = deskmcp._ro()
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("INSERT INTO flows(on_date,amount,kind,account_id,currency) "
+                        "VALUES ('2026-01-01',1.0,'deposit','tfsa','CAD')")
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("UPDATE bets SET name='hijacked'")
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("DELETE FROM fills")
+    finally:
+        con.close()
+
+
+async def test_every_mcp_tool_declares_itself_read_only(tmp_path, monkeypatch):
+    """The annotation is what a CLIENT sees, so a model is not asked to approve a write.
+
+    Separate from the connection guarantee above on purpose: that one stops a write, this one
+    stops a client believing one is possible. Both, or the honesty is one-sided.
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+    tools = await server.list_tools()
+    assert tools, "the server exposes no tools"
+    for t in tools:
+        assert t.annotations is not None, f"{t.name} carries no annotations"
+        assert t.annotations.read_only_hint is True, f"{t.name} is not marked read-only"
+        assert t.annotations.destructive_hint is False, f"{t.name} is marked destructive"
+
+
+async def test_every_mcp_tool_answers_against_a_real_book(tmp_path, monkeypatch):
+    """Each tool runs and returns something parseable. The shape, not the figures.
+
+    Pinning numbers here would restate the fixture; the arithmetic has its own tests. What
+    this catches is the class that actually breaks a server: a tool that raises because a
+    dataclass field was renamed under it -- which has happened twice in this codebase to
+    readers that nothing exercised.
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+
+    for name in ("book_info", "net_worth", "integrity_check"):
+        payload = json.loads(await _call(server, name))
+        assert isinstance(payload, dict) and payload, f"{name} returned nothing useful"
+
+    for name in ("positions", "bets", "closed_legs"):
+        rows = json.loads(await _call(server, name))
+        assert isinstance(rows, list), f"{name} did not return a list"
+        assert rows, f"{name} returned no rows against the seeded book"
+
+    text = await _call(server, "attribution")
+    assert "UNEXPLAINED" in text or "nothing to attribute" in text, text[:200]
+
+
+async def test_the_mcp_server_tells_a_model_what_null_means(tmp_path, monkeypatch):
+    """`null` MEANS NOT RECORDED, and a model has to be told or it will substitute zero.
+
+    This is the project's first rule and the one most likely to be undone by a reader that
+    hands figures to something eager to be helpful. The instructions are the only place the
+    rule can be stated to a client, so their absence is a defect rather than a docs gap.
+    """
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+    instructions = (server.instructions or "").lower()
+    assert "not recorded" in instructions, "the server never explains what null means"
+    assert "never means zero" in instructions or "never means parity" in instructions
+    assert "currency" in instructions, "the native-vs-home rule is not stated"
+    assert "cannot write" in instructions, "a model is not told the server is read-only"
+
+
+# --------------------------------------------------------------------------- #
+# the three CRITICALs an adversarial audit found in this branch, 2026-10-06
+# --------------------------------------------------------------------------- #
+async def test_concurrent_attribution_calls_do_not_shred_each_other(tmp_path, monkeypatch):
+    """I REINTRODUCED THE BUG I HAD JUST FIXED, forty lines into a new file.
+
+    desk/prices.py lost contextlib.redirect_stdout because it replaces PROCESS-GLOBAL
+    sys.stdout and a worker thread must not do that. desk/mcp.py then used it anyway, with a
+    comment asserting it was safe "because this runs on the server's own thread with nothing
+    else printing" -- a premise I never tested, and which the SDK falsifies: it dispatches
+    each tools/call as its own task and runs sync tool bodies on worker threads.
+
+    Measured before the fix, with six concurrent calls: five different response lengths, one
+    of them the literal string "attribution printed nothing" (a false answer about the one
+    thing this server exists to report), one response carrying six panels concatenated, 343
+    bytes escaped to the terminal, and sys.stdout left as a StringIO for the life of the
+    process. A truncated panel can lose the STALE: line or the UNEXPLAINED residual, so the
+    model is handed a reconciliation of two different days and calls it clean.
+
+    Turns red if desk/mcp.py goes back to redirect_stdout, or check.attribution loses `emit`.
+    """
+    import io as _io
+
+    deskmcp = _mcp_server(tmp_path, monkeypatch)
+    server = deskmcp.build_server()
+
+    escaped = []
+
+    class Watch(_io.StringIO):
+        def write(self, s):
+            escaped.append(s)
+            return len(s)
+
+    real = sys.stdout
+    sys.stdout = Watch()
+    try:
+        results = await asyncio.gather(
+            *[server.call_tool("attribution", {}) for _ in range(6)])
+    finally:
+        left = sys.stdout
+        sys.stdout = real
+
+    texts = [r.content[0].text for r in results]
+    assert not escaped, (
+        f"{sum(len(s) for s in escaped)} bytes escaped to stdout -- on a real server that is "
+        f"the client's log file")
+    assert left.__class__ is Watch, "sys.stdout was replaced and not restored"
+    assert len(set(len(t) for t in texts)) == 1, (
+        f"six concurrent calls returned {len(set(len(t) for t in texts))} different lengths "
+        f"{sorted(set(len(t) for t in texts))} -- the panels interleaved")
+    for t in texts:
+        assert t.count("where the P&L came from") == 1, (
+            f"a response carried {t.count('where the P&L came from')} panels")
+        assert "printed nothing" not in t, "a call was told the panel printed nothing"
+
+
+def test_a_book_path_with_a_question_mark_is_still_read_only(tmp_path, monkeypatch):
+    """THE READ-ONLY BYPASS, and the module docstring calls mode=ro "the whole security model".
+
+    `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` does not escape the path, so SQLite
+    parses a `?` in it as the start of the query string, treats the rest as an unrecognised
+    key and SILENTLY IGNORES IT -- then creates a brand-new WRITABLE file at the truncated
+    path. Measured: with a book at `hub?v2.db`, the connection opened a new file called `hub`,
+    saw no trades table, and `CREATE TABLE` SUCCEEDED. `path.exists()` passes on the real
+    file, so nothing warns.
+
+    `Path.as_uri()` percent-encodes `?`, `#` and `%`.
+
+    Turns red if _ro() goes back to an f-string URI.
+    """
+    pytest.importorskip("mcp", reason="the mcp extra is not installed")
+    from desk import mcp as deskmcp
+
+    odd = tmp_path / "hub?v2.db"
+    seed.build(odd).close()
+    monkeypatch.setenv("TRADING_DESK_BOOK", str(odd))
+
+    con = deskmcp._ro()
+    try:
+        opened = con.execute("PRAGMA database_list").fetchall()[0][2]
+        assert pathlib.Path(opened) == odd, (
+            f"opened {opened!r}, not the book at {odd!r} -- the URI was mis-parsed")
+        assert con.execute("SELECT COUNT(*) FROM trades").fetchone()[0] > 0, (
+            "the connection sees no trades, so it opened the wrong file")
+        with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+            con.execute("CREATE TABLE wrote(x)")
+    finally:
+        con.close()
+
+
+def test_an_upgrade_that_copied_nothing_refuses_to_swap(tmp_path, capsys, monkeypatch):
+    """"COPIED NOTHING" MUST NEVER REPLACE A BOOK, and every check above it passes vacuously.
+
+    If the source opens as an empty database -- a mis-escaped path, a truncated file -- then
+    there are no rows to mismatch, no columns to report losing, and integrity_check says "ok"
+    on the empty rebuild. The swap then put a blank book over the real one and printed
+    "upgraded", exiting 0. Recoverable only from the .pre-vN.db backup, and only if noticed.
+
+    Turns red if the `not any(copied.values())` guard is removed from migrate.upgrade().
+    """
+    from desk import migrate
+
+    book_path = tmp_path / "hub.db"
+    seed.build(book_path).close()
+    # Make the source read as empty the way the URI bug did: no tables in common.
+    con = sqlite3.connect(book_path)
+    con.execute("PRAGMA writable_schema = ON")
+    for (t,) in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%'").fetchall():
+        con.execute(f'DROP TABLE IF EXISTS "{t}"')
+    con.commit()
+    con.close()
+
+    before = book_path.read_bytes()
+    rc = migrate.upgrade(book_path, note="test", apply=True)
+    out = capsys.readouterr().out
+
+    assert rc == 1, f"an upgrade that copied nothing returned {rc}, so it swapped"
+    assert "REFUSING TO SWAP" in out, out[-400:]
+    assert book_path.read_bytes() == before, "the original book was replaced anyway"

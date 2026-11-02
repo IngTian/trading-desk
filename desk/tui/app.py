@@ -194,6 +194,9 @@ class DeskApp(App):
         # READ BY THE DASHBOARD HEADER, which is how a poll that announces nothing is
         # still visible. Set on the UI thread only.
         self.fetching = False
+        # A HOLDINGS CHANGE THAT ARRIVED WHILE A FETCH WAS RUNNING. Serialised rather than
+        # dropped: see _fetch_if_holdings_changed and _fetch_done.
+        self._refetch_wanted = False
 
     # -- clock is injected everywhere, never read inline ---------------------
     def now(self) -> dt.datetime:
@@ -307,8 +310,22 @@ class DeskApp(App):
         self._held = held
         # NOT ON THE FIRST CALL. on_mount already kicks a fetch, and firing again here would
         # cancel it before it finished -- the one case where `exclusive` bites.
-        if changed and not first and not self.POLL_DISABLED:
-            self._fetch(announce=False)
+        if not (changed and not first and not self.POLL_DISABLED):
+            return
+        # AND NOT WHILE ONE IS IN FLIGHT, which _tick has always checked and this did not.
+        # `@work(exclusive=True)` cancels the TASK but cannot stop a running OS thread, so
+        # without this the two ran concurrently: both hammering the same undocumented
+        # endpoint, each ignoring the other's 0.4s pacing, and the first to finish clearing
+        # `self.fetching` while the second was still writing. That overlap is also what put
+        # fetch output on the user's terminal -- see _run_prices.
+        #
+        # REMEMBERED, NOT DROPPED. A new ticker has no mark at all, so the fetch it triggers
+        # is the one the user is waiting for; firing it when the current run reports back
+        # keeps that promptness without a second run racing the first.
+        if self.fetching:
+            self._refetch_wanted = True
+            return
+        self._fetch(announce=False)
 
     # An open prompt swallows every other key, EXCEPT the two that get you out of it.
     # Without that exception the app could be wedged with no way back: `tab` moved focus
@@ -591,12 +608,21 @@ class DeskApp(App):
         self._fetch(announce=False)
 
     def _fetch(self, *, announce: bool) -> None:
+        # SET HERE, ON THE UI THREAD, and before the worker starts. A scripted patch moved
+        # this into _fetch_worker, where it would have been set on the WORKER thread -- after
+        # _fetch returned, so _tick's guard could still pass and start a second run, which is
+        # the overlap this whole commit exists to prevent.
         self.fetching = True
         self.refresh_all()          # so the header can say "fetching…"
         if announce:
             self.notify("fetching marks and rates…", timeout=3)
         self._fetch_worker(announce)
 
+    # THE LATCH IS CLEARED IN _fetch_done, which only runs if the worker reports back. If
+    # the worker dies -- and before the BaseException fix above, a missing book killed it --
+    # `self.fetching` stayed True, both guards returned early forever, and the dashboard read
+    # "fetching…" for the rest of the session with marks that never refreshed. A worker that
+    # ends any other way must still clear it.
     @work(thread=True, exclusive=True, group="fetch")
     def _fetch_worker(self, announce: bool) -> None:
         """OFF THE UI THREAD, because this one is on a timer now.
@@ -616,6 +642,12 @@ class DeskApp(App):
     def _fetch_done(self, out: str, err: str | None, announce: bool) -> None:
         self.fetching = False
         self.refresh_all()
+        # A HOLDINGS CHANGE ARRIVED MID-FETCH. Honour it now: the guard in
+        # _fetch_if_holdings_changed exists to SERIALISE these, not to lose one.
+        if self._refetch_wanted:
+            self._refetch_wanted = False
+            if not self.POLL_DISABLED:
+                self._fetch(announce=False)
         if err is not None:
             # A FAILED POLL IS STILL REPORTED. Swallowing it silently would leave the
             # header saying "marked 3 days ago" with no hint that the desk has been
@@ -733,22 +765,49 @@ class DeskApp(App):
         Textual's notify is not thread-safe and the caller re-enters the UI thread
         through call_from_thread.
         """
-        import contextlib
-        import io
-
         # A PLAIN IMPORT, for the reason in book.identify_quote: the two-branch version
         # could not find prices from an installed wheel at all.
         from .. import prices as mod
-        buf = io.StringIO()
+
+        # NO contextlib.redirect_stdout. It replaces PROCESS-GLOBAL sys.stdout, and this runs
+        # on a worker thread -- so two overlapping fetches interleaved their save/restore, the
+        # first to finish handed the real terminal back while the second was still printing,
+        # and the output landed on the user's shell. The author saw six lines of it after
+        # quitting, which is when the TUI stopped overdrawing it. prices.main takes an `emit`
+        # callable now: a thread patching global state was the bug, and a lock would only have
+        # narrowed the window rather than closing it.
+        lines: list[str] = []
         try:
-            with contextlib.redirect_stdout(buf):
-                # 7 DAYS, not 1. Same-day refetches REPLACE rather than append -- the
-                # prices primary key is (base, quote, kind, on_date) -- so a window costs
-                # no rows and covers a long weekend, which a 1-day window does not.
-                mod.main(dry=False, days=7)
-        except Exception as exc:   # noqa: BLE001 - handed back, never swallowed
-            return buf.getvalue(), f"{type(exc).__name__}: {exc}"
-        return buf.getvalue(), None
+            # 7 DAYS, not 1. Same-day refetches REPLACE rather than append -- the
+            # prices primary key is (base, quote, kind, on_date) -- so a window costs
+            # no rows and covers a long weekend, which a 1-day window does not.
+            # THE RETURN CODE IS THE POINT. prices.main counts per-symbol failures and
+            # returns 1 if any were skipped; discarding it meant a poll in which EVERY symbol
+            # failed reported success, so the header went on reading "marked 1 day ago" with
+            # no warning until the marks were a week old. The collected lines already name
+            # each failure, which is what a toast needs.
+            rc = mod.main(dry=False, days=7, emit=lines.append)
+            if rc:
+                failed = [ln.strip() for ln in lines if ln.strip().startswith("!")]
+                return "\n".join(lines), (
+                    "; ".join(failed)[:200] if failed
+                    else "some symbols could not be priced")
+        except BaseException as exc:   # noqa: BLE001 - handed back, never swallowed
+            # BaseException, NOT Exception, and that is a bug fix rather than breadth for its
+            # own sake: prices._require_book raises SystemExit when the book is missing, and
+            # SystemExit does not derive from Exception. It therefore left this worker, passed
+            # through Textual's own `except Exception`, and came out of the event loop -- the
+            # desk vanished with a raw traceback and took the open prompt's contents with it.
+            #
+            # The trigger is ordinary. config.py's own note says the book lives in a synced
+            # folder: iCloud evicts it to a placeholder, a backup renames it, a volume
+            # detaches. The TUI's connection stays valid on the open inode so the desk keeps
+            # working, and then the 30-second poll fires.
+            #
+            # A worker thread never sees KeyboardInterrupt, so widening this far costs
+            # nothing a narrower clause would have kept.
+            return "\n".join(lines), f"{type(exc).__name__}: {exc}"
+        return "\n".join(lines), None
 
     def notify(self, message, **kwargs):   # noqa: A003
         """markup=False once here rather than at every call site: every toast
