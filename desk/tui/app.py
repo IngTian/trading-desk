@@ -27,7 +27,7 @@ from .. import book, config, parse
 from ..parse import ParseError
 from . import keymap
 from .footer import KeyFooter
-from .panes import BetsPane, DashboardPane, PositionsPane
+from .panes import BetsPane, DashboardPane, TradesPane
 from .prompt import InlinePrompt
 from .themes import ThemePicker
 from .themes import resolve as resolve_theme
@@ -38,7 +38,7 @@ RETRYABLE = (ParseError, book.DeskError, ValueError)
 # TAB ORDER, and it is load-bearing: _step_tab walks this and the digit keys are
 # numbered from it. The dashboard is first because it is the only pane that answers a
 # question you have before deciding anything.
-_TAB_SCOPE = {"tab-dashboard": "dashboard", "tab-positions": "positions",
+_TAB_SCOPE = {"tab-dashboard": "dashboard", "tab-trades": "trades",
               "tab-bets": "bets"}
 _SCOPE_TAB = {v: k for k, v in _TAB_SCOPE.items()}
 
@@ -207,8 +207,8 @@ class DeskApp(App):
         with TabbedContent(initial="tab-dashboard", id="tabs"):
             with TabPane("1 Dashboard", id="tab-dashboard"):
                 yield DashboardPane(id="dashboard")
-            with TabPane("2 Positions", id="tab-positions"):
-                yield PositionsPane(id="positions")
+            with TabPane("2 Trades", id="tab-trades"):
+                yield TradesPane(id="trades")
             with TabPane("3 Bets", id="tab-bets"):
                 yield BetsPane(id="bets")
         # One bottom-docked container, not two docked widgets: docking both makes the
@@ -516,8 +516,8 @@ class DeskApp(App):
     def app_show_dashboard(self) -> None:
         self._show("dashboard")
 
-    def app_show_positions(self) -> None:
-        self._show("positions")
+    def app_show_trades(self) -> None:
+        self._show("trades")
 
     def app_show_bets(self) -> None:
         self._show("bets")

@@ -152,7 +152,7 @@ def _first_line(text: str | None) -> str:
 class Pane(Vertical):
     """Shared shape: a title line, a body, and a reload() the app calls after a write."""
 
-    scope = "positions"
+    scope = "trades"
     # WHICH ROW A PROMPT IS ARMED AGAINST. Every one of these must be cleared when the
     # prompt is cancelled or the next prompt acts on the wrong row: leaving `_editing` set
     # meant the next plain `n` silently replaced whatever had been under the cursor, and
@@ -279,8 +279,8 @@ class Pane(Vertical):
 
 
 # --------------------------------------------------------------------------- #
-class PositionsPane(Pane):
-    scope = "positions"
+class TradesPane(Pane):
+    scope = "trades"
     title_id = "pos-head"
 
     def compose(self) -> ComposeResult:
@@ -291,7 +291,7 @@ class PositionsPane(Pane):
         # prices in tradingview." They are right -- a price chart is what a charting tool is for,
         # and this pane's job is what they hold and what it cost. The table scrolls itself
         # again, which is one fewer moving part.
-        yield PaneTable(id="pos-table", cursor_type="row", zebra_stripes=False)
+        yield PaneTable(id="trade-table", cursor_type="row", zebra_stripes=False)
 
     # A ROW KEY THAT IS NOT A TRADE STARTS WITH THIS. Group headers and closed legs are
     # rows in the same DataTable -- it has no row spans -- so `x`, `enter` and `s` would
@@ -301,7 +301,7 @@ class PositionsPane(Pane):
     INERT = "·"
 
     def on_mount(self) -> None:
-        t = self.query_one("#pos-table", DataTable)
+        t = self.query_one("#trade-table", DataTable)
         # Widths are budgeted, not guessed: DataTable adds 2 cells of padding per column,
         # so 10 columns cost 20 on top of these, and the sum below is 88 -- exactly the
         # 108 cells a 110-column terminal leaves. (This said 86/106 while the widths
@@ -331,11 +331,11 @@ class PositionsPane(Pane):
         # down which currencies these positions are in right?" -- and the CAT row is the
         # proof: entry 815.5100, last 816.05, value 1,126.64. The prices are USD and the
         # value is CAD, so 1 x 816.05 = 1,126.64 is arithmetic that cannot be right, and the
-        # reader has no way to see why. `Position.currency` was already there; only the
+        # reader has no way to see why. `Trade.currency` was already there; only the
         # column was missing. It sits immediately BEFORE the two columns it governs.
         #
         # `tp` PAID FOR IT, and it cost nothing, because NOTHING IN THIS CODEBASE WRITES
-        # `trades.target`: one read in book.positions() and no UPDATE anywhere. All seven
+        # `trades.target`: one read in book.trades() and no UPDATE anywhere. All seven
         # open legs hold NULL, so the column rendered a full stack of em-dashes that no key
         # could ever fill -- 8 of the 108 cells spent on furniture. Same disease as the two
         # unwritable halves, same cure the author already chose there: delete the reader rather
@@ -354,29 +354,14 @@ class PositionsPane(Pane):
         # characters and 18 clipped it to "Semis and Big Tech", dropping exactly one letter,
         # which reads as a typo rather than as truncation. `ccy` only ever holds a 3-letter
         # code, and "192.145" -- the widest real quantity, a DRIP fraction -- is 7.
-        # `banked` IS NEW, and `sl` and `date` paid for it. The author, 2026-11-02:
-        # "when i exit, even partially, it should be shown and recorded. bc, that's giving a
-        # verdict to at least part of the trade. now it only shows a defeat after everything
-        # is closed." A leg that had banked a four-figure loss on a trim that day showed only
-        # its unrealised hundreds on this row, and nothing else.
-        #
-        # ITS OWN COLUMN, not folded into P&L, which was their choice between the two: money
-        # already banked and money still at risk are different kinds of figure, and one
-        # number for both hides the distinction they asked to see.
-        #
-        # `sl` WAS 6 COLUMNS OF EM DASH -- 0 of 12 open legs carry a stop, a target or a loss
-        # limit, because the curve that computed them went in v14 and nothing writes one now.
-        # `date` was the leg's OPEN date, and losing it is a real cost: it is still on the
-        # detail line under the cursor and in the MCP `positions` tool. 83 + 20 padding =
-        # 103, so the table has slack now rather than none.
         for label, width in (("leg", 20), ("qty", 7), ("ccy", 3), ("entry", 8),
-                             ("last", 7), ("value", 9),
-                             ("banked", 11), ("P&L", 11), ("%", 7)):
+                             ("last", 7), ("date", 10), ("sl", 6),
+                             ("value", 9), ("P&L", 11), ("%", 7)):
             t.add_column(label, width=width)
         self.reload()
 
     def redraw(self) -> None:
-        t = self.query_one("#pos-table", DataTable)
+        t = self.query_one("#trade-table", DataTable)
         with self.keeping_the_cursor(t):
             self._fill_table(t)
         self._off_a_heading(t)
@@ -402,11 +387,11 @@ class PositionsPane(Pane):
 
     def _fill_table(self, t: DataTable) -> None:
         t.clear()
-        rows = book.positions(self.con)
+        rows = book.trades(self.con)
         base = book.base_currency(self.con)
         if not rows:
             self.query_one("#pos-head", Static).update(
-                mark("no open positions — press n to record a fill", WARN))
+                mark("no open trades — press n to record a fill", WARN))
             return
         # `or 0.0` HERE WAS A LIE. A leg with no recorded entry contributed nothing to
         # cost and its full market value to value, so this header advertised
@@ -514,10 +499,9 @@ class PositionsPane(Pane):
     def _group(self, t: DataTable, bet_id, legs, bet, *, base: str) -> None:
         """A heading row for one bet, then its legs indented under it.
 
-        The heading carries a SUBTOTAL of the legs beneath it -- value, what they have
-        BANKED, and P&L, in the home currency, computed the same withholding way as the pane
-        header. A group heading that showed only a name would make the reader add the rows
-        up.
+        The heading carries a SUBTOTAL of the legs beneath it -- value and P&L, in the home
+        currency, computed the same withholding way as the pane header. A group heading
+        that showed only a name would make the reader add the rows up.
         """
         valued = [r for r in legs if r.value_base is not None]
         priced = [r for r in legs
@@ -525,12 +509,6 @@ class PositionsPane(Pane):
         sub_val = sum(r.value_base for r in valued) if valued else None
         sub_cost = sum(r.cost_base for r in priced) if priced else None
         sub_pnl = (sum(r.value_base for r in priced) - sub_cost) if priced else None
-        # THE BET'S BANKED SUBTOTAL, withheld the same way the others are: if any leg's
-        # realised figure cannot be read -- an unpriced sale, or a missing rate -- the group
-        # total is unknown rather than short. A bet that has sold nothing sums to 0.0 and is
-        # rendered blank, because a heading full of +0.00 trains the eye past the column.
-        _banked = [r.realised_base for r in legs]
-        sub_banked = None if any(v is None for v in _banked) else sum(_banked)
         t.add_row(
             # THE NAME, NOT THE SLUG. The author, 2026-09-26: "in the bets yes i can change the name
             # to whatever format yet in positions they are linked to the old id." Renaming a
@@ -550,11 +528,9 @@ class PositionsPane(Pane):
             _cell(bet.status if bet else "", GOOD
                   if bet and bet.status in ("live", "weakened") else FAINT),
             _cell(""),
-            # `date` AND `sl` WERE HERE. They went when `banked` arrived -- see the column
-            # list in on_mount. The bet's opened date is on the bets tab, where it belongs.
+            _cell((bet.opened or "") if bet else "", FAINT),
+            _cell(""),
             _cell(money(sub_val) if sub_val is not None else "", "bold"),
-            _cell(f"{arrow(sub_banked)} {signed(sub_banked)}"
-                  if sub_banked else "", trend_style(sub_banked)),
             _cell(f"{arrow(sub_pnl)} {signed(sub_pnl)}" if sub_pnl is not None else "",
                   trend_style(sub_pnl)),
             _cell(pct(100 * sub_pnl / sub_cost) if sub_cost and sub_pnl is not None
@@ -563,7 +539,7 @@ class PositionsPane(Pane):
         for r in legs:
             # NATIVE, not `_base`, so the row adds up: qty x last IS the value shown, and
             # `ccy` two columns to the left says which currency all of it is in. See
-            # Position.cost_native for why this is also the only version that can be shown
+            # Trade.cost_native for why this is also the only version that can be shown
             # when no FX rate is recorded.
             st = trend_style(r.pnl_native)
             t.add_row(
@@ -581,21 +557,10 @@ class PositionsPane(Pane):
                       "" if r.entry is not None else WARN),
                 _cell(f"{r.mark:.2f}" if r.mark is not None else NA,
                       "" if r.mark is not None else WARN),
+                _cell(r.opened or NA, FAINT if not r.opened else ""),
+                _cell(f"{r.stop:g}" if r.stop is not None else NA,
+                      FAINT if r.stop is None else ""),
                 _cell(money(r.value_native)),
-                # BANKED. An em dash when nothing has been sold out of this leg, which is
-                # most of them -- a `+0.00` on every untrimmed row would train the eye past
-                # the column, and it would also be indistinguishable from "we could not
-                # work it out", which in this codebase means something specific. None IS
-                # that second case (a sale with no recorded price) and gets the warning
-                # colour, so the two look different because they are.
-                _cell(
-                    NA if r.realised_native is None
-                    else (NA if r.realised_native == 0.0
-                          else f"{arrow(r.realised_native)} "
-                               f"{signed(r.realised_native)}"),
-                    WARN if r.realised_native is None
-                    else (FAINT if r.realised_native == 0.0
-                          else trend_style(r.realised_native))),
                 _cell(f"{arrow(r.pnl_native)} {signed(r.pnl_native)}", st),
                 _cell(pct(r.pnl_pct_native), st),
                 key=r.trade_id)
@@ -629,7 +594,6 @@ class PositionsPane(Pane):
         legs = book.closed_legs(self.con)
         if not legs:
             return
-        banked = book.banked_in_open_legs(self.con)
         by_ccy: dict[str, list] = {}
         for leg in legs:
             by_ccy.setdefault(leg.currency, []).append(leg)
@@ -642,34 +606,27 @@ class PositionsPane(Pane):
                 _cell(f"CLOSED · {ccy}", "bold"),
                 _cell(str(len(group)), FAINT),
                 _cell(ccy, FAINT),
-                _cell("realised", FAINT), _cell(""),
+                _cell("realised", FAINT), _cell(""), _cell(""), _cell(""),
                 # LABELS THE COLUMN FOR THIS SECTION, because it changes meaning: `value`
                 # is market value on an open leg and COST on a closed one, which is the
                 # denominator of the % beside it. Saying so here is cheaper than a second
                 # column nothing else would use.
                 _cell("at cost", FAINT),
-                # `banked` IS BLANK ON THIS HEADING. A closed leg realised everything it
-                # was ever going to, so its result is the `P&L` figure beside this; a
-                # banked subtotal here would restate it.
-                _cell(""),
                 _cell(f"{arrow(total)} {signed(total)}" if total is not None else NA,
                       trend_style(total)),
                 _cell(""),
                 key=f"{self.INERT}closed:{ccy}")
-            # A TRIM BANKS MONEY WITHOUT CLOSING ANYTHING, so this total can be short of
-            # the dashboard's `realised` line. Saying so beats letting two figures that
-            # differ by a few dollars look like a bug in one of them.
+            # NO `banked in open` ROW ANY MORE, and its absence is the fix. A trim used to
+            # realise money that no row here carried, so this section appended a separate
+            # line for it OUTSIDE the total above -- the tab showed `realised +850.32` with a
+            # `-4,653.59` printed directly beneath it and no way to reconcile the two from
+            # the screen. The author: "when i close 80 shares of INTC, why dont we just log
+            # that in closed positions. i think that's easier than banked."
             #
-            # IT GOES IN THE `banked` COLUMN NOW, not in P&L where it used to sit -- the
-            # column exists, and this figure is the sum of exactly what the open rows above
-            # show in it. The gap it explains is now traceable to the legs that caused it
-            # rather than only asserted here.
-            if ccy in banked:
-                t.add_row(
-                    _cell("  banked in open", FAINT), _cell(""), _cell(ccy, FAINT),
-                    _cell(""), _cell(""), _cell(""),
-                    _cell(signed(banked[ccy]), FAINT), _cell(""), _cell(""),
-                    key=f"{self.INERT}banked:{ccy}")
+            # So a partial exit is one of the rows below, and the header sums it like any
+            # other. book.banked_in_open_legs() now returns nothing by construction, and a
+            # test holds it to that -- it is the check that this section accounts for every
+            # realised dollar, not a source of one.
             for leg in group:
                 st = trend_style(leg.realised)
                 t.add_row(
@@ -683,16 +640,14 @@ class PositionsPane(Pane):
                     _cell(ccy, FAINT),
                     _cell(f"{leg.entry:.4f}" if leg.entry is not None else NA, FAINT),
                     _cell(f"{leg.exit:.2f}" if leg.exit is not None else NA, FAINT),
-                    _cell(money(leg.cost), FAINT),
-                    # `banked` IS BLANK ON A CLOSED LEG, and the blank is the honest cell.
-                    # Everything this leg ever realised is in `P&L` beside it -- that is
-                    # what closing means -- so repeating it here would make the column
-                    # mean two different things depending on which section you are in.
-                    #
-                    # THE CLOSE DATE AND `sl` WERE HERE and went with the open rows' `date`
-                    # and `sl` columns. A stop on a leg that is already out meant nothing
-                    # anyway; the close date is on the detail line under the cursor.
+                    _cell(leg.closed or NA, FAINT),
+                    # `sl` IS LEFT EMPTY, and the bet does NOT go here. A stop on a leg
+                    # that is already out means nothing, and the free 6 cells are not
+                    # enough for a bet id -- "ai-cap" is worse than a blank. Which bet a
+                    # closed leg belonged to, and what each bet realised, is a fact about
+                    # the BET; it belongs on tab 3 as a column, not clipped in here.
                     _cell(""),
+                    _cell(money(leg.cost), FAINT),
                     _cell(f"{arrow(leg.realised)} {signed(leg.realised)}", st),
                     _cell(pct(leg.realised_pct), st),
                     key=f"{self.INERT}leg:{leg.trade_id}")
@@ -707,9 +662,9 @@ class PositionsPane(Pane):
         column already says which legs have no stop, in the row it concerns, without
         turning it into an accusation.
         """
-        rows = book.positions(self.con)
+        rows = book.trades(self.con)
         stale = {r.mark_date for r in rows if r.mark_date}
-        bits = [mark("positions", "bold")]
+        bits = [mark("trades", "bold")]
         if stale:
             bits.append(f"marks {min(stale)}")
         if any(r.unconfirmed_fills for r in rows):
@@ -773,7 +728,7 @@ class PositionsPane(Pane):
         look up a trade called that, find nothing, and the failure would be silent; on a
         closed leg it would delete a fill from a finished round trip.
         """
-        t = self.query_one("#pos-table", DataTable)
+        t = self.query_one("#trade-table", DataTable)
         if not t.row_count or not t.is_valid_coordinate(t.cursor_coordinate):
             return None
         key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
@@ -1335,7 +1290,7 @@ class DashboardPane(Pane):
         with self.keeping_the_cursor(t):
             t.clear()
             if not groups:
-                head.update(mark("nothing held — press n on positions", WARN))
+                head.update(mark("nothing held — press n on trades", WARN))
                 return
             claimed = sum(g.claim_pct for g in groups if g.claim_pct is not None)
             # THE BAR RULE, SAID ONCE. Each bar is the row's share of its PARENT -- a bet
@@ -1905,7 +1860,7 @@ class BetsPane(Pane):
         budget as a row makes the allocation the denominator without the chart knowing.
         """
         # NO INERT CHECK, unlike the positions table: every row here is one bet and its key
-        # is the bet id. `self.INERT` belongs to PositionsPane, whose table carries group
+        # is the bet id. `self.INERT` belongs to TradesPane, whose table carries group
         # headings and blank spacers in the same DataTable -- reaching for it here raised
         # AttributeError, which Pane.reload caught and printed in the pane title.
         bet = self._cursor_bet()

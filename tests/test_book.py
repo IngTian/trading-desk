@@ -475,3 +475,43 @@ def test_a_currency_the_attribution_cannot_convert_is_refused(writable):
     assert "GBP" in out and "cannot convert" in out, (
         "a GBP leg was valued at par:\n" + out)
     assert "UNEXPLAINED" not in out, out
+
+
+def test_every_realised_dollar_has_a_closed_row(con):
+    """THE CROSS-CHECK THAT TWO DIFFERENT ROUTES AGREE, on the real record.
+
+    `banked_in_open_legs()` derives realised money from the SLEEVE -- cash out against cash
+    back, per currency -- and subtracts what the closed rows account for. The closed rows come
+    from a per-leg average-cost walk. The two share no arithmetic, so agreement is evidence
+    and disagreement is a bug report in dollars.
+
+    It is only zero because the author redefined an exit as a closed trade: "when i close 80
+    shares of INTC, why dont we just log that in closed positions." Before that, a trim
+    realised money that no row carried and this function existed to name the gap.
+
+    IT HAS ALREADY EARNED ITS KEEP. Moving closed_legs() onto the walk made one leg withhold
+    -- a round trip whose buy was never dated -- and the CAD side came back short by exactly
+    that leg's result. Nothing else in the suite noticed.
+    """
+    gap = book.banked_in_open_legs(con)
+    assert gap == {}, (
+        f"realised money that no closed row accounts for: {gap}. Either an exit is missing "
+        f"from closed_legs() or one is being counted twice.")
+
+
+def test_no_bet_reports_losing_more_than_it_committed(con):
+    """A P&L PERCENTAGE BELOW -100% IS A CLAIM THAT THE CAPITAL IS GONE, so it needs to be.
+
+    This caught a real defect the day it shipped: `realised` counted what a trim banked while
+    the denominator counted only legs that closed completely, so a partly-sold leg handed its
+    result to the numerator and none of its cost to the denominator. One bet read -115.72%
+    while holding shares worth something. The honest figure was -42.18%.
+    """
+    for b in book.bets(con):
+        if b.pnl_pct is None or b.value is None:
+            continue
+        if b.value > 0:
+            assert b.pnl_pct > -100.0, (
+                f"{b.name or b.id} reports {b.pnl_pct:.2f}% while still holding "
+                f"{b.value:,.2f} -- a loss cannot exceed the capital committed unless the "
+                f"capital is gone. Check Bet.invested against Bet.realised.")

@@ -33,7 +33,7 @@ import seed  # noqa: E402
 from desk import book, config, parse  # noqa: E402
 from desk.tui import charts, keymap, themes  # noqa: E402
 from desk.tui.app import DeskApp  # noqa: E402
-from desk.tui.panes import PositionsPane  # noqa: E402
+from desk.tui.panes import TradesPane  # noqa: E402
 from desk.tui.widgets import NA as NA_DASH  # noqa: E402
 from desk.tui.widgets import share  # noqa: E402
 
@@ -296,19 +296,19 @@ async def test_it_shows_the_open_positions(app, con, goto):
     This said `== 3` and broke the first time a real position was recorded, which
     made a correct book look like a broken table.
     """
-    expected = len(book.positions(con))
+    expected = len(book.trades(con))
     assert expected, "the fixture book should have open positions to show"
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
-        assert app.scope == "positions"
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        assert app.scope == "trades"
+        t = app.query_one("#trade-table", DataTable)
         # LEG ROWS, not every row. The table also holds a heading per bet and a section of
         # closed legs, all of them ordinary DataTable rows because it has no row spans.
         legs = [k for k in (t.coordinate_to_cell_key((r, 0)).row_key.value
                             for r in range(t.row_count))
-                if k and not k.startswith(PositionsPane.INERT)]
+                if k and not k.startswith(TradesPane.INERT)]
         assert len(legs) == expected
-        assert set(legs) == {p.trade_id for p in book.positions(con)}
+        assert set(legs) == {p.trade_id for p in book.trades(con)}
 
 
 async def test_digits_switch_panes_in_tab_order(app):
@@ -331,7 +331,7 @@ async def test_digits_switch_panes_in_tab_order(app):
 
 async def test_n_records_a_fill(app, con, type_into, goto):
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         assert app.prompt.is_open
@@ -347,7 +347,7 @@ async def test_n_records_a_fill(app, con, type_into, goto):
 async def test_a_rejected_line_keeps_the_text_and_says_why(app, con, type_into, goto):
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await type_into(pilot, "USDCO 1")           # no price
         await pilot.press("enter")
@@ -362,7 +362,7 @@ async def test_a_rejected_line_keeps_the_text_and_says_why(app, con, type_into, 
 async def test_a_fill_that_would_go_short_is_refused(app, con, type_into, goto):
     """Rule 3 is a wall. The message comes from the wall, not from the UI."""
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await type_into(pilot, "USDCO -99 430.00 !growth")
         await pilot.press("enter")
@@ -672,19 +672,41 @@ def test_an_unpriced_fill_withholds_the_whole_legs_result(con):
     assert leg.realised_pct is None
 
 
-def test_a_trim_banks_money_without_closing_anything(con):
-    """The figure that makes the two realised totals agree.
+def test_a_trim_is_a_closed_trade_and_nothing_is_banked_outside_one(con):
+    """EVERY REALISED DOLLAR HAS A ROW. This is the invariant the redesign bought.
 
     The fixture trims 20 USDCO at 110 against an average entry of 100 on a leg that still
-    holds 40 shares. That US$200 is in the dashboard's `realised` line and in no closed
-    leg, so without naming it the two look like they disagree by exactly that much.
+    holds 40 shares. That US$200 used to appear in the dashboard's `realised` line and in no
+    closed leg, so the trades tab carried a `banked in open` line for it -- appended OUTSIDE
+    the `CLOSED` header's own total, which is how the screen came to show two figures that
+    could not be reconciled from the screen. The author: "when i close 80 shares of INTC, why
+    dont we just log that in closed positions. i think that's easier than banked."
+
+    So the trim is a closed row of 20 shares, and banked_in_open_legs() -- which derives the
+    remainder from the SLEEVE by a completely different route -- has nothing left to report.
+    A non-empty result means something is double-counted or dropped.
+
+    Turns red if an exit stops producing a closed row, or produces two.
     """
-    assert book.banked_in_open_legs(con)["USD"] == pytest.approx(200.0)
-    # And it is DERIVED as the remainder, so the three figures cannot drift apart.
+    exit_ = next(c for c in book.closed_legs(con) if c.trade_id == "2026-05-04-usdco")
+    assert exit_.qty == pytest.approx(20.0), "the sold 20, not the 60 ever bought"
+    assert exit_.entry == pytest.approx(100.0), "the ACB when the sale happened"
+    assert exit_.exit == pytest.approx(110.0)
+    assert exit_.cost == pytest.approx(2_000.0), "what those 20 shares cost"
+    assert exit_.realised == pytest.approx(200.0)
+
+    # THE LEG IS STILL OPEN TOO, holding the other 40. Both halves exist at once.
+    held = next(t for t in book.trades(con) if t.trade_id == "2026-05-04-usdco")
+    assert held.qty == pytest.approx(40.0)
+    assert held.entry == pytest.approx(100.0), "selling 20 of 60 cannot move the ACB"
+
+    assert book.banked_in_open_legs(con) == {}, (
+        "realised money with no closed row to account for it")
     closed = sum(c.realised for c in book.closed_legs(con)
                  if c.currency == "USD" and c.realised is not None)
     sleeve = next(s for s in book.net(con).sleeves if s.currency == "USD")
-    assert sleeve.realised == pytest.approx(closed + 200.0)
+    assert sleeve.realised == pytest.approx(closed), (
+        "the per-leg walk and the sleeve must agree exactly, by two different routes")
 
 
 def test_the_return_splits_into_parts_that_add_back_up(con):
@@ -744,13 +766,13 @@ async def test_the_closed_section_is_rendered_at_all(app, con, goto):
     expected = book.closed_legs(con)
     assert expected, "the fixture needs a closed trade for this to mean anything"
     async with app.run_test(size=(120, 44)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         keys = [t.coordinate_to_cell_key((r, 0)).row_key.value
                 for r in range(t.row_count)]
     for leg in expected:
-        assert f"{PositionsPane.INERT}leg:{leg.trade_id}" in keys, leg.trade_id
-    assert any(k.startswith(f"{PositionsPane.INERT}closed:") for k in keys), \
+        assert f"{TradesPane.INERT}leg:{leg.trade_id}" in keys, leg.trade_id
+    assert any(k.startswith(f"{TradesPane.INERT}closed:") for k in keys), \
         "a heading per currency, so the realised total is unambiguous"
 
 
@@ -762,11 +784,11 @@ async def test_a_group_heading_takes_no_key(app, con, goto):
     """
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test(size=(120, 44)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         heading = next(r for r in range(t.row_count)
                        if str(t.coordinate_to_cell_key((r, 0)).row_key.value
-                              ).startswith(PositionsPane.INERT))
+                              ).startswith(TradesPane.INERT))
         t.cursor_coordinate = (heading, 0)
         await pilot.pause()
         for key in ("x", "enter", "s"):
@@ -781,23 +803,23 @@ async def test_the_cursor_never_opens_on_a_heading(app, goto):
     """Row 0 IS a heading now, so opening the tab used to park the cursor where `n`, `x`,
     `enter` and `s` all did nothing -- silently, which reads as the pane being broken."""
     async with app.run_test(size=(120, 44)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
-        assert not key.startswith(PositionsPane.INERT), key
+        assert not key.startswith(TradesPane.INERT), key
 
 
 async def test_the_legs_sit_under_their_bet(app, con, goto):
     """The link the author asked for: "let me link bets and trades"."""
     async with app.run_test(size=(120, 44)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         keys = [t.coordinate_to_cell_key((r, 0)).row_key.value
                 for r in range(t.row_count)]
-    owner = {p.trade_id: p.bet_id for p in book.positions(con)}
+    owner = {p.trade_id: p.bet_id for p in book.trades(con)}
     current = None
     for key in keys:
-        if key.startswith(f"{PositionsPane.INERT}bet:"):
+        if key.startswith(f"{TradesPane.INERT}bet:"):
             current = key.split(":", 1)[1]
             current = None if current == "none" else current
         elif key in owner:
@@ -1048,7 +1070,7 @@ def test_every_bets_realised_sums_to_the_dashboards(con):
             loose += leg.realised * rate
     # A trim banks money inside a leg that is still open, and an open leg need not have a
     # bet -- parked cash does not. No Bet can account for that, so it is loose too.
-    for leg in book.positions(con):
+    for leg in book.trades(con):
         if leg.bet_id is None and leg.realised_native:
             rate, _ = book.fx_rate(con, leg.currency, n.home)
             loose += leg.realised_native * rate
@@ -1112,7 +1134,7 @@ async def test_an_unknown_ticker_registers_itself_from_the_quote(app, con, type_
     app.quote_lookup = lambda t: [_found("ZGLD.TO", "CAD",
                                          name="BMO Gold Bullion ETF (CAD Units)")]
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await type_into(pilot, "ZGLD 10 65 !growth /tfsa")
@@ -1124,7 +1146,7 @@ async def test_an_unknown_ticker_registers_itself_from_the_quote(app, con, type_
                       "WHERE ticker='ZGLD'").fetchone()
     assert tuple(row) == ("CAD", "etf", "ZGLD.TO",
                           "BMO Gold Bullion ETF (CAD Units)")
-    held = next(p for p in book.positions(con) if p.ticker == "ZGLD")
+    held = next(p for p in book.trades(con) if p.ticker == "ZGLD")
     assert (held.qty, held.entry, held.account) == (10.0, 65.0, "tfsa")
 
 
@@ -1149,7 +1171,7 @@ async def test_two_listings_open_a_choice_rather_than_a_refusal(app, con, type_i
     said = []
     async with app.run_test() as pilot:
         app.notify = lambda msg, **kw: said.append(str(msg))
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await type_into(pilot, "CBIL 150 50.04 /tfsa")
@@ -1160,7 +1182,7 @@ async def test_two_listings_open_a_choice_rather_than_a_refusal(app, con, type_i
         # candidate, and nothing has been written yet.
         assert app.prompt.is_open and app.prompt.label == "listing", app.prompt.label
         assert app.prompt.value == "CBIL"
-        assert not [p for p in book.positions(con) if p.ticker == "CBIL"]
+        assert not [p for p in book.trades(con) if p.ticker == "CBIL"]
 
         # `tab` cycles the candidates -- the pool comes from the pane, not the book, because
         # they are listings a lookup just found and none of them is recorded.
@@ -1177,7 +1199,7 @@ async def test_two_listings_open_a_choice_rather_than_a_refusal(app, con, type_i
     row = con.execute("SELECT currency, kind, quote_symbol, name FROM instruments "
                       "WHERE ticker='CBIL'").fetchone()
     assert tuple(row) == ("CAD", "etf", "CBIL.TO", "Global X 0-3 Month T-Bill ETF CAD")
-    held = next(p for p in book.positions(con) if p.ticker == "CBIL")
+    held = next(p for p in book.trades(con) if p.ticker == "CBIL")
     assert (held.qty, held.entry, held.account) == (150.0, 50.04, "tfsa")
 
     # The toast said WHICH SECURITY each candidate is -- the part a symbol cannot tell you --
@@ -1199,7 +1221,7 @@ async def test_an_abandoned_listing_choice_does_not_replay_the_fill_later(app, c
                                   _found("CBIL.TO", "CAD")]
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await type_into(pilot, "CBIL 150 50.04 /tfsa")
@@ -1208,7 +1230,7 @@ async def test_an_abandoned_listing_choice_does_not_replay_the_fill_later(app, c
         assert app.prompt.label == "listing"
         await pilot.press("escape")
         await pilot.pause()
-        pane = app.query_one("#positions")
+        pane = app.query_one("#trades")
         assert pane._pending_fill is None, "an abandoned choice kept the fill armed"
         # A fresh fill must be a fresh fill, not the stashed one.
         await pilot.press("n")
@@ -1218,7 +1240,7 @@ async def test_an_abandoned_listing_choice_does_not_replay_the_fill_later(app, c
         await pilot.pause()
         assert not app.prompt.is_open, app.prompt.error
     assert con.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == before + 1
-    assert not [p for p in book.positions(con) if p.ticker == "CBIL"]
+    assert not [p for p in book.trades(con) if p.ticker == "CBIL"]
 
 
 def test_there_is_no_instrument_key_at_all(con):
@@ -1231,7 +1253,7 @@ def test_there_is_no_instrument_key_at_all(con):
     assert not any(h.label == "instrument" for h in keymap.HINTS)
     assert not hasattr(parse, "parse_instrument")
     from desk.tui import panes
-    assert not hasattr(panes.PositionsPane, "key_instrument")
+    assert not hasattr(panes.TradesPane, "key_instrument")
 
 
 async def test_a_symbol_nobody_quotes_is_still_refused(app, con, type_into, goto):
@@ -1240,7 +1262,7 @@ async def test_a_symbol_nobody_quotes_is_still_refused(app, con, type_into, goto
     it"."""
     app.quote_lookup = lambda t: []
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await type_into(pilot, "NOSUCHTHING 1 1 /tfsa")
@@ -1258,7 +1280,7 @@ async def test_a_known_ticker_never_asks_the_network(app, con, type_into, goto):
     calls = []
     app.quote_lookup = lambda t: calls.append(t) or []
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await type_into(pilot, "USDCO 1 430.00 !growth")
@@ -1299,7 +1321,7 @@ async def test_the_registration_is_announced_so_it_can_be_corrected(app, con, ty
     seen = []
     async with app.run_test() as pilot:
         app.notify = lambda msg, **kw: seen.append(str(msg))
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await type_into(pilot, "ZGLD 10 65 !growth /tfsa")
@@ -1438,32 +1460,32 @@ async def test_a_group_heading_never_sits_on_the_previous_groups_last_leg(app, c
     """A DataTable has no row spans and no way to space groups, so the gap is a ROW --
     keyed inert, so `x`, `enter` and `s` all refuse it like any other heading."""
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.pause()
-        t = app.query_one("#pos-table", DataTable)
+        t = app.query_one("#trade-table", DataTable)
         keys = [t.coordinate_to_cell_key((r, 0)).row_key.value
                 for r in range(t.row_count)]
-        gaps = [k for k in keys if k.startswith(f"{PositionsPane.INERT}gap:")]
+        gaps = [k for k in keys if k.startswith(f"{TradesPane.INERT}gap:")]
         assert gaps, "the groups run together"
         assert len(set(gaps)) == len(gaps), "every row key must be unique"
         # A gap precedes every heading except the very first.
         headings = [i for i, k in enumerate(keys)
-                    if k.startswith(f"{PositionsPane.INERT}bet:")
-                    or k.startswith(f"{PositionsPane.INERT}closed:")]
+                    if k.startswith(f"{TradesPane.INERT}bet:")
+                    or k.startswith(f"{TradesPane.INERT}closed:")]
         for i in headings[1:]:
-            assert keys[i - 1].startswith(f"{PositionsPane.INERT}gap:"), keys[i - 2:i + 1]
-        assert not keys[0].startswith(f"{PositionsPane.INERT}gap:"), \
+            assert keys[i - 1].startswith(f"{TradesPane.INERT}gap:"), keys[i - 2:i + 1]
+        assert not keys[0].startswith(f"{TradesPane.INERT}gap:"), \
             "no blank row above the first group -- the title already provides that air"
 
 
 async def test_a_blank_row_takes_no_key(app, con, goto):
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         gap = next(r for r in range(t.row_count)
                    if str(t.coordinate_to_cell_key((r, 0)).row_key.value
-                          ).startswith(f"{PositionsPane.INERT}gap:"))
+                          ).startswith(f"{TradesPane.INERT}gap:"))
         t.cursor_coordinate = (gap, 0)
         await pilot.pause()
         for key in ("x", "enter", "s"):
@@ -1573,8 +1595,8 @@ async def test_the_cursor_keeps_the_arrows_everywhere_but_the_edges(app, goto):
     """PaneTable hands the key back ONLY at the boundary. Anywhere else the cursor must move,
     or `x`, `enter` and `s` stop acting on a row the user chose."""
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         assert t.row_count > 3
         start = t.cursor_coordinate.row
         await pilot.press("down")
@@ -1946,7 +1968,7 @@ def test_the_portfolio_groups_every_leg_under_its_bet_largest_first(con):
     groups = book.portfolio(con)
     assert groups, "no positions to group"
     seen = sum(len(g.legs) for g in groups)
-    assert seen == len(book.positions(con)), "a leg went missing between the two views"
+    assert seen == len(book.trades(con)), "a leg went missing between the two views"
     # Largest first, with unvaluable groups last rather than sorted as zero.
     valued = [g.value for g in groups if g.value is not None]
     assert valued == sorted(valued, reverse=True)
@@ -2107,7 +2129,7 @@ def test_composition_aggregates_a_ticker_held_in_two_accounts(con):
                   on_date="2026-06-01", account="rrsp")
     book.add_fill(con, ticker="CADCO", shares=4, price=10.0, bet_id="growth",
                   on_date="2026-06-01", account="tfsa")
-    legs = [p for p in book.positions(con)
+    legs = [p for p in book.trades(con)
             if p.bet_id == "growth" and p.ticker == "CADCO"]
     assert len({p.account for p in legs}) == 2, "needs the same ticker in two accounts"
 
@@ -2200,7 +2222,7 @@ def test_deleting_the_last_fill_takes_the_empty_position_with_it(con):
     pre = book.delete_fill(con, fill)
     assert con.execute("SELECT 1 FROM trades WHERE id=?", (tid,)).fetchone() is None, (
         "the emptied position survived its last fill")
-    assert not [p for p in book.positions(con) if p.trade_id == tid]
+    assert not [p for p in book.trades(con) if p.trade_id == tid]
 
     # ONE `u` PUTS BACK BOTH. The fill cannot be re-inserted without its trade --
     # fills.trade_id is NOT NULL and a foreign key -- so a pre-image that carried only the
@@ -2209,7 +2231,7 @@ def test_deleting_the_last_fill_takes_the_empty_position_with_it(con):
     assert con.execute("SELECT 1 FROM trades WHERE id=?", (tid,)).fetchone() is not None
     assert con.execute("SELECT COUNT(*) FROM fills WHERE trade_id=?",
                        (tid,)).fetchone()[0] == 1
-    back = next(p for p in book.positions(con) if p.trade_id == tid)
+    back = next(p for p in book.trades(con) if p.trade_id == tid)
     assert back.qty > 0 and back.bet_id == "parking"
 
 
@@ -2280,7 +2302,7 @@ def test_a_leg_can_be_detached_from_every_bet(con):
     book.set_trade_bet(con, tid, bet_id=None)
     assert con.execute("SELECT bet_id FROM trades WHERE id=?",
                        (tid,)).fetchone()["bet_id"] is None
-    assert next(p for p in book.positions(con) if p.trade_id == tid).bet_id is None
+    assert next(p for p in book.trades(con) if p.trade_id == tid).bet_id is None
     assert parse.parse_trade_bet("") is None
 
 
@@ -2312,8 +2334,8 @@ async def test_b_moves_the_leg_under_the_cursor_and_leaves_no_phantom(app, con, 
     """
     tid = "2026-05-04-park"
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = await _point_at(pilot, app, "#pos-table", tid)
+        await goto(pilot, "trades")
+        t = await _point_at(pilot, app, "#trade-table", tid)
         assert t is not None
         await pilot.press("b")
         await pilot.pause()
@@ -2354,8 +2376,8 @@ def _pos_columns() -> dict[str, int]:
     import inspect
     import re
 
-    from desk.tui.panes import PositionsPane
-    src = inspect.getsource(PositionsPane.on_mount)
+    from desk.tui.panes import TradesPane
+    src = inspect.getsource(TradesPane.on_mount)
     labels = re.findall(r'\("([^"]+)", \d+\)', src)
     assert labels, "could not read the positions columns from the pane"
     alias = {"P&L": "pnl", "%": "pct"}
@@ -2385,12 +2407,12 @@ async def test_every_open_leg_states_its_currency_and_its_row_adds_up(app, con, 
     bookkeeping tool should print.
     """
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         rows = {t.coordinate_to_cell_key((r, 0)).row_key.value: t.get_row_at(r)
                 for r in range(t.row_count)}
 
-    legs = book.positions(con)
+    legs = book.trades(con)
     assert legs, "fixture has no open legs, so this test proves nothing"
     for leg in legs:
         row = rows[leg.trade_id]
@@ -2415,12 +2437,12 @@ async def test_a_foreign_leg_is_not_shown_in_the_home_currency(app, con, goto):
     never happen again is the value cell matching qty x mark x fx.
     """
     base = book.base_currency(con)
-    foreign = [x for x in book.positions(con)
+    foreign = [x for x in book.trades(con)
                if x.currency != base and x.mark is not None and x.fx not in (None, 1.0)]
     assert foreign, "no foreign leg with a rate -- nothing to regress"
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         rows = {t.coordinate_to_cell_key((r, 0)).row_key.value: t.get_row_at(r)
                 for r in range(t.row_count)}
     for leg in foreign:
@@ -2440,8 +2462,8 @@ async def test_a_bet_heading_names_the_home_currency_because_it_translates(app, 
     with no exceptions, which is what lets a reader stop thinking about it.
     """
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         headings = {}
         for r in range(t.row_count):
             key = t.coordinate_to_cell_key((r, 0)).row_key.value or ""
@@ -2455,7 +2477,7 @@ async def test_a_bet_heading_names_the_home_currency_because_it_translates(app, 
 
     # And the figure really is the translated sum, not a native one that happens to be
     # close because most legs are already in the home currency.
-    legs = [x for x in book.positions(con) if x.bet_id]
+    legs = [x for x in book.trades(con) if x.bet_id]
     if legs:
         by_bet = {}
         for x in legs:
@@ -2476,7 +2498,7 @@ def test_a_leg_with_no_recorded_rate_still_shows_what_it_is_worth_in_its_own_cur
     all perfectly knowable -- and used to render as three em-dashes. That was the state
     for any foreign leg the FX table had not caught up with.
     """
-    leg = book.Position(
+    leg = book.Trade(
         trade_id="t1", bet_id=None, ticker="NVDA", currency="USD", qty=10.0,
         entry=200.0, opened="2026-09-01", stop=None, target=None,
         loss_limit_pct=None,
@@ -2500,7 +2522,7 @@ def test_the_percentage_does_not_depend_on_the_rate():
               loss_limit_pct=None,
               mark=220.0, mark_date="2026-09-09", unconfirmed_fills=0, account="tfsa")
     for rate in (1.0, 1.3807, 0.72):
-        leg = book.Position(fx=rate, **kw)
+        leg = book.Trade(fx=rate, **kw)
         assert leg.pnl_pct == pytest.approx(leg.pnl_pct_native), rate
 
 
@@ -2547,13 +2569,13 @@ async def test_the_header_names_the_rate_that_reconciles_the_rows_to_the_totals(
     In the HEADER, not a column: it is one number per currency, not one per row, and the
     table has no cells to spare.
     """
-    legs = book.positions(con)
+    legs = book.trades(con)
     base = book.base_currency(con)
     want = {x.currency: x.fx for x in legs if x.currency != base and x.fx is not None}
     assert want, "fixture has no foreign leg with a rate -- nothing to reconcile"
 
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         head = " ".join(_plain(app, "#pos-head"))
 
     for ccy, rate in want.items():
@@ -2583,10 +2605,10 @@ async def test_a_leg_with_no_rate_gets_no_invented_rate_in_the_header(app, con, 
     con.commit()
 
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         head = " ".join(_plain(app, "#pos-head"))
 
-    unrated = [x for x in book.positions(con) if x.fx is None]
+    unrated = [x for x in book.trades(con) if x.fx is None]
     if not unrated:
         pytest.skip("the fixture still resolves every rate, so there is no hole to report")
     assert "@ 1.0000" not in head, head
@@ -2604,19 +2626,20 @@ async def test_the_positions_columns_fit_the_terminal(app, goto):
     108 is what a 110-column terminal leaves. DataTable adds 2 cells of padding per column.
     """
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         cols = list(t.columns.values())
         widths = [c.width for c in cols]
     total = sum(widths) + 2 * len(cols)
     assert total <= 108, f"{total} cells over a 108-cell budget: {widths}"
     labels = [str(getattr(c.label, "plain", c.label)) for c in cols]
-    # `banked` ARRIVED and `date`/`sl` paid for it, 2026-11-02. `sl` was 6 cells of em dash
-    # (no leg has carried a stop since the curve went in v14); `date` was the open date, now
-    # on the detail line. The budget assertion above is the one that matters and it got
-    # looser, not tighter: 103 of 108.
-    assert labels == ["leg", "qty", "ccy", "entry", "last",
-                      "value", "banked", "P&L", "%"], labels
+    # `banked` LIVED HERE FOR ONE COMMIT and `date`/`sl` had paid for it. It went when the
+    # author redefined an exit as a closed trade -- "when i close 80 shares of INTC, why dont
+    # we just log that in closed positions. i think that's easier than banked" -- so the
+    # figure is a CLOSED row now and a column here would restate it. `date` and `sl` came
+    # back with the space.
+    assert labels == ["leg", "qty", "ccy", "entry", "last", "date", "sl",
+                      "value", "P&L", "%"], labels
     # `value` AND `P&L` CARRY NO CURRENCY, and must not: they hold the home currency on an
     # open leg and the native one on a closed leg, so a label would be false for half the
     # table. The per-row `ccy` column is the only place that can be right for every row.
@@ -2626,7 +2649,7 @@ async def test_the_positions_columns_fit_the_terminal(app, goto):
 
 async def test_no_column_exists_for_a_field_the_tool_cannot_write(app, goto):
     """`tp` WAS A COLUMN NOTHING COULD EVER FILL: one read of `trades.target` in
-    book.positions() and no UPDATE anywhere that sets it, so all seven open legs held NULL
+    book.trades() and no UPDATE anywhere that sets it, so all seven open legs held NULL
     and the column rendered a stack of em-dashes -- 8 of the 108 cells, spent on furniture.
 
     Deleting the reader is the cure the author already chose for the two unwritable halves, and it
@@ -2644,8 +2667,8 @@ async def test_no_column_exists_for_a_field_the_tool_cannot_write(app, goto):
     writable = any("target" in x for x in statements)
 
     async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         labels = [str(getattr(c.label, "plain", c.label)) for c in t.columns.values()]
     shown = "tp" in labels
 
@@ -2816,7 +2839,7 @@ async def test_the_footer_shows_the_panes_own_verbs_at_every_width(app, width, g
     nothing teaches you not to look at the footer.
     """
     async with app.run_test(size=(width, 30)) as pilot:
-        for scope in ("dashboard", "positions", "bets"):
+        for scope in ("dashboard", "trades", "bets"):
             await goto(pilot, scope)
             # ONE LINE PER GROUP NOW, so the assertions are per line and across all of them.
             # This test used to read only the LAST line, which was correct while every key
@@ -3116,7 +3139,7 @@ def test_the_theme_strip_always_fits_its_width():
 async def test_a_typed_fill_lands_in_the_named_account(app, con, type_into, goto):
     """`/rrsp` overrides the default, and the account is part of the position key."""
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await type_into(pilot, "USDCO 1 430.00 !growth /rrsp")
         await pilot.press("enter")
@@ -3145,7 +3168,7 @@ async def test_a_misspelt_account_is_refused_not_stored_as_none(app, con, type_i
     """trades.account_id is nullable, so a typo would silently mean 'no account'."""
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await type_into(pilot, "USDCO 1 430.00 !growth /tfsaa")
         await pilot.press("enter")
@@ -3162,7 +3185,7 @@ def test_the_same_ticker_in_two_sleeves_is_two_positions(con):
     b = book.add_fill(con, ticker="USDCO", shares=1, price=500.0,
                       bet_id="growth", on_date="2026-09-07", account="rrsp")
     assert a[0] != b[0], "the account is part of the position key"
-    held = {p.account: p.entry for p in book.positions(con) if p.ticker == "USDCO"}
+    held = {p.account: p.entry for p in book.trades(con) if p.ticker == "USDCO"}
     assert held["rrsp"] == pytest.approx(500.0), "the RRSP leg kept its own basis"
 
 
@@ -3269,7 +3292,7 @@ async def test_the_positions_columns_fit_a_standard_terminal(app):
     """
     async with app.run_test(size=(110, 24)) as pilot:
         await pilot.pause()
-        t = app.query_one("#pos-table")
+        t = app.query_one("#trade-table")
         declared = sum(c.width for c in t.columns.values())
         total = declared + 2 * len(t.columns)
         assert total <= 110 - 2, (
@@ -3299,7 +3322,7 @@ async def test_a_narrow_footer_still_leaves_a_way_to_find_every_key(app, goto):
     and is advertised nowhere.
     """
     async with app.run_test(size=(80, 24)) as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         rendered = app.key_footer.text
         assert "? keys" in rendered, f"no way to discover the rest: {rendered!r}"
         assert "q quit" in rendered
@@ -3321,7 +3344,7 @@ async def test_the_positions_header_pnl_excludes_unpriced_legs(app, con):
     of hoping to find it.
     """
     seed.unprice(con)                       # a mark, no cost basis: the 2026 bug
-    rows = book.positions(con)
+    rows = book.trades(con)
     priced = [r for r in rows
               if r.cost_base is not None and r.value_base is not None]
     unpriced = [r for r in rows if r.cost_base is None]
@@ -3355,7 +3378,7 @@ def test_cost_and_mark_are_not_silently_incomparable(con):
     The rule is the project's own: where nothing is recorded, the figure is withheld.
     """
     seed.unprice(con)
-    nocost = [p.ticker for p in book.positions(con) if p.cost_base is None]
+    nocost = [p.ticker for p in book.trades(con) if p.cost_base is None]
     assert nocost, "the mutation must leave an unpriced leg"
     n = book.net(con)
     holed = [s for s in n.sleeves if s.positions_cost is None]
@@ -3376,8 +3399,8 @@ def test_a_usd_leg_with_no_fx_rate_is_not_valued_at_par(con):
     disagreed about the same hazard.
     """
     con.execute("DELETE FROM prices WHERE kind='fx'")
-    usd = [p for p in book.positions(con) if p.currency == "USD"]
-    cad = [p for p in book.positions(con) if p.currency == "CAD"]
+    usd = [p for p in book.trades(con) if p.currency == "USD"]
+    cad = [p for p in book.trades(con) if p.currency == "CAD"]
     assert usd and cad, "the fixture must hold both, or this proves nothing"
     for p in usd:
         assert p.fx is None, f"{p.ticker}: a missing rate became {p.fx}"
@@ -3511,7 +3534,7 @@ def test_no_key_in_the_footer_prints_not_wired_yet(app):
     # scope list used to sit here doing nothing but `del` a variable it had just made; it
     # also named "capital" and "balance", neither of which is a scope any more.
     from desk.tui import panes
-    for scope, cls in (("positions", panes.PositionsPane),
+    for scope, cls in (("trades", panes.TradesPane),
                        ("dashboard", panes.DashboardPane),
                        ("bets", panes.BetsPane)):
         assert scope in keymap.SCOPES, f"{scope} is not a scope"
@@ -3537,7 +3560,7 @@ async def test_x_deletes_the_newest_fill_and_names_it_first(app, con, goto):
     """
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("x")
         await pilot.pause()
         # The confirmation must name the fill, not "the selected row".
@@ -3550,7 +3573,7 @@ async def test_x_deletes_the_newest_fill_and_names_it_first(app, con, goto):
 async def test_a_deleted_fill_comes_back_with_u(app, con, goto):
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("x")
         await pilot.press("y")
         await pilot.pause()
@@ -3570,7 +3593,7 @@ async def test_n_after_cancelling_an_edit_does_not_replace_the_row(app, con,
     """
     before = con.execute("SELECT COUNT(*) FROM fills").fetchone()[0]
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("enter")          # arms the edit, prefills the prompt
         await pilot.pause()
         assert app.prompt.is_open and app.prompt.value, "enter must prefill"
@@ -3592,7 +3615,7 @@ async def test_enter_prefills_a_line_that_round_trips(app, con, goto):
     actually uses it rather than formatting its own string.
     """
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("enter")
         await pilot.pause()
         line = app.prompt.value
@@ -3667,7 +3690,7 @@ async def test_the_pane_table_has_focus_not_the_tab_bar(app):
     """
     async with app.run_test() as pilot:
         await pilot.pause()
-        for key, table_id in (("2", "pos-table"), ("3", "bet-table")):
+        for key, table_id in (("2", "trade-table"), ("3", "bet-table")):
             await pilot.press(key)
             await pilot.pause()
             assert getattr(app.focused, "id", None) == table_id, (
@@ -3682,27 +3705,27 @@ async def test_down_moves_the_row_cursor_rather_than_the_tab(app, goto):
     the behaviour this test is named for.
     """
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         assert t.row_count > 1, "this needs at least two rows to mean anything"
         was = t.cursor_coordinate.row
         await pilot.press("down")
         await pilot.pause()
         assert t.cursor_coordinate.row == was + 1
-        assert app.query_one("#tabs", TabbedContent).active == "tab-positions"
+        assert app.query_one("#tabs", TabbedContent).active == "tab-trades"
 
 
 async def test_left_and_right_still_change_tabs_with_a_table_focused(app, goto):
     """Focusing the table must not cost the tab keys: DataTable also wants arrows."""
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         tabs = app.query_one("#tabs", TabbedContent)
         await pilot.press("right")
         await pilot.pause()
         assert tabs.active == "tab-bets", "capital folded in, so bets is next along"
         await pilot.press("left")
         await pilot.pause()
-        assert tabs.active == "tab-positions"
+        assert tabs.active == "tab-trades"
 
 
 async def test_opening_the_prompt_keeps_focus_against_a_late_refresh(app, goto):
@@ -3712,7 +3735,7 @@ async def test_opening_the_prompt_keeps_focus_against_a_late_refresh(app, goto):
     went to the table and the line you had typed was silently dropped.
     """
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await pilot.pause()
@@ -3831,7 +3854,7 @@ async def test_the_dashboard_scrolls_and_still_changes_tabs(app, con):
         assert sc.scroll_y > 0, "down must scroll the dashboard"
         await pilot.press("right")
         await pilot.pause()
-        assert app.query_one("#tabs", TabbedContent).active == "tab-positions"
+        assert app.query_one("#tabs", TabbedContent).active == "tab-trades"
 
 
 async def test_the_header_carries_the_name_from_the_profile(app, monkeypatch):
@@ -3923,7 +3946,7 @@ async def test_a_new_holding_fetches_at_once_rather_than_waiting_for_the_timer(a
         before = len(fetches)
 
         # ADDING TO SOMETHING ALREADY HELD leaves the set alone, so it must not refetch.
-        held = book.positions(con)[0]
+        held = book.trades(con)[0]
         book.add_fill(con, ticker=held.ticker, shares=1, price=10.0,
                       bet_id=held.bet_id, on_date="2026-09-26", account=held.account)
         app.refresh_all()
@@ -3933,7 +3956,7 @@ async def test_a_new_holding_fetches_at_once_rather_than_waiting_for_the_timer(a
 
         # A TICKER THE BOOK HAS NEVER HELD changes the set. LEVR is registered in the fixture
         # but not open, which is exactly the case with no mark to show.
-        assert not any(x.ticker == "LEVR" for x in book.positions(con))
+        assert not any(x.ticker == "LEVR" for x in book.trades(con))
         book.add_fill(con, ticker="LEVR", shares=5, price=11.0, bet_id=None,
                       on_date="2026-09-26", account="tfsa")
         app.refresh_all()
@@ -4006,7 +4029,7 @@ async def test_a_rejected_edit_leaves_the_book_exactly_as_it_was(app, con, goto)
     quantity that existed only because the -20 trim had just been deleted -- and the book
     was left holding a position that was never held, with no toast and no repaint.
     """
-    held = book.positions(con)
+    held = book.trades(con)
     usdco = next(p for p in held if p.ticker == "USDCO")
     before_qty = usdco.qty
     before_fills = con.execute(
@@ -4015,9 +4038,9 @@ async def test_a_rejected_edit_leaves_the_book_exactly_as_it_was(app, con, goto)
     assert before_fills > 1, "needs more than one fill for the trap to exist"
 
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         # Put the cursor on the USDCO row.
-        t = app.query_one("#pos-table", DataTable)
+        t = app.query_one("#trade-table", DataTable)
         for row in range(t.row_count):
             if t.coordinate_to_cell_key((row, 0)).row_key.value == usdco.trade_id:
                 t.cursor_coordinate = (row, 0)
@@ -4032,7 +4055,7 @@ async def test_a_rejected_edit_leaves_the_book_exactly_as_it_was(app, con, goto)
         assert app.prompt.is_open, "the wall must reject it and keep the prompt open"
         assert "short" in app.prompt.error, app.prompt.error
 
-    after = next(p for p in book.positions(con) if p.ticker == "USDCO")
+    after = next(p for p in book.trades(con) if p.ticker == "USDCO")
     assert after.qty == before_qty, (
         f"a rejected edit changed the position: {before_qty} -> {after.qty}")
     assert con.execute(
@@ -4048,14 +4071,14 @@ async def test_a_rejected_edit_stays_armed_so_the_correction_replaces(app, con, 
     original on top of the replacement -- the exact regression superseded_by exists to
     prevent.
     """
-    usdco = next(p for p in book.positions(con) if p.ticker == "USDCO")
+    usdco = next(p for p in book.trades(con) if p.ticker == "USDCO")
     before_qty, before_fills = usdco.qty, con.execute(
         "SELECT COUNT(*) FROM fills f JOIN trades t ON t.id=f.trade_id "
         "WHERE t.ticker='USDCO'").fetchone()[0]
 
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
         for row in range(t.row_count):
             if t.coordinate_to_cell_key((row, 0)).row_key.value == usdco.trade_id:
                 t.cursor_coordinate = (row, 0)
@@ -4079,7 +4102,7 @@ async def test_a_rejected_edit_stays_armed_so_the_correction_replaces(app, con, 
         await pilot.press("u")
         await pilot.pause()
 
-    after = next(p for p in book.positions(con) if p.ticker == "USDCO")
+    after = next(p for p in book.trades(con) if p.ticker == "USDCO")
     assert after.qty == before_qty, (
         f"undo after a corrected edit must land back on {before_qty}, got {after.qty}")
 
@@ -4165,7 +4188,7 @@ async def test_tab_does_not_move_focus_off_an_open_prompt(app, goto):
     were all dead and only Ctrl+C ended the session.
     """
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         assert app.focused is app.prompt
@@ -4185,7 +4208,7 @@ async def test_escape_still_closes_a_prompt_that_has_lost_focus(app, goto):
     for `n` and wrong for the two keys whose whole job is getting out.
     """
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         app.screen.set_focus(None)          # however it happened
@@ -4387,7 +4410,7 @@ def test_a_miss_reports_the_vocabulary_rather_than_nothing():
 async def test_tab_completes_a_ticker_a_bet_and_an_account(app, con, goto):
     """Driven through the pilot, because the wiring is where this can break."""
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         app.prompt.value = "US"
@@ -4410,7 +4433,7 @@ async def test_tab_completes_a_ticker_a_bet_and_an_account(app, con, goto):
 async def test_tab_on_a_miss_names_what_is_known(app, goto):
     """A dead key reads as a broken key, so a miss has to say something."""
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         app.prompt.value = "ZZZZ"
@@ -4426,7 +4449,7 @@ async def test_tab_on_a_miss_names_what_is_known(app, goto):
 async def test_tab_never_moves_focus_off_the_prompt(app, goto):
     """Completion took over the key that used to wedge the app."""
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         await pilot.press("n")
         await pilot.pause()
         await pilot.press("tab")
@@ -4520,8 +4543,8 @@ async def test_s_records_a_stop_and_prefills_what_is_already_there(app, con, got
     con.execute("UPDATE trades SET loss_limit_pct=NULL, loss_limit_basis=NULL WHERE id=?",
                 (tid,))
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
-        await _point_at(pilot, app, "#pos-table", tid)
+        await goto(pilot, "trades")
+        await _point_at(pilot, app, "#trade-table", tid)
         await pilot.press("s")
         await pilot.pause()
         assert app.prompt.is_open and app.prompt.label == "stop"
@@ -4552,8 +4575,8 @@ async def test_u_reverts_a_stop_because_an_update_undo_is_not_an_insert(app, con
     con.execute("UPDATE trades SET loss_limit_pct=NULL, loss_limit_basis=NULL WHERE id=?",
                 (tid,))
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
-        await _point_at(pilot, app, "#pos-table", tid)
+        await goto(pilot, "trades")
+        await _point_at(pilot, app, "#trade-table", tid)
         await pilot.press("s")
         await pilot.pause()
         app.prompt.value = "30"
@@ -4640,8 +4663,8 @@ async def test_the_row_cursor_survives_a_write(app, con, goto):
     """
     tid = _leg_needing_a_stop(con)
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
-        t = await _point_at(pilot, app, "#pos-table", tid)
+        await goto(pilot, "trades")
+        t = await _point_at(pilot, app, "#trade-table", tid)
         row_before = t.cursor_coordinate.row
         assert row_before != 0 or t.row_count == 1, (
             "point this test at a row that is not already the first one")
@@ -4670,13 +4693,13 @@ async def test_an_abandoned_stop_prompt_does_not_leak_into_the_next_one(app, con
     """`_stopping` is the same shape as `_editing`, which leaked exactly this way."""
     tid = _leg_needing_a_stop(con)
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
-        await _point_at(pilot, app, "#pos-table", tid)
+        await goto(pilot, "trades")
+        await _point_at(pilot, app, "#trade-table", tid)
         await pilot.press("s")
         await pilot.pause()
         await pilot.press("escape")
         await pilot.pause()
-        pane = app.query_one("#positions")
+        pane = app.query_one("#trades")
         assert pane._stopping is None, "the armed leg survived the cancel"
         for attr in pane._ARMED:
             assert getattr(pane, attr) is None, f"{attr} survived the cancel"
@@ -5056,9 +5079,9 @@ async def test_escape_clears_an_armed_edit_so_the_next_n_does_not_delete(app, co
     Turns red if app_back stops calling cancel_edit.
     """
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         pane = app._active_pane()
-        t = app.query_one("#pos-table", DataTable)
+        t = app.query_one("#trade-table", DataTable)
         t.focus()
         # NOT ROW 0 -- that is a bet HEADING, keyed with the INERT prefix so that _cursor_trade
         # refuses it (the guard that stops `x` deleting a fill from a group title). The cursor
@@ -5180,14 +5203,14 @@ def test_a_mark_in_the_wrong_currency_makes_a_leg_unpriced_not_mispriced(con):
 
     Turns red if `AND quote=t.currency` is dropped from positions().
     """
-    leg = next(p for p in book.positions(con) if p.mark is not None)
+    leg = next(p for p in book.trades(con) if p.mark is not None)
     real = leg.mark
     # A mark for the same ticker and the same day, in a currency it is not quoted in.
     con.execute("INSERT OR REPLACE INTO prices(base,quote,kind,on_date,amount,source) "
                 "VALUES (?,?,?,?,?,?)",
                 (leg.ticker, "JPY" if leg.currency != "JPY" else "KRW", "mark",
                  "2099-01-01", real * 157.0, "test"))
-    after = next(p for p in book.positions(con) if p.trade_id == leg.trade_id)
+    after = next(p for p in book.trades(con) if p.trade_id == leg.trade_id)
     assert after.mark == real, (
         f"{leg.ticker} took a mark quoted in another currency: {after.mark} vs {real}")
 
@@ -5216,7 +5239,7 @@ def test_the_cost_basis_is_an_acb_and_not_an_average_of_buys(con):
     book.add_fill(con, ticker="CADCO", shares=20.0, price=150.0, on_date="2026-06-03",
                   account="tfsa", bet_id="acbtest")
 
-    leg = next(p for p in book.positions(con)
+    leg = next(p for p in book.trades(con)
                if p.ticker == "CADCO" and p.bet_id == "acbtest")
     assert leg.qty == pytest.approx(60.0)
     assert leg.entry == pytest.approx(7000.0 / 60.0, abs=1e-6), (
@@ -5247,13 +5270,13 @@ def test_a_cost_basis_that_cannot_be_ordered_is_withheld(con):
     con.execute("INSERT INTO bets(id,status,opened) VALUES ('undated','forming','2026-07-01')")
     book.add_fill(con, ticker="CADCO", shares=10.0, price=10.0, on_date="2026-07-01",
                   account="tfsa", bet_id="undated")
-    leg = next(p for p in book.positions(con)
+    leg = next(p for p in book.trades(con)
                if p.ticker == "CADCO" and p.bet_id == "undated")
     assert leg.entry == pytest.approx(10.0), "fixture: this leg should cost out fine first"
 
     con.execute("UPDATE fills SET on_date=NULL WHERE id=("
                 "SELECT MAX(id) FROM fills WHERE trade_id=?)", (leg.trade_id,))
-    after = next(p for p in book.positions(con) if p.trade_id == leg.trade_id)
+    after = next(p for p in book.trades(con) if p.trade_id == leg.trade_id)
     assert after.entry is None and after.cost_native is None and after.cost_base is None, (
         "an undated fill leaves the order -- and therefore the cost -- unknowable, so every "
         "cost figure must be withheld rather than computed from a guessed order")
@@ -5265,7 +5288,7 @@ def test_a_cost_basis_that_cannot_be_ordered_is_withheld(con):
                   account="tfsa", bet_id="undated")
     con.execute("UPDATE fills SET price=NULL WHERE id=("
                 "SELECT MAX(id) FROM fills WHERE trade_id=?)", (leg.trade_id,))
-    sold = next(p for p in book.positions(con) if p.trade_id == leg.trade_id)
+    sold = next(p for p in book.trades(con) if p.trade_id == leg.trade_id)
     assert sold.entry == pytest.approx(10.0), (
         "a sell with no recorded price does not change the cost base of the shares left")
 
@@ -5386,7 +5409,7 @@ async def test_a_holdings_change_mid_fetch_is_queued_not_raced(app, con, goto):
     Turns red if the `if self.fetching` guard or the _refetch_wanted replay is removed.
     """
     async with app.run_test() as pilot:
-        await goto(pilot, "positions")
+        await goto(pilot, "trades")
         started = []
         app.POLL_DISABLED = False
         app._fetch = lambda *, announce: started.append(announce)
@@ -5487,7 +5510,7 @@ async def test_every_mcp_tool_answers_against_a_real_book(tmp_path, monkeypatch)
         payload = json.loads(await _call(server, name))
         assert isinstance(payload, dict) and payload, f"{name} returned nothing useful"
 
-    for name in ("positions", "bets", "closed_legs"):
+    for name in ("trades", "bets", "closed_legs"):
         rows = json.loads(await _call(server, name))
         assert isinstance(rows, list), f"{name} did not return a list"
         assert rows, f"{name} returned no rows against the seeded book"
@@ -5636,68 +5659,88 @@ def test_an_upgrade_that_copied_nothing_refuses_to_swap(tmp_path, capsys, monkey
 
 
 # --------------------------------------------------------------------------- #
-# partial exits. The author, 2026-11-02: "when i exit, even partially, it should
-# be shown and recorded. bc, that's giving a verdict to at least part of the
-# trade. now it only shows a defeat after everything is closed."
+# partial exits. The author, 2026-11-02: "when i close 80 shares of INTC, why
+# dont we just log that in closed positions. i think that's easier than banked."
 # --------------------------------------------------------------------------- #
-def test_a_trim_is_realised_against_the_cost_at_the_time(con):
-    """WHAT A SELL BANKS is units x (price - ACB when it happened), not a later average.
+def test_an_exit_is_measured_against_the_cost_at_the_time(con):
+    """WHAT A SALE REALISES is units x (price - ACB when it happened), not a later average.
 
-    This is the same walk the cost basis uses, which is why it is one function: measuring a
-    trim against an average that later purchases moved would make the verdict on a past
-    decision depend on a future one.
+    The ACB is a running figure, so a purchase made AFTER a sale must not change the verdict
+    on that sale. This is the same walk the cost basis uses, which is why it is one function.
 
-    Turns red if _walk_fills stops accumulating realised, or measures against the final ACB.
+    Turns red if the exit is measured against the final average instead of the running one.
     """
     con.execute("INSERT INTO bets(id,status,opened) VALUES ('trim','forming','2026-06-01')")
     book.add_fill(con, ticker="CADCO", shares=60.0, price=100.0, on_date="2026-06-01",
                   account="tfsa", bet_id="trim")
     book.add_fill(con, ticker="CADCO", shares=-20.0, price=110.0, on_date="2026-06-02",
                   account="tfsa", bet_id="trim")
-    # A LATER, HIGHER BUY must not change what the earlier trim realised.
+    # A LATER, HIGHER BUY must not change what the earlier sale realised.
     book.add_fill(con, ticker="CADCO", shares=20.0, price=150.0, on_date="2026-06-03",
                   account="tfsa", bet_id="trim")
 
-    leg = next(p for p in book.positions(con) if p.bet_id == "trim")
-    assert leg.realised_native == pytest.approx(200.0), (
-        f"banked {leg.realised_native}: 20 sold at 110 against an ACB of 100 is +200, and "
-        f"the 150 purchase the day after cannot change that")
-    assert leg.entry == pytest.approx(7000.0 / 60.0, abs=1e-6), "the ACB moved"
+    tid = next(t.trade_id for t in book.trades(con) if t.bet_id == "trim")
+    e = next(c for c in book.closed_legs(con) if c.trade_id == tid)
+    assert e.realised == pytest.approx(200.0), (
+        f"realised {e.realised}: 20 sold at 110 against an ACB of 100 is +200, and the 150 "
+        f"purchase the day after cannot change that")
+    assert e.cost == pytest.approx(2_000.0), "20 shares at the ACB of 100 in force that day"
+    held = next(t for t in book.trades(con) if t.trade_id == tid)
+    assert held.entry == pytest.approx(7_000.0 / 60.0, abs=1e-6), "the remaining ACB moved"
 
 
-def test_a_leg_that_has_sold_nothing_banks_zero_not_none(con):
-    """0.0 AND None MEAN DIFFERENT THINGS, and this codebase is strict about it.
+def test_a_leg_that_has_sold_nothing_produces_no_closed_row(con):
+    """NO SALE, NO ROW -- the absence is the statement, not a zero.
 
-    Nothing sold is a known quantity: zero. Unknowable is a sale with no recorded price. The
-    positions column renders those differently -- an em dash either way, but one in the
-    warning colour -- so the distinction has to survive into the figure.
+    A `banked` column had to render a 0.00 or an em dash on every untrimmed leg, which is a
+    cell saying nothing on most rows. A closed section simply has no row for a leg that has
+    not sold anything, which is the same information and costs no space.
     """
-    leg = next(p for p in book.positions(con) if p.ticker == "CADCO" and p.bet_id == "parking")
-    assert leg.realised_native == 0.0, "an untrimmed leg should bank a known zero"
+    tid = next(t.trade_id for t in book.trades(con) if t.bet_id == "parking")
+    assert not [c for c in book.closed_legs(con) if c.trade_id == tid], (
+        "a leg that has sold nothing should contribute no closed row")
 
-    con.execute("INSERT INTO bets(id,status,opened) VALUES ('nopx','forming','2026-06-01')")
-    book.add_fill(con, ticker="CADCO", shares=10.0, price=10.0, on_date="2026-07-01",
+
+def test_an_unpriced_sale_withholds_what_it_made_but_not_what_it_cost(con):
+    """THE DENOMINATOR IS KNOWABLE MORE OFTEN THAN THE NUMERATOR, and the asymmetry is real.
+
+    A sale with no recorded price hides what the exit MADE -- there is no price to measure
+    against -- but never what it SOLD, because that comes from the running ACB. So the cost
+    answers where realised withholds, and `invested` keeps working.
+
+    Turns red if the cost starts following realised's withholding.
+    """
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('nopx','live','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=100.0, price=10.0, on_date="2026-07-01",
                   account="tfsa", bet_id="nopx")
-    book.add_fill(con, ticker="CADCO", shares=-4.0, price=9.0, on_date="2026-07-02",
+    book.add_fill(con, ticker="CADCO", shares=-40.0, price=9.0, on_date="2026-07-02",
                   account="tfsa", bet_id="nopx")
-    tid = next(p.trade_id for p in book.positions(con) if p.bet_id == "nopx")
+    tid = next(t.trade_id for t in book.trades(con) if t.bet_id == "nopx")
     con.execute("UPDATE fills SET price=NULL WHERE trade_id=? AND shares<0", (tid,))
 
-    after = next(p for p in book.positions(con) if p.trade_id == tid)
-    assert after.realised_native is None, "an unpriced sale makes the figure unknowable"
-    # AND THE COST BASIS SURVIVES IT: a sale's price cannot change what the rest cost.
-    assert after.entry == pytest.approx(10.0), "the unpriced sale moved the cost basis"
+    e = next(c for c in book.closed_legs(con) if c.trade_id == tid)
+    assert e.realised is None, "an unpriced sale hides what the exit made"
+    assert e.exit is None, "and what it fetched"
+    assert e.cost == pytest.approx(400.0), (
+        f"cost {e.cost}: 40 shares at an ACB of 10.00, and no price is needed to know that")
+    # AND THE REMAINING COST BASIS SURVIVES IT: a sale's price cannot change what the rest
+    # cost, so the open half still reports.
+    held = next(t for t in book.trades(con) if t.trade_id == tid)
+    assert held.entry == pytest.approx(10.0), "the unpriced sale moved the remaining ACB"
 
 
-def test_a_bets_realised_counts_what_its_open_legs_banked(con):
-    """IT COUNTED CLOSED LEGS ONLY, so a bet reported 0.00 on the day it banked a loss.
+def test_a_bets_pnl_counts_an_exit_that_closed_no_leg(con):
+    """IT COUNTED FULLY-CLOSED LEGS ONLY, so a bet reported 0.00 on the day it banked a loss.
 
     On a real book one bet reported realised 0.00 while a leg under it had banked a
     four-figure loss on a trim that same day, so its P&L was understated by more than twice
-    the loss it did report. The author found it from the outside: "now it only shows a defeat
-    after everything is closed."
+    the loss it did report. The author, who found it from the outside: "now it only shows a
+    defeat after everything is closed."
 
-    Turns red if bets() goes back to summing `done` alone.
+    The author on the shape of the fix: "the bet's pnl includes total deployed assets and
+    total pnl from open and closed positions."
+
+    Turns red if bets() stops seeing exits that left the leg open.
     """
     con.execute("INSERT INTO bets(id,status,opened) VALUES ('tb','live','2026-06-01')")
     book.add_fill(con, ticker="CADCO", shares=100.0, price=10.0, on_date="2026-06-01",
@@ -5706,56 +5749,28 @@ def test_a_bets_realised_counts_what_its_open_legs_banked(con):
                   account="tfsa", bet_id="tb")
 
     b = next(x for x in book.bets(con) if x.id == "tb")
-    assert b.closed_legs == 0, "fixture: nothing has closed, which is the point"
     assert b.realised == pytest.approx(200.0), (
         f"realised {b.realised}: 40 sold at 15 against a cost of 10 banked +200, on a bet "
-        f"with no closed legs at all")
+        f"whose leg is still open")
     assert b.pnl is not None and b.pnl > 0, "a bet that banked money cannot show no P&L"
+    # THE COST OF THOSE 40 SHARES IS IN THE DENOMINATOR, or the ratio compares two different
+    # pots of money and can exceed 100%. See Bet.invested.
+    assert b.closed_cost == pytest.approx(400.0), "what the sold shares cost"
+    assert b.invested == pytest.approx(1_000.0), "600 still held plus the 400 sold"
+    assert b.pnl_pct == pytest.approx(100.0 * b.pnl / 1_000.0)
 
 
-async def test_the_positions_tab_shows_what_a_leg_has_banked(app, con, goto):
-    """THE COLUMN THE AUTHOR ASKED FOR, in its own cell rather than folded into P&L.
+def test_a_loss_cannot_exceed_everything_the_bet_committed(con):
+    """This shipped broken for a day, as -115.72% on a bet that had lost 42% of its money.
 
-    The author chose that over one combined total: money already banked and money still at
-    risk are different kinds of figure, and one number for both hides the distinction.
+    `realised` had grown to count what a trim banked while the denominator still counted only
+    legs that closed COMPLETELY, so a partly-sold leg handed its result to the numerator and
+    none of its cost to the denominator. A loss bigger than everything put in can only happen
+    if the capital is actually gone.
 
-    Turns red if the column goes, or stops reading Position.realised_native.
-    """
-    async with app.run_test(size=(126, 46)) as pilot:
-        await goto(pilot, "positions")
-        t = app.query_one("#pos-table", DataTable)
-        rows = {t.coordinate_to_cell_key((r, 0)).row_key.value: t.get_row_at(r)
-                for r in range(t.row_count)}
+    Here: 1,000 in, 900 of it sold at a 90% loss, 100 still held.
 
-    trimmed = [p for p in book.positions(con) if p.realised_native]
-    assert trimmed, "fixture has no trimmed open leg, so this proves nothing"
-    for leg in trimmed:
-        from desk.tui.widgets import signed
-        shown = _cell_text(rows[leg.trade_id][POS["banked"]])
-        assert signed(leg.realised_native) in shown, (
-            f"{leg.ticker}: banked {leg.realised_native:+,.2f} is not in {shown!r}")
-        # AND IT IS NOT THE SAME CELL AS P&L, which is the whole point of the column.
-        assert shown != _cell_text(rows[leg.trade_id][POS["pnl"]])
-
-    for leg in book.positions(con):
-        if leg.realised_native == 0.0:
-            assert _cell_text(rows[leg.trade_id][POS["banked"]]) == NA_DASH, (
-                f"{leg.ticker} sold nothing and should show an em dash, not a zero")
-
-
-def test_a_trims_cost_counts_toward_the_pnl_denominator(con):
-    """A LOSS CANNOT EXCEED EVERYTHING PUT IN unless the money is actually gone.
-
-    This shipped broken for a day. `Bet.realised` counts what a trim banked, but a sell
-    removes cost pro rata and `closed_cost` counts only legs that closed COMPLETELY -- so a
-    partly-sold leg handed its result to the numerator and none of its cost to the
-    denominator. One bet read -115.72% where the honest figure was -42.18%. The author, shown
-    both: "% of all capital put in".
-
-    Here: 1,000 in, 900 of it sold at a 90% loss, 100 still held. The denominator is the
-    1,000, so the percentage stays inside the only bound it has.
-
-    Turns red if `invested` stops adding `trimmed_cost` -- the percentage goes to about -795%.
+    Turns red if the cost of an exit stops reaching `invested` -- the figure goes to -795%.
     """
     con.execute("INSERT INTO bets(id,status,opened) VALUES ('den','live','2026-06-01')")
     book.add_fill(con, ticker="CADCO", shares=100.0, price=10.00, on_date="2026-06-01",
@@ -5764,43 +5779,73 @@ def test_a_trims_cost_counts_toward_the_pnl_denominator(con):
                   account="tfsa", bet_id="den")
 
     b = next(x for x in book.bets(con) if x.id == "den")
-    assert b.closed_legs == 0, "fixture: nothing closed, so closed_cost cannot cover this"
-    assert b.trimmed_cost == pytest.approx(900.0), (
-        f"trimmed_cost {b.trimmed_cost}: 90 shares left at an ACB of 10.00 cost 900")
     assert b.invested == pytest.approx(1_000.0), (
         f"invested {b.invested}: 100 still held at cost plus the 900 that was sold")
     assert b.pnl_pct is not None and b.pnl_pct > -100.0, (
         f"pnl_pct {b.pnl_pct}: a bet cannot lose more than everything it committed while it "
         f"still holds shares worth something")
-    assert b.pnl_pct == pytest.approx(100.0 * b.pnl / 1_000.0)
 
 
-def test_a_trims_cost_is_known_even_when_what_it_made_is_not(con):
-    """THE DENOMINATOR IS KNOWABLE MORE OFTEN THAN THE NUMERATOR, and the asymmetry is real.
+async def test_the_trades_tab_shows_an_exit_as_a_closed_row(con, app, goto):
+    """THE SHAPE THE AUTHOR ASKED FOR: an exit of 80 shares is a closed trade of 80 shares.
 
-    An unpriced sale hides what a trim MADE -- there is no price to measure against -- but
-    never what it SOLD, because that comes from the running ACB. So `trimmed_cost` answers
-    where `realised` withholds. The two are computed in separate passes for exactly this
-    reason; sharing one loop is how the ratio got broken the first time.
+    Not a running figure in a column beside the open row -- a row, in the CLOSED section,
+    counted by the header above it -- which used to exclude the very trim it printed below.
 
-    Turns red if trimmed_cost starts following realised's withholding.
+    Turns red if an exit stops being rendered, or stops being in its section's total.
     """
-    con.execute("INSERT INTO bets(id,status,opened) VALUES ('den2','live','2026-06-01')")
-    book.add_fill(con, ticker="CADCO", shares=100.0, price=10.00, on_date="2026-06-01",
-                  account="tfsa", bet_id="den2")
-    book.add_fill(con, ticker="CADCO", shares=-40.0, price=9.00, on_date="2026-06-02",
-                  account="tfsa", bet_id="den2")
-    tid = next(p.trade_id for p in book.positions(con) if p.bet_id == "den2")
-    con.execute("UPDATE fills SET price=NULL WHERE trade_id=? AND shares<0", (tid,))
+    async with app.run_test(size=(126, 46)) as pilot:
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
+        rows = {t.coordinate_to_cell_key((r, 0)).row_key.value: t.get_row_at(r)
+                for r in range(t.row_count)}
 
-    leg = next(p for p in book.positions(con) if p.trade_id == tid)
-    assert leg.realised_native is None, "an unpriced sale hides what it made"
-    assert leg.sold_cost_native == pytest.approx(400.0), (
-        f"sold_cost {leg.sold_cost_native}: 40 shares at an ACB of 10.00, and no price is "
-        f"needed to know that")
+    # The fixture's USDCO leg sold 20 of 60 and still holds 40, so it is in BOTH sections.
+    tid = "2026-05-04-usdco"
+    inert = TradesPane.INERT
+    assert tid in rows, "the open half of a partly-sold leg is missing"
+    assert f"{inert}leg:{tid}" in rows, "the sold half is not rendered as a closed row"
 
-    b = next(x for x in book.bets(con) if x.id == "den2")
-    assert b.realised is None, "the numerator is withheld"
-    assert b.trimmed_cost == pytest.approx(400.0), "the denominator is not"
-    assert b.invested == pytest.approx(1_000.0), "600 still held plus the 400 sold"
-    assert b.pnl is None and b.pnl_pct is None, "no numerator, no ratio"
+    sold = rows[f"{inert}leg:{tid}"]
+    assert "20" in _cell_text(sold[POS["qty"]]), "the closed row should show the 20 sold"
+    assert "+200.00" in _cell_text(sold[POS["pnl"]])
+
+    # AND IT IS IN THE SECTION TOTAL. This is the half that used to be wrong: the header
+    # summed only fully-closed legs while printing the trim underneath it.
+    usd = sum(c.realised for c in book.closed_legs(con)
+              if c.currency == "USD" and c.realised is not None)
+    assert f"{usd:+,.2f}" in _cell_text(rows[f"{inert}closed:USD"][POS["pnl"]]), (
+        "the CLOSED header must total the rows beneath it, trims included")
+
+
+def test_a_round_trip_reports_even_when_a_fill_was_never_dated(con):
+    """ORDER ONLY MATTERS WHILE SOMETHING IS STILL HELD, and this is the half that proves it.
+
+    A leg that ends flat has a result that needs no order at all: cash out, cash back, and
+    addition does not care which came first. So an undated fill is harmless here -- unlike on
+    a partly-sold leg, where which shares were sold decides the answer.
+
+    THIS IS A REGRESSION TEST FOR A REAL LEG. The book this was written against has exactly
+    one undated fill: a ZNQ round trip whose BUY was never dated. Moving closed_legs() onto
+    the ACB walk made it walk that leg in order, put the sell first, find nothing to sell and
+    withhold -- silently dropping a -95.20 that the dashboard still counted. It was caught
+    because the CAD side stopped reconciling by exactly that amount.
+
+    Turns red if _exit_of drops its flat-leg route and walks everything in order.
+    """
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('undated','live','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=70.0, price=131.36, on_date="2026-06-01",
+                  account="tfsa", bet_id="undated")
+    tid = next(t.trade_id for t in book.trades(con) if t.bet_id == "undated")
+    book.add_fill(con, ticker="CADCO", shares=-70.0, price=130.00, on_date="2026-06-02",
+                  account="tfsa", bet_id="undated")
+    # THE BUY LOSES ITS DATE, exactly as the real leg's did.
+    con.execute("UPDATE fills SET on_date=NULL WHERE trade_id=? AND shares>0", (tid,))
+
+    e = next(c for c in book.closed_legs(con) if c.trade_id == tid)
+    assert e.realised == pytest.approx(-95.20), (
+        f"realised {e.realised}: 70 bought at 131.36 and sold at 130.00 lost 95.20, and no "
+        f"date is needed to know that once the leg is flat")
+    assert e.entry == pytest.approx(131.36)
+    assert e.exit == pytest.approx(130.00)
+    assert book.banked_in_open_legs(con) == {}, "the sleeve and the rows must still agree"

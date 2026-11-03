@@ -695,7 +695,7 @@ BEGIN SELECT RAISE(ABORT,'trades.ticker names no instrument in the registry'); E
 --     par branch above;
 --   * it measured at COST, which is what was committed rather than what is at risk.
 --
--- desk/book.py:bets() computes it now, where Position.value_base already returns None for
+-- desk/book.py:bets() computes it now, where Trade.value_base already returns None for
 -- an unpriced leg and the home currency comes from the profile. The lesson is not about
 -- this view: a figure that must be WITHHELD when its inputs are missing does not belong in
 -- a view, because every SQL tool for absent values -- COALESCE, IFNULL, a LEFT JOIN

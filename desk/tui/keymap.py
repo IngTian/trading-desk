@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-SCOPES = ("app", "dashboard", "positions", "bets")
+SCOPES = ("app", "dashboard", "trades", "bets")
 KINDS = ("nav", "view", "write", "danger")
 
 
@@ -31,7 +31,7 @@ KEYMAP: tuple[Key, ...] = (
     # panes rather than positions, which meant promoting the dashboard would have left
     # `3` opening tab 1.
     Key("1", "dashboard", "show_dashboard", "app", "nav", footer=False),
-    Key("2", "positions", "show_positions", "app", "nav", footer=False),
+    Key("2", "trades", "show_trades", "app", "nav", footer=False),
     # THREE TABS, not four. Capital folded into the dashboard -- the author: "why not just
     # move capital to the dashboard? seems like capital would be a standlone page few
     # info anyway." The digits follow tab order, so `3` moved with it rather than
@@ -64,7 +64,7 @@ KEYMAP: tuple[Key, ...] = (
     Key("tab", "complete", "complete", "app", "write", footer=False, bind=False),
     Key("q", "quit", "quit", "app", "nav", pin=True),
     # ── positions ──
-    Key("n", "fill", "fill", "positions", "write"),
+    Key("n", "fill", "fill", "trades", "write"),
     # `i` IS GONE ENTIRELY. The author: "we should remove that instrument registration entirely
     # from the user ... Dont ever let me use that instrument button. that's not a good UX.
     # The user should never worry about ticker registration. it's completely meaningless
@@ -78,7 +78,7 @@ KEYMAP: tuple[Key, ...] = (
     # The dashboard's only BLOCKING obligation was "no stop recorded" and nothing in the
     # tool could write one. A rule you cannot comply with through the tool teaches you to
     # ignore the tool.
-    Key("s", "stop", "stop", "positions", "write"),
+    Key("s", "stop", "stop", "trades", "write"),
     # MOVES THE LEG, not a fill. The author moved GOOG to a bet with `enter` -- the only way there
     # was -- and it split the position in two and left a phantom behind, because editing a
     # fill's `!bet` re-adds it under a different (bet, ticker, account) key. A leg's bet is
@@ -87,7 +87,7 @@ KEYMAP: tuple[Key, ...] = (
     # owns the prompt label "bet" for declaring one, and two hints under one label means
     # the wrong grammar renders in the subtitle -- caught here by the test that parses
     # every hint example, which fed `!2026-q4-reverse` to parse_bet and was refused.
-    Key("b", "leg bet", "trade_bet", "positions", "write"),
+    Key("b", "leg bet", "trade_bet", "trades", "write"),
     # NOT BOUND: `enter` arrives as DataTable.RowSelected, and it has to.
     #
     # Binding it here was tried and reverted. DataTable binds `enter` itself, so a
@@ -95,8 +95,8 @@ KEYMAP: tuple[Key, ...] = (
     # `priority` would have taken Enter away from the PROMPT, which is how every line in
     # this tool is submitted. The dashboard, whose focus sits on a scroll container
     # rather than a table, gets it from DashboardPane.on_key instead.
-    Key("enter", "edit", "activate", "positions", "nav", bind=False),
-    Key("x", "delete", "delete", "positions", "danger"),
+    Key("enter", "edit", "activate", "trades", "nav", bind=False),
+    Key("x", "delete", "delete", "trades", "danger"),
     # ── dashboard: the capital ledger, folded in from its own tab ──
     Key("c", "capital", "flow", "dashboard", "write"),
     # THE OFFSET, and it is the reason dividends, fees and interest need no tables of
@@ -143,7 +143,7 @@ KEYMAP: tuple[Key, ...] = (
     Key("s", "status", "status", "bets", "write"),
 )
 
-_TAB_OF = {"dashboard": "tab-dashboard", "positions": "tab-positions",
+_TAB_OF = {"dashboard": "tab-dashboard", "trades": "tab-trades",
            "capital": "tab-capital", "bets": "tab-bets"}
 
 

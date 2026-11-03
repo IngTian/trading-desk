@@ -101,7 +101,7 @@ def set_actor(con: sqlite3.Connection, actor: str) -> None:
 # reading
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
-class Position:
+class Trade:
     trade_id: str
     bet_id: str
     ticker: str
@@ -123,23 +123,11 @@ class Position:
     # attribution() already refuses this; positions() used to default it to 1.0.
     fx: float | None
     unconfirmed_fills: int
-    # WHAT THIS LEG'S EXITS HAVE ALREADY REALISED, in its own currency. None means not
-    # knowable (a sale with no recorded price), never zero -- 0.0 means nothing has been sold.
-    #
-    # THE REASON THIS FIELD EXISTS. The author, 2026-11-02: "when i exit, even partially, it
-    # should be shown and recorded. bc, that's giving a verdict to at least part of the trade.
-    # now it only shows a defeat after everything is closed." Until this, a Position carried
-    # only unrealised figures, so a leg that had banked a four-figure loss on a trim showed
-    # nothing about it -- the row reported its unrealised hundreds and stopped there.
-    realised_native: float | None = None
-    # WHAT THE SHARES SOLD OUT OF THIS LEG COST, in its own currency, at the ACB in force
-    # when each sale happened. The DENOMINATOR half of `realised_native`: once a trim's
-    # result is counted as P&L, the capital it was earned on has to be counted as capital,
-    # or the ratio compares two different pots. See _walk_fills and Bet.invested.
-    #
-    # NEEDS NO PRICE, so unlike `realised_native` it is known whenever the walk returns --
-    # a sale with no recorded price still removes a known amount of cost.
-    sold_cost_native: float | None = None
+    # NO `realised` FIELD, and that is the author's design, 2026-11-02: "when i close 80
+    # shares of INTC, why dont we just log that in closed positions. i think that's easier
+    # than banked." An exit is a closed trade, so it is a row in closed_legs() and nowhere
+    # else. A field here would be the same money in two places, which is how the `CLOSED`
+    # header came to exclude a figure printed directly beneath it.
     account: str | None = None
 
     @property
@@ -185,20 +173,6 @@ class Position:
         if self.entry is None or self.fx is None:
             return None
         return self.qty * self.entry * self.fx
-
-    @property
-    def realised_base(self) -> float | None:
-        """Withheld when the rate is missing, like every other `_base` figure here."""
-        if self.realised_native is None or self.fx is None:
-            return None
-        return self.realised_native * self.fx
-
-    @property
-    def sold_cost_base(self) -> float | None:
-        """Withheld when the rate is missing, like every other `_base` figure here."""
-        if self.sold_cost_native is None or self.fx is None:
-            return None
-        return self.sold_cost_native * self.fx
 
     @property
     def value_base(self) -> float | None:
@@ -596,7 +570,7 @@ def net(con) -> Net:
         elif contributed_home.get(ccy, 0.0) is not None:
             contributed_home[ccy] = contributed_home.get(ccy, 0.0) + r["amount"] * rate
 
-    pos = positions(con)
+    pos = trades(con)
     held = {p.currency for p in pos}
     reasons: list[str] = []
     sleeves: list[Sleeve] = []
@@ -615,7 +589,7 @@ def net(con) -> Net:
             moved = None
 
         legs = [p for p in pos if p.currency == ccy]
-        # NATIVE, so `fx` is deliberately not applied here -- Position.value_base
+        # NATIVE, so `fx` is deliberately not applied here -- Trade.value_base
         # already translates and this must not translate twice.
         if any(p.mark is None for p in legs):
             why.append("no mark: " + " ".join(
@@ -690,79 +664,101 @@ def _acb_per_share(fills) -> float | None:
     is the only one of the three that needs no extra recorded data. A sell reduces shares and
     cost in the SAME proportion, which is the whole content of the rule.
     """
-    walked = _walk_fills(fills)
-    if walked is None:
+    w = _walk_fills(fills)
+    if w is None or w.held <= 1e-9:
         return None
-    shares, cost, _realised, _sold_cost = walked
-    return None if shares <= 1e-9 else cost / shares
+    return w.cost / w.held
 
 
-def _walk_fills(fills) -> tuple[float, float, float | None, float] | None:
-    """(shares held, their cost, what the exits realised, what the exits COST). None if unknown.
+@dataclass(frozen=True)
+class _Walk:
+    """What one leg's fills add up to, split into the part still held and the part sold.
 
-    ONE WALK, FOUR ANSWERS, and two of them were being thrown away. This loop already stepped
-    through a leg's fills in order to get the cost basis, and already saw each sale's price --
-    which it ignored, correctly for a cost basis, with a comment explaining why. That is the
-    realised result of the exit, and nothing was keeping it.
-
-    WHAT A SELL REALISES is `units * (price - ACB at that moment)`. The ACB is the running
-    figure, so a trim is measured against what the shares cost when it happened rather than
-    against some later average -- which is the same rule that makes the cost basis right, and
-    the reason this has to be one walk rather than two functions.
-
-    WITHHOLDING IS UNCHANGED and shared: an undated fill means the order is unknown and order
-    changes every one of these figures; a buy with no price means the cost is not recorded; a
-    sell with nothing to sell means the record contradicts itself. In all three cases NO
-    figure is returned, not a partial one.
-
-    A SELL WITH NO PRICE does not withhold, and that asymmetry is deliberate: it cannot
-    change the cost of what remains, which is the cost basis's business. It DOES make the
-    realised figure unknowable, so it is reported as such -- see Position.realised_native.
-
-    THE FOURTH FIGURE IS THE DENOMINATOR, and leaving it out shipped a false percentage for
-    a day. Once `realised` counts what a trim banked, the P&L numerator covers capital that
-    `invested` did not: a sell removes cost pro rata and `closed_cost` only counts legs that
-    closed COMPLETELY, so a partly-sold leg contributed its result and none of its cost. One
-    bet read -115.72% -- a loss larger than everything put in, which can only happen if the
-    money is actually gone -- where the honest figure was -42.18%. A ratio whose halves
-    describe different capital is not a ratio. This is that cost, and it needs no price: it
-    comes from the running ACB, so it is known whenever the walk returns at all.
+    BOTH HALVES FROM ONE PASS, because they are the same arithmetic. The average-cost rule
+    says a sell removes shares and cost in the SAME proportion, so the cost of what was sold
+    and the cost of what is left are two readings of one running figure. Computing them
+    separately would be two answers to one question, and they would drift.
     """
-    shares = cost = realised = sold_cost = 0.0
-    # A PRICED SELL IS WHAT MAKES `realised` KNOWABLE. One sale with no recorded price makes
-    # the leg's realised total unknown, and this project's rule is that an unknown total is
-    # withheld rather than reported short -- so the flag, not a partial sum.
-    realised_unknown = False
+    held: float                  # shares still held
+    cost: float                  # what those shares cost, including the fees paid to buy
+    sold: float                  # shares sold over the leg's life
+    sold_cost: float             # what THOSE shares cost, at the ACB when each sale happened
+    proceeds: float | None       # what they fetched. None if any sale had no recorded price
+    realised: float | None       # proceeds less sold_cost less the fees paid to sell
+    last_exit: str | None        # date of the most recent sale, or None if nothing was sold
+
+
+def _walk_fills(fills) -> _Walk | None:
+    """Walk one leg's fills in order. None when the answer is not knowable at all.
+
+    THE SOLD HALF IS A CLOSED TRADE. The author, 2026-11-02: "when i close 80 shares of INTC,
+    why dont we just log that in closed positions. i think that's easier than banked." It is
+    easier, and it is also more honest: a `banked` column stated a running total that the
+    CLOSED section's own header excluded, so the screen showed `realised +850.32` directly
+    above a `-4,653.59` that was not in it. An exit of 80 shares IS a closed trade of 80
+    shares, so it gets a row and lands in the total like any other.
+
+    That makes a fully-closed leg the special case rather than the general one -- it is simply
+    a leg whose sold half is all of it -- which is why one function now answers for both and
+    `banked_in_open_legs` has nothing left to report.
+
+    WHAT A SELL REALISES is `units * (price - ACB at that moment)`, less the fee to sell. The
+    ACB is the running figure, so an exit is measured against what those shares cost WHEN IT
+    HAPPENED rather than against some later average. A later purchase must not change the
+    verdict on a sale that already took place.
+
+    FEES SIT WHERE THEY WERE PAID: a buy's fee raises the cost of the shares it bought, a
+    sell's fee reduces what that sale realised. Summed over a leg that is fully closed this
+    is exactly `proceeds - cost - fees`, which is what the SQL this replaced computed -- so
+    every closed figure in the tool is unchanged, and partial exits now work too.
+
+    WITHHELD ENTIRELY, returning None, for the three things that make the ORDER or the COST
+    unknowable: an undated fill (order changes every figure here), a buy with no price (the
+    cost is simply not recorded), and a sell with nothing to sell (the record contradicts
+    itself). A partial answer would be worse than none.
+
+    A SELL WITH NO PRICE IS THE ONE SOFT CASE, and the asymmetry is deliberate: it cannot
+    change what the remaining shares cost, nor what the sold ones cost, because both come
+    from the running ACB. It makes only `proceeds` and `realised` unknowable, and those are
+    reported as None while everything else still answers.
+    """
+    held = cost = sold = sold_cost = proceeds = realised = 0.0
+    unpriced_sale = False
+    last_exit: str | None = None
     for f in fills:
         if f["on_date"] is None:
             return None                       # order is unknown, and order changes the answer
         s = f["shares"]
+        fee = f["fee"] or 0.0
         if s > 0:
             if f["price"] is None:
                 return None                   # a buy with no price: the cost is not recorded
-            shares += s
-            cost += s * f["price"]
+            held += s
+            cost += s * f["price"] + fee
         else:
-            if shares <= 0:
+            if held <= 0:
                 return None                   # the record contradicts itself; say nothing
-            sold = min(-s, shares)
-            if f["price"] is None:
-                realised_unknown = True
-            else:
-                # THE VERDICT ON THIS PART OF THE TRADE: proceeds less what those shares
-                # cost, at the ACB in force when they were sold.
-                realised += sold * (f["price"] - cost / shares)
-            # PRO RATA, and a sell's own PRICE is deliberately irrelevant HERE: what it
-            # realises is accounted for above; the cost of what is left is not affected by
-            # the price it fetched.
-            out = cost * (sold / shares)
+            take = min(-s, held)
+            # PRO RATA, which is the whole content of the average-cost rule, and the one
+            # line both halves of the answer come from.
+            out = cost * (take / held)
+            sold += take
             sold_cost += out
             cost -= out
-            shares += s
-    return shares, cost, (None if realised_unknown else realised), sold_cost
+            held += s
+            last_exit = f["on_date"]
+            if f["price"] is None:
+                unpriced_sale = True
+            else:
+                proceeds += take * f["price"]
+                realised += take * f["price"] - out - fee
+    return _Walk(held=held, cost=cost, sold=sold, sold_cost=sold_cost,
+                 proceeds=None if unpriced_sale else proceeds,
+                 realised=None if unpriced_sale else realised,
+                 last_exit=last_exit)
 
 
-def positions(con) -> list[Position]:
+def trades(con) -> list[Trade]:
     base = base_currency(con)
     rows = con.execute("""
         SELECT t.id, t.bet_id, t.ticker, t.currency, t.stop, t.target,
@@ -795,26 +791,21 @@ def positions(con) -> list[Position]:
     # two queries however many positions there are.
     fills_of: dict[str, list] = {}
     for f in con.execute(
-            "SELECT f.trade_id, f.on_date, f.id, f.shares, f.price FROM fills f "
+            "SELECT f.trade_id, f.on_date, f.id, f.shares, f.price, f.fee FROM fills f "
             "JOIN trades t ON t.id = f.trade_id WHERE t.status='open' "
-            "ORDER BY f.trade_id, f.on_date, f.id"):
+            "ORDER BY f.trade_id, f.on_date IS NULL, f.on_date, f.id"):
         fills_of.setdefault(f["trade_id"], []).append(f)
-
-    def _walked(trade_id):
-        """(entry per share, realised, cost of what was sold) from a single pass."""
-        w = _walk_fills(fills_of.get(trade_id, []))
-        if w is None:
-            return None, None, None
-        shares, cost, realised, sold_cost = w
-        return (None if shares <= 1e-9 else cost / shares), realised, sold_cost
 
     out = []
     for r in rows:
-        entry, realised, sold_cost = _walked(r["id"])
-        out.append(Position(
+        # ONLY THE HELD HALF IS THIS LEG'S BUSINESS NOW. What the leg has SOLD is a closed
+        # trade and lives in closed_legs() -- see _walk_fills. A `realised` field here was
+        # the same money reported in a second place, which is what the author removed:
+        # "why dont we just log that in closed positions."
+        out.append(Trade(
             trade_id=r["id"], bet_id=r["bet_id"], ticker=r["ticker"],
             currency=r["currency"], qty=r["shares_held"],
-            entry=entry, realised_native=realised, sold_cost_native=sold_cost,
+            entry=_acb_per_share(fills_of.get(r["id"], [])),
             opened=r["opened"], stop=r["stop"],
             target=r["target"], loss_limit_pct=r["loss_limit_pct"],
             mark=r["mark"], mark_date=r["mark_date"],
@@ -867,62 +858,141 @@ class ClosedLeg:
         return 100.0 * self.realised / self.cost
 
 
-def closed_legs(con) -> list[ClosedLeg]:
-    """Every closed trade, newest first, with what it realised in its own currency.
+@dataclass(frozen=True)
+class _Exit:
+    """The sold half of one leg: how much left, what it cost, and what it made."""
+    qty: float                   # shares sold over the leg's life
+    cost: float | None           # what those shares cost
+    entry: float | None          # cost per share
+    exit: float | None           # proceeds per share
+    realised: float | None
 
-    REALISED IS THE WHOLE CASH FLOW OF THE LEG, not proceeds minus an average cost. For a
-    trade that is closed those are the same number and the cash flow needs no decision
-    about which shares were sold -- which is the same reason Sleeve.trading is exact.
+
+def _exit_of(fills) -> _Exit | None:
+    """What a leg's exits add up to, by whichever route is exact. None if it sold nothing.
+
+    TWO CASES, BECAUSE ORDER ONLY MATTERS WHILE SOMETHING IS STILL HELD. That is the whole
+    reason this is not one walk, and getting it wrong cost a real figure for a few minutes:
+
+      * A LEG THAT ENDS FLAT needs no order at all. Its result is the cash that went out and
+        the cash that came back, and addition does not care which came first. So an UNDATED
+        fill is harmless here -- which matters, because the real book has exactly one: a ZNQ
+        round trip whose BUY was never dated. Walking it in order put the sell first, found
+        nothing to sell, and withheld -- losing a -95.20 that the dashboard counts and that
+        the SQL this replaced had always reported. The CAD side stopped reconciling by
+        exactly that amount, which is how it was caught.
+
+      * A LEG STILL HOLDING SOMETHING has to decide WHICH shares were sold, and under the
+        average-cost rule that is the ACB at the moment of each sale. Order decides the
+        answer, so an undated fill genuinely makes it unknowable and withholds.
+
+    FEES SIT WHERE THEY WERE PAID in both routes: a buy's fee raises what the shares cost, a
+    sell's fee reduces what that sale realised. On a flat leg the two routes therefore agree
+    to the cent, which is the property that makes the split safe.
+    """
+    sells = [f for f in fills if f["shares"] < 0]
+    if not sells:
+        return None
+    sold = sum(-f["shares"] for f in sells)
+    held = sum(f["shares"] for f in fills)
+    priced = all(f["price"] is not None for f in fills)
+
+    if priced and abs(held) <= 1e-9:
+        buys = [f for f in fills if f["shares"] > 0]
+        bought = sum(f["shares"] for f in buys)
+        cost = sum(f["shares"] * f["price"] + (f["fee"] or 0.0) for f in buys)
+        proceeds = sum(-f["shares"] * f["price"] for f in sells)
+        sell_fees = sum(f["fee"] or 0.0 for f in sells)
+        return _Exit(qty=sold, cost=cost,
+                     entry=cost / bought if bought else None,
+                     exit=proceeds / sold if sold else None,
+                     realised=proceeds - cost - sell_fees)
+
+    w = _walk_fills(fills)
+    if w is None:
+        return _Exit(qty=sold, cost=None, entry=None, exit=None, realised=None)
+    return _Exit(qty=w.sold, cost=w.sold_cost,
+                 entry=w.sold_cost / w.sold if w.sold else None,
+                 exit=(w.proceeds / w.sold if w.proceeds is not None and w.sold else None),
+                 realised=w.realised)
+
+
+def closed_legs(con) -> list[ClosedLeg]:
+    """Every exit, newest first, in its own currency. A partial exit is one of these.
+
+    THE AUTHOR REDEFINED THIS, 2026-11-02: "when i close 80 shares of INTC, why dont we just
+    log that in closed positions. i think that's easier than banked." So this is no longer
+    "legs whose status is closed" -- it is every leg that has SOLD anything, and the sold part
+    is the row. A full close is the case where the sold part happens to be the whole leg.
+
+    IT FIXED A FIGURE THAT CONTRADICTED ITSELF ON SCREEN. The `CLOSED . <ccy>` header sums the
+    rows under it, and before this a trim inside an open leg was not one of those rows -- it
+    was a separate `banked in open` line appended outside the total. So the tab showed
+    `realised +850.32` with a `-4,653.59` sitting directly beneath it, unreconcilable from the
+    screen. Now it is a row, so it is in the total, and there is nothing left to append.
+
+    WALKED, NOT SUMMED IN SQL, and that is forced: the old query computed
+    `proceeds - cost - fees` over every fill, which is the exact cash flow of a leg ONLY when
+    the leg is fully closed. For a partial exit `cost` would be every buy while `proceeds` is
+    one sale, so the figure would be wrong by whatever is still held. The ACB walk answers
+    both cases with the same arithmetic -- see _Walk.
 
     NOT TRANSLATED. A leg's result happened in its own currency on its own dates, and
     restating it at today's rate would fold an FX move into a figure about a stock. The
-    dashboard's `USD → CAD` line is where the currency belongs.
+    dashboard's `USD -> CAD` line is where the currency belongs.
     """
     rows = con.execute("""
-        SELECT t.id, t.bet_id, t.ticker, t.currency, t.account_id, t.closed,
-               (SELECT MIN(on_date) FROM fills f WHERE f.trade_id = t.id) AS opened,
-               SUM(CASE WHEN f.shares > 0 THEN f.shares ELSE 0 END)        AS bought,
-               SUM(CASE WHEN f.shares < 0 THEN -f.shares ELSE 0 END)       AS sold,
-               SUM(CASE WHEN f.shares > 0 THEN f.shares * f.price END)     AS cost,
-               SUM(CASE WHEN f.shares < 0 THEN -f.shares * f.price END)    AS proceeds,
-               SUM(COALESCE(f.fee, 0))                                     AS fees,
-               SUM(CASE WHEN f.price IS NULL THEN 1 ELSE 0 END)            AS unpriced
-          FROM trades t JOIN fills f ON f.trade_id = t.id
-         WHERE t.status = 'closed'
-         GROUP BY t.id
-         ORDER BY t.closed DESC, t.id
+        SELECT t.id, t.bet_id, t.ticker, t.currency, t.account_id, t.closed, t.status
+          FROM trades t
     """).fetchall()
+    fills_of: dict[str, list] = {}
+    for f in con.execute("SELECT trade_id, on_date, shares, price, fee FROM fills "
+                         "ORDER BY on_date IS NULL, on_date, id"):
+        fills_of.setdefault(f["trade_id"], []).append(f)
+
     out = []
     for r in rows:
-        # ONE UNPRICED FILL POISONS THE WHOLE LEG. A realised figure short by whatever a
-        # fill cost is not a small error, it is the entire answer for that leg.
-        whole = not r["unpriced"]
-        cost = float(r["cost"]) if whole and r["cost"] is not None else None
-        proceeds = float(r["proceeds"]) if whole and r["proceeds"] is not None else None
+        fills = fills_of.get(r["id"], [])
+        e = _exit_of(fills)
+        # A CLOSED LEG THAT SOLD NOTHING still belongs here: the status says the trade is
+        # over, and dropping it would hide a trade rather than report it as unvalued.
+        if e is None and r["status"] != "closed":
+            continue
+        dates = [f["on_date"] for f in fills if f["shares"] < 0 and f["on_date"]]
         out.append(ClosedLeg(
             trade_id=r["id"], bet_id=r["bet_id"], ticker=r["ticker"],
             currency=r["currency"], account=r["account_id"],
-            opened=r["opened"], closed=r["closed"],
-            qty=float(r["bought"]) if r["bought"] else None,
-            entry=(cost / r["bought"] if cost is not None and r["bought"] else None),
-            exit=(proceeds / r["sold"] if proceeds is not None and r["sold"] else None),
-            cost=cost,
-            realised=(None if cost is None or proceeds is None
-                      else proceeds - cost - float(r["fees"] or 0.0))))
+            opened=min((f["on_date"] for f in fills if f["on_date"]), default=None),
+            # THE LEG'S RECORDED `closed` DATE WHEN IT HAS ONE. A partial exit has none, so
+            # the last sale is the date the exit happened.
+            closed=r["closed"] or (max(dates) if dates else None),
+            qty=(e.qty if e else None) or None,
+            entry=e.entry if e else None,
+            exit=e.exit if e else None,
+            cost=e.cost if e else None,
+            realised=e.realised if e else None))
+    out.sort(key=lambda c: (c.closed or "", c.trade_id), reverse=True)
     return out
 
 
 def banked_in_open_legs(con) -> dict[str, float]:
-    """Realised P&L already taken inside legs that are STILL OPEN, per currency.
+    """Realised money that no closed row accounts for. MUST be empty, and that is the point.
 
-    A TRIM BANKS MONEY WITHOUT CLOSING ANYTHING: sell 175 of a 205-share T-bill ETF leg
-    at 50.08 against an average entry of 50.05, and the few dollars that realises sit in the
-    dashboard's `realised` line and in no closed leg -- so without this the two figures look
-    like they disagree by exactly that much.
+    THIS IS NOW A CHECK, NOT A SOURCE. It used to feed a `banked in open` line on the trades
+    tab, because a trim realised money while closing nothing and so appeared in no closed
+    row. Since the author redefined an exit as a closed trade -- "when i close 80 shares of
+    INTC, why dont we just log that in closed positions" -- every realised dollar has a row,
+    and the honest value of this function is zero.
 
-    DERIVED AS THE REMAINDER of the sleeve's realised total minus the closed legs, so the
-    three numbers cannot drift apart. Computing it from average cost at the time of each
-    trim would be a second, path-dependent answer to a question already answered.
+    SO IT EARNS ITS KEEP AS THE INDEPENDENT CROSS-CHECK, which is worth more than the row it
+    replaced. It derives the remainder from the SLEEVE's realised total, computed by a
+    completely different route from the per-leg walk, and subtracts the closed rows. If the
+    two ever disagree, something is being double-counted or dropped -- which is exactly how
+    the ZNQ leg was caught: the CAD side came back 95.20 short because an undated fill made
+    one leg withhold a figure the sleeve still counted. See _exit_of.
+
+    A test holds this at empty on the fixture, and tests/test_book.py holds it on the real
+    book. A non-empty result is a bug report, per currency, in dollars.
     """
     closed: dict[str, float] = {}
     for leg in closed_legs(con):
@@ -989,10 +1059,7 @@ class Bet:
     # a test for it. The cost is that a realised USD gain's later currency drift sits inside
     # `realised` rather than beside it, which is also how a broker statement reads.
     realised: float | None = None
-    closed_cost: float | None = None     # what the closed legs cost, at close-date FX
-    # WHAT THE PARTLY-SOLD LEGS SOLD, at cost. The companion to the open-leg money inside
-    # `realised`, and the half that was missed for a day: see invested.
-    trimmed_cost: float | None = None
+    closed_cost: float | None = None     # what every exit cost, partial or complete
     closed_legs: int = 0
     unvalued_closed_legs: int = 0        # closed legs with no price or no rate on the day
 
@@ -1029,21 +1096,26 @@ class Bet:
 
     @property
     def invested(self) -> float | None:
-        """Every dollar this bet has committed: open legs, closed legs, and trims.
+        """Every dollar this bet has committed: what it still holds, and what every exit cost.
 
         THE DENOMINATOR MUST COVER THE SAME CAPITAL AS THE NUMERATOR, and for one day it did
-        not. `realised` counts what a trim banked, but a sell removes cost pro rata and
-        `closed_cost` counts only legs that closed COMPLETELY -- so a partly-sold leg handed
-        its result to the numerator and none of its cost to the denominator. A bet showed
-        -115.72%, a loss bigger than everything put into it, which is a thing that can only
-        happen if the capital is actually gone. It was not: the honest figure was -42.18%.
+        not. `realised` had grown to count what a trim banked, while `closed_cost` still
+        counted only legs that closed COMPLETELY -- so a partly-sold leg handed its result to
+        the numerator and none of its cost to the denominator. A bet showed -115.72%, a loss
+        bigger than everything put into it, which can only happen if the capital is actually
+        gone. It was not: the honest figure was -42.18%.
 
-        The author, shown both: "% of all capital put in". So a >100% loss is now impossible
-        unless the money really is gone, which is the property worth having.
+        The author, shown both: "% of all capital put in", and then separately: "the bet's
+        pnl includes total deployed assets and total pnl from open and closed positions." So a
+        >100% loss is impossible here unless the money really is gone.
+
+        IT NEEDS NO SPECIAL TERM FOR TRIMS ANY MORE. A partial exit is a closed trade now, so
+        `closed_cost` already covers the cost of every exit and this is just two terms again.
+        The version that needed three was paying for a `banked` figure that no longer exists.
         """
-        if self.cost is None or self.closed_cost is None or self.trimmed_cost is None:
+        if self.cost is None or self.closed_cost is None:
             return None
-        return self.cost + self.closed_cost + self.trimmed_cost
+        return self.cost + self.closed_cost
 
     @property
     def filled_pct(self) -> float | None:
@@ -1094,7 +1166,7 @@ def bets(con) -> list[Bet]:
         the par branch above;
       * it measured at COST, which is what was committed rather than what is at risk.
 
-    Python already has all four right: Position.value_base returns None when there is no
+    Python already has all four right: Trade.value_base returns None when there is no
     mark or no rate, net() withholds a partial total, and the home currency comes from the
     profile. So the arithmetic moves to where those guarantees live.
     """
@@ -1108,7 +1180,7 @@ def bets(con) -> list[Bet]:
     """).fetchall()
 
     legs_of: dict[str | None, list] = {}
-    for p in positions(con):
+    for p in trades(con):
         legs_of.setdefault(p.bet_id, []).append(p)
     total = net(con).net
     home = base_currency(con)
@@ -1169,53 +1241,14 @@ def bets(con) -> list[Bet]:
                 realised += leg.realised * rate
                 closed_cost += leg.cost * rate
 
-        # AND WHAT THE OPEN LEGS HAVE ALREADY BANKED, which this omitted entirely. A trim
-        # realises money without closing anything, so `done` never saw it: a bet reported
-        # realised 0.00 on a day one of its legs had banked a four-figure loss on a trim, and
-        # its pnl came out understated by more than twice the loss it did report. The author,
-        # who found this from the outside: "now it only shows a defeat after everything is
-        # closed."
+        # BOTH EXTRA LOOPS THAT WERE HERE ARE GONE, and that is the point of the author's
+        # redesign. They added what the OPEN legs had banked, and then the cost of what those
+        # legs had sold, because a trim realised money that no closed leg carried. Now a trim
+        # IS a closed leg -- see closed_legs() -- so `done` above already counts both, and
+        # counting them again here would double every partial exit.
         #
-        # NOT ADDED TO closed_cost, which means what the CLOSED legs cost and is read on its
-        # own elsewhere. The denominator gets it through `trimmed_cost` below instead.
-        # `realised` ONLY -- not closed_cost, not the counter, and the first version of this
-        # touched both. An open leg's unpriced sale says nothing about what the CLOSED legs
-        # cost, so nulling closed_cost there threw away a separately knowable figure and took
-        # `invested` with it. And `unvalued_closed_legs` is rendered as "N of them cannot be
-        # valued" directly after "N closed leg(s)" -- so incrementing it for an OPEN leg
-        # printed a sentence whose "them" had no antecedent, on bets with no closed legs at
-        # all. A withheld `pnl` is the honest signal here, and it needs no second channel.
-        for leg in legs:
-            if realised is None:
-                break
-            if leg.realised_native is None:
-                realised = None               # a sale with no price: unknowable, not zero
-                break
-            if leg.realised_native == 0.0:
-                continue                      # nothing sold out of this leg
-            rate, _ = fx_rate(con, leg.currency, home)
-            if rate is None:
-                realised = None
-                break
-            realised += leg.realised_native * rate
-
-        # THE DENOMINATOR HALF of the money just added, and it withholds on its OWN terms
-        # rather than following `realised`: an unpriced sale hides what a trim MADE, never
-        # what it SOLD, so this is knowable strictly more often. A separate pass for that
-        # reason -- entangling two withholding rules in one loop is how the first version of
-        # this got the ratio wrong. See Bet.invested.
-        trimmed_cost: float | None = 0.0
-        for leg in legs:
-            if leg.sold_cost_native is None:
-                trimmed_cost = None
-                break
-            if leg.sold_cost_native == 0.0:
-                continue                      # nothing sold out of this leg
-            rate, _ = fx_rate(con, leg.currency, home)
-            if rate is None:
-                trimmed_cost = None
-                break
-            trimmed_cost += leg.sold_cost_native * rate
+        # `invested` therefore needs no third term: closed_cost covers the cost of every
+        # exit, partial or complete, which is the capital that `realised` is measured on.
 
         out.append(Bet(
             id=r["id"], name=r["name"], status=r["status"], opened=r["opened"],
@@ -1225,7 +1258,7 @@ def bets(con) -> list[Bet]:
             of_allocated_pct=(None if not home_alloc[r["id"]] or not allocated_total
                               else 100.0 * home_alloc[r["id"]] / allocated_total),
             unpriced_legs=len(blind), cost=cost,
-            realised=realised, closed_cost=closed_cost, trimmed_cost=trimmed_cost,
+            realised=realised, closed_cost=closed_cost,
             closed_legs=len(done), unvalued_closed_legs=unvalued))
     return out
 
@@ -1248,7 +1281,7 @@ def parked(con) -> float | None:
     `kind` comes from the price source's own instrumentType, not from a rule about
     trading, which is the difference.
     """
-    rows = [p for p in positions(con)
+    rows = [p for p in trades(con)
             if con.execute("SELECT kind FROM instruments WHERE ticker=?",
                            (p.ticker,)).fetchone()[0] == "money-market"]
     if not rows:
@@ -2045,7 +2078,7 @@ class PortfolioGroup:
     status: str | None
     value: float | None          # open legs AT MARKET, home currency; None if a leg is blind
     weight_pct: float | None     # market value as a share of derived net
-    legs: tuple                  # Position, largest first
+    legs: tuple                  # Trade, largest first
     unvalued: int                # legs left out of `value` for want of a mark or a rate
     # TWO WEIGHTS, BECAUSE THE AUTHOR NAMED TWO. 2026-09-24: "when we say weight, i think there are
     # two numbers im interested about. 1. allocated capital vs. entire portfolio 2. deployed
@@ -2102,7 +2135,7 @@ def portfolio(con) -> list[PortfolioGroup]:
     names = {b.id: (b.name, b.status) for b in bets(con)}
     allocs = {b.id: b.allocation for b in bets(con)}
     grouped: dict[str | None, list] = {}
-    for p in positions(con):
+    for p in trades(con):
         grouped.setdefault(p.bet_id, []).append(p)
 
     out = []
@@ -2182,7 +2215,7 @@ def bet_composition(con, bet_id: str) -> BetComposition:
     home = base_currency(con)
     by_ticker: dict[str, float] = {}
     unpriced: list[str] = []
-    for p in positions(con):
+    for p in trades(con):
         if p.bet_id != bet_id:
             continue
         if p.cost_base is None:

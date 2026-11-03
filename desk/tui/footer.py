@@ -107,7 +107,7 @@ def render_keys(scope: str, width: int, live=None) -> str:
 class KeyFooter(Static):
     def __init__(self, **kwargs) -> None:
         super().__init__("", **kwargs)
-        self._scope = "positions"
+        self._scope = "trades"
         self._extra = ""
         self._live = None
         self.text = ""      # the last rendered content, so a test can assert on it
