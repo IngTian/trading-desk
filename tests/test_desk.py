@@ -1899,7 +1899,11 @@ def test_the_price_fetch_never_holds_a_write_lock_across_the_network(con, monkey
     in_fetch = threading.Event()
     may_finish = threading.Event()
 
-    def slow_fetch(symbol, since_epoch):
+    # `should_stop` IS ACCEPTED AND IGNORED. It arrived with the quit fix, and a stub that
+    # did not take it raised TypeError inside main's per-symbol `except Exception` -- so the
+    # symbol was merely "skipped", the event never set, and this test failed claiming the
+    # fetch had not run rather than that its signature had changed.
+    def slow_fetch(symbol, since_epoch, should_stop=None):
         in_fetch.set()
         # Stands in for an HTTP request. On the old code the caller already held a write
         # lock by this point, and it held it here.
@@ -2048,8 +2052,13 @@ async def test_the_dashboard_shows_bets_their_share_and_their_legs(app, con, got
     """A TABLE, not indented text. The author: "cant we have a table or something? some charts? this
     looks ugly as hell."
 
-    Both weights on every row, because they named two and they answer different questions: what
-    a bet has RESERVED of the portfolio, and how much of that reservation is spent.
+    Both weights on every row, because they named two and they answer different questions: how
+    big this row is, and how much of a bet's reservation is spent.
+
+    `share` REBASED ON 2026-11-02. A bet row showed its allocation against NET, which was true
+    and unreadable -- two bets holding very different amounts printed the SAME percentage,
+    because the figure described their equal budgets rather than their holdings. The author:
+    "i think this should be the share of sum (total reserved capital for each bet)."
     """
     async with app.run_test(size=(126, 60)) as pilot:
         await goto(pilot, "dashboard")
@@ -2059,13 +2068,13 @@ async def test_the_dashboard_shows_bets_their_share_and_their_legs(app, con, got
                 for r in range(t.row_count)}
         head = " ".join(_plain(app, "#port-head"))
 
-    assert labels[:4] == ["holding", "value", "of net", "of bet"], labels
+    assert labels[:4] == ["holding", "value", "share", "of bet"], labels
     for g in book.portfolio(con):
         row = rows[f"·grp:{g.bet_id or 'none'}"]
         assert _cell_text(row[0]) == g.name
-        # A BET ROW CARRIES ITS CLAIM; `no bet` has no allocation so it falls back to its
-        # market share, which is the only honest share it has.
-        want = g.claim_pct if g.claim_pct is not None else g.weight_pct
+        # A BET ROW CARRIES ITS SHARE OF THE CAPITAL RESERVED BY BETS; `no bet` has no
+        # allocation so it falls back to its market share of net, the only honest share it has.
+        want = g.of_reserved_pct if g.of_reserved_pct is not None else g.weight_pct
         assert _cell_text(row[2]) == share(want), (g.name, _cell_text(row[2]))
         for leg in g.legs:
             assert leg.trade_id in rows, f"{leg.ticker} is not under {g.name}"
@@ -2074,7 +2083,14 @@ async def test_the_dashboard_shows_bets_their_share_and_their_legs(app, con, got
                            else NA_DASH), (leg.ticker, got)
     # CASH CLOSES THE ALLOCATION, and the bar rule is stated once rather than per row.
     assert "·cash" in rows
-    assert "share of its parent" in head, head
+    # THE HEAD SAYS WHICH BASIS EACH ROW USES, because the column carries two. And the
+    # over-commitment figure stays against NET: over 100% means more reserved than held.
+    assert "bars: share of parent" in head, head
+    assert "bets of reserved, rest of net" in head, head
+    assert "of net claimed by bets" in head, head
+    # AND IT FITS. A clause truncated at the pane edge explains nothing; the first version of
+    # this line ran to 163 characters and lost the bar rule entirely at 140 columns.
+    assert len(head) <= 130, f"{len(head)} chars will truncate: {head}"
 
 
 async def test_the_portfolio_bars_scale_with_the_share(app, goto):
@@ -5849,3 +5865,190 @@ def test_a_round_trip_reports_even_when_a_fill_was_never_dated(con):
     assert e.entry == pytest.approx(131.36)
     assert e.exit == pytest.approx(130.00)
     assert book.banked_in_open_legs(con) == {}, "the sleeve and the rows must still agree"
+
+
+# --------------------------------------------------------------------------- #
+# the four defects the author asked to fix on 2026-11-02, after reading the
+# running desk rather than the test output.
+# --------------------------------------------------------------------------- #
+def test_a_figure_that_rounds_to_zero_claims_no_sign():
+    """`▼ -0.00` IS A LOSS THE CELL CANNOT SHOW A VALUE FOR, so it must not show the arrow.
+
+    A flat money-market leg rendered a red down-arrow on a P&L of a few hundred-thousandths
+    of a cent. No arithmetic here produced it: the price feed returns SINGLE-PRECISION closes,
+    so a hand-typed two-decimal entry and a fetched mark of the same price are different
+    doubles. float32(25.07) is 25.06999969482422, so 100 shares against an entry of 25.07
+    gives the residue below -- and which way it points is arbitrary.
+
+    Turns red if _flat stops snapping, in any of the three helpers that read the same number.
+    """
+    import struct
+
+    from desk.tui.widgets import arrow, pct, signed, trend_style
+    mark = struct.unpack("f", struct.pack("f", 25.07))[0]   # what the feed would hand back
+    tiny = 100 * (mark - 25.07)
+    assert tiny < 0 and abs(tiny) < 0.005, f"{tiny!r} is not the residue this is about"
+    assert signed(tiny) == "+0.00", "a sub-half-cent loss printed a minus sign"
+    assert arrow(tiny) == "", "a flat row claimed a direction"
+    assert trend_style(tiny) == "", "a flat row was coloured as a loss"
+    assert pct(tiny) == "+0.00%"
+
+    # AND A REAL CENT STILL READS AS ONE. The snap is half a cent, not a tolerance for
+    # anything small -- -0.006 rounds to -0.01, which the cell CAN show.
+    assert signed(-0.006) == "-0.01" and arrow(-0.006) == "▼"
+    assert trend_style(-0.006) != ""
+
+
+async def test_a_closed_total_is_withheld_when_a_member_cannot_be_valued(con, app, goto):
+    """A SUM THAT SILENTLY OMITS A MEMBER IS THE DEFECT, not a convenience.
+
+    The `CLOSED · <ccy>` header filtered out the legs it could not value and totalled the
+    rest, which prints a figure that looks complete and is short by whatever those legs made.
+    A reader cannot tell a total of five legs from a total of four of them.
+
+    Turns red if the header goes back to summing around its Nones.
+    """
+    # A SECOND, VALUED CAD EXIT, because the fixture ships exactly one. Without it, nulling
+    # the only member leaves nothing to sum and both the fix and the bug render an em dash --
+    # the test passed against the bug. A total of one is not a total.
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('wh','live','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=50.0, price=10.0, on_date="2026-06-01",
+                  account="tfsa", bet_id="wh")
+    book.add_fill(con, ticker="CADCO", shares=-50.0, price=12.0, on_date="2026-06-02",
+                  account="tfsa", bet_id="wh")
+    con.execute("UPDATE fills SET price=NULL WHERE trade_id='2026-03-02-cadco' AND shares>0")
+
+    cad = [c for c in book.closed_legs(con) if c.currency == "CAD"]
+    assert [c for c in cad if c.realised is None], "fixture: no unvalued CAD exit"
+    assert [c for c in cad if c.realised is not None], (
+        "fixture: nothing valued to sum, so summing around the hole would look identical")
+
+    async with app.run_test(size=(126, 46)) as pilot:
+        await goto(pilot, "trades")
+        t = app.query_one("#trade-table", DataTable)
+        rows = {t.coordinate_to_cell_key((r, 0)).row_key.value: t.get_row_at(r)
+                for r in range(t.row_count)}
+    cell = _cell_text(rows[f"{TradesPane.INERT}closed:CAD"][POS["pnl"]])
+    assert cell == NA_DASH, (
+        f"the CAD closed total read {cell!r} while one of its legs could not be valued")
+
+
+def test_each_bar_is_dated_by_its_exchanges_own_rules(monkeypatch):
+    """ONE OFFSET CANNOT DATE 400 DAYS, because the offset changes twice a year.
+
+    `gmtoffset` is the offset in force WHEN THE FETCH RAN. Applying it to history dates every
+    bar from the other side of a daylight-saving change by rules that were not in force when
+    that bar traded. London is on GMT in November, so a backfill now sent 0 -- while a summer
+    FX bar's true local midnight is 23:00 UTC of the PREVIOUS day, so those bars came out one
+    day early. The live book had two USD/CAD rates dated a SATURDAY, each a Sunday bar pushed
+    back a day, and the writer is INSERT OR REPLACE so a shifted row can overwrite a correct
+    one.
+
+    Turns red if fetch_one goes back to a single offset: the July bar becomes 2026-06-30.
+    """
+    import json
+    import urllib.request
+    from zoneinfo import ZoneInfo
+
+    from desk import prices
+
+    london = ZoneInfo("Europe/London")
+    # MIDNIGHT LOCAL ON EACH SIDE OF THE TRANSITION, which is how Yahoo stamps an FX bar.
+    summer = dt.datetime(2026, 7, 1, tzinfo=london)      # BST, +1
+    winter = dt.datetime(2026, 12, 1, tzinfo=london)     # GMT, +0
+    payload = {"chart": {"error": None, "result": [{
+        "meta": {"dataGranularity": "1d", "currency": "CAD",
+                 "exchangeTimezoneName": "Europe/London",
+                 # THE WINTER OFFSET, as a November fetch really does report.
+                 "gmtoffset": 0},
+        "timestamp": [int(summer.timestamp()), int(winter.timestamp())],
+        "indicators": {"quote": [{"close": [1.40, 1.41]}]},
+    }]}}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return json.dumps(payload).encode()
+
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _Resp())
+    monkeypatch.setattr(json, "load", lambda f: payload)
+    bars = prices.fetch_one("USDCAD=X", 0)
+
+    assert [b["date"] for b in bars] == ["2026-07-01", "2026-12-01"], (
+        f"{[b['date'] for b in bars]}: the July bar is dated by July's rules, not November's")
+
+
+def test_the_fetch_stops_between_symbols_when_the_caller_quits(con, tmp_path, monkeypatch):
+    """QUITTING MUST NOT WAIT FOR THE WHOLE RUN. It used to.
+
+    The fetch runs on a worker thread that the interpreter JOINS at exit, and
+    @work(exclusive=True) can cancel the task but not the thread. So `q` mid-poll left the
+    shell sitting there finishing every remaining symbol and every retry -- ten symbols at up
+    to three 30-second attempts each -- with the TUI already gone.
+
+    Cooperative, because a blocking urlopen cannot be interrupted from outside. What this
+    holds is that nothing further is STARTED once the caller has given up.
+
+    Turns red if main() stops consulting should_stop.
+    """
+    import shutil
+
+    from desk import prices
+
+    db = tmp_path / "stop.db"
+    shutil.copy(str(con.execute("PRAGMA database_list").fetchone()[2]), db)
+    monkeypatch.setattr(prices, "DB", str(db))
+    monkeypatch.setattr(prices, "PAUSE_S", 0)
+
+    calls = []
+    monkeypatch.setattr(prices, "fetch_one",
+                        lambda symbol, since, should_stop=None: calls.append(symbol) or [])
+
+    lines = []
+    rc = prices.main(dry=True, days=7, emit=lines.append, should_stop=lambda: True)
+    assert calls == [], f"fetched {calls} after the caller had already quit"
+    assert rc == 0, "stopping on request is not a failure"
+    assert any("stopped" in ln for ln in lines), lines
+
+    # AND IT STILL RUNS when nobody is quitting, or the guard would be a kill switch.
+    calls.clear()
+    prices.main(dry=True, days=7, emit=lines.append, should_stop=lambda: False)
+    assert calls, "nothing was fetched with should_stop returning False"
+
+
+def test_a_trades_subtotal_and_a_bets_pnl_measure_different_scopes_on_purpose(con):
+    """TWO PERCENTAGES FOR ONE BET, AND THAT IS CORRECT. The author: "trade and bet measure
+    different scope. that's correct."
+
+    The trades tab's bet heading subtotals the OPEN rows printed beneath it, so its percentage
+    is unrealised against what those rows cost. The bets tab measures the whole bet, so its
+    percentage includes every exit and divides by all the capital committed. On a bet with a
+    partial exit the two differ by the exit -- which is information, not a discrepancy.
+
+    THIS TEST EXISTS TO STOP THE "FIX". Reconciling them would mean either hiding an exit from
+    the bets tab or totalling rows the trades tab is not showing. It is pinned, not inherited.
+    """
+    con.execute("INSERT INTO bets(id,status,opened) VALUES ('scope','live','2026-06-01')")
+    book.add_fill(con, ticker="CADCO", shares=100.0, price=10.0, on_date="2026-06-01",
+                  account="tfsa", bet_id="scope")
+    book.add_fill(con, ticker="CADCO", shares=-40.0, price=20.0, on_date="2026-06-02",
+                  account="tfsa", bet_id="scope")
+
+    b = next(x for x in book.bets(con) if x.id == "scope")
+    legs = [t for t in book.trades(con) if t.bet_id == "scope"]
+    open_cost = sum(t.cost_base for t in legs)
+    open_unrealised = sum(t.value_base for t in legs) - open_cost
+
+    # THE TRADES HEADING: only the rows under it, which have realised nothing.
+    trades_pct = 100.0 * open_unrealised / open_cost
+    # THE BETS ROW: the exit too, over every dollar committed.
+    assert b.pnl_pct is not None
+    assert b.realised == pytest.approx(400.0), "40 sold at 20 against a cost of 10"
+    assert b.invested == pytest.approx(1_000.0), "600 held plus the 400 sold"
+
+    assert b.pnl_pct != pytest.approx(trades_pct), (
+        "the two scopes produced the same figure, so this fixture no longer shows the "
+        "difference the test is about")
+    assert b.pnl_pct > trades_pct, (
+        f"the bet ({b.pnl_pct:.2f}%) should carry the +400 exit that the trades heading "
+        f"({trades_pct:.2f}%) does not")

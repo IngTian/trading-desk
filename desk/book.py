@@ -2087,7 +2087,24 @@ class PortfolioGroup:
     # and `weight_pct` is how much is actually at risk. On their book both bets claim 47.3%
     # while holding 7.9% and 23.4% -- a six-fold gap that one number cannot express.
     allocation: float | None = None
-    claim_pct: float | None = None    # allocation as a share of derived net
+    claim_pct: float | None = None    # allocation as a share of derived NET
+    # ALLOCATION AS A SHARE OF EVERY ALLOCATION, which is what the dashboard row shows. The
+    # author, 2026-11-02, on seeing two bets both report 61.5%: "i think this should be the
+    # share of sum (total reserved capital for each bet)."
+    #
+    # IT WAS A SHARE OF NET and that read as broken even though it was not. Two bets holding
+    # 18,896 and 5,314 printed the SAME 61.5% with the same bar, because both had reserved
+    # 22,500 and net was 36,592 -- a true figure that answered a question nobody was asking
+    # while sitting in a column whose other rows answered a different one.
+    #
+    # Against the other budgets it sums to 100% and says something usable: half the committed
+    # capital each. Same rule the bets tab already uses -- "essentially we are giving each bet
+    # x amount of cash to play out. this has nothing to do with total net worth."
+    #
+    # `claim_pct` SURVIVES for the pane header's "N% claimed by bets", which is a different
+    # and load-bearing figure: over 100% means more has been reserved than the book holds.
+    # Making this one of-total would have turned that into a tautological 100%.
+    of_reserved_pct: float | None = None
     # AT COST, matching Bet.filled_pct -- see its docstring for why the basis changed.
     cost: float | None = None         # open legs at entry cost, home currency
     filled_pct: float | None = None   # cost as a share of this bet's own allocation
@@ -2138,6 +2155,12 @@ def portfolio(con) -> list[PortfolioGroup]:
     for p in trades(con):
         grouped.setdefault(p.bet_id, []).append(p)
 
+    # EVERY ALLOCATION THAT IS SHOWN HERE, so the shares below sum to 100% of what the
+    # reader can see. Summed over the groups on this table rather than over every bet in the
+    # book: a bet with no open legs has no row, and dividing by budgets that are not on
+    # screen would give a column that silently fails to add up.
+    reserved = sum(v for k, v in allocs.items() if k in grouped and v)
+
     out = []
     for bet_id, legs in grouped.items():
         valued = [x for x in legs if x.value_base is not None]
@@ -2157,6 +2180,8 @@ def portfolio(con) -> list[PortfolioGroup]:
             unvalued=blind,
             allocation=alloc,
             claim_pct=(None if not alloc or not n.net else 100.0 * alloc / n.net),
+            of_reserved_pct=(None if not alloc or not reserved
+                             else 100.0 * alloc / reserved),
             cost=cost,
             filled_pct=(None if not alloc or cost is None else 100.0 * cost / alloc)))
     # LARGEST FIRST, with the unvaluable groups last rather than sorted as zero -- a group

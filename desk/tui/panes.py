@@ -600,8 +600,17 @@ class TradesPane(Pane):
         for ccy in sorted(by_ccy):
             self._gap(t)
             group = by_ccy[ccy]
-            got = [x.realised for x in group if x.realised is not None]
-            total = sum(got) if got else None
+            # WITHHELD IF ANY MEMBER IS UNVALUED, rather than summed around it. This used to
+            # filter the Nones out and total the rest, which prints a figure that looks
+            # complete and is short by whatever the dropped legs made -- the same defect as
+            # the `banked in open` line below, one row up. A reader cannot tell a total of
+            # nine legs from a total of eight of them.
+            #
+            # The rows themselves still show their own em dash, so WHICH leg is missing is
+            # visible; it is only the sum that refuses to guess. Every other cross-currency
+            # total in this file withholds the same way.
+            amounts = [x.realised for x in group]
+            total = None if any(a is None for a in amounts) else sum(amounts)
             t.add_row(
                 _cell(f"CLOSED · {ccy}", "bold"),
                 _cell(str(len(group)), FAINT),
@@ -1049,14 +1058,18 @@ class DashboardPane(Pane):
             t.add_column(label, width=width)
         # TWO WEIGHT COLUMNS, because the author named two numbers and neither substitutes for the
         # other: "1. allocated capital vs. entire portfolio 2. deployed capital vs. bet".
-        # `of net` is what the row CLAIMS of the portfolio, `of bet` is a leg's share of its
-        # bet's allocation. On a bet row `of bet` is therefore how full it is.
+        # `of bet` is a leg's share of its bet's allocation; on a bet row it is how full it is.
+        #
+        # `share` WAS CALLED `of net` AND THAT WAS THE PROBLEM. It holds two bases -- a bet
+        # row shares the capital reserved by bets, a leg or cash row shares net worth -- so a
+        # label naming one of them was false on the other half of the table. The head states
+        # both, which is where it costs no rows; see _portfolio.
         #
         # 24+14+8+8+12 = 66, plus 10 padding = 76 -- well inside a 110-column terminal, and
         # deliberately narrower than the positions table because this view carries shares
         # rather than prices.
         pt = self.query_one("#port-table", DataTable)
-        for label, width in (("holding", 24), ("value", 14), ("of net", 8),
+        for label, width in (("holding", 24), ("value", 14), ("share", 8),
                              ("of bet", 8), ("", 12)):
             pt.add_column(label, width=width)
         self.reload()
@@ -1278,10 +1291,19 @@ class DashboardPane(Pane):
         bar beside it.
 
         BOTH WEIGHTS ON EVERY ROW, because they named two and they answer different questions:
-        `of net` is what a bet has RESERVED of the portfolio, `of bet` is how much of that
-        reservation is spent -- and per leg, that leg's share of the same allocation. On their
-        book each bet claims 47.3% while deploying 7.9% and 23.4%, a six-fold gap one number
-        cannot express.
+        `share` is how big this row is, `of bet` is how much of a bet's reservation is spent
+        -- and per leg, that leg's share of the same allocation. A bet can reserve far more
+        than it has deployed, a gap one number cannot express.
+
+        `share` CHANGED BASIS ON 2026-11-02. A bet row used to show its allocation as a share
+        of NET, which was true and unreadable: two bets holding 18,896 and 5,314 both printed
+        61.5% with identical bars, because both had reserved 22,500. The author: "i think this
+        should be the share of sum (total reserved capital for each bet)." Against the other
+        budgets it sums to 100% and says half the committed capital each.
+
+        THE HEADER'S `N% claimed by bets` STILL DIVIDES BY NET, deliberately: over 100% means
+        more has been reserved than the book holds, which is the one figure here that warns
+        about something. Rebasing it would have pinned it to a tautological 100%.
         """
         t = self.query_one("#port-table", DataTable)
         head = self.query_one("#port-head", Static)
@@ -1299,21 +1321,29 @@ class DashboardPane(Pane):
             # meanings in one column needs stating, and the head is where it costs no rows.
             head.update(
                 f"portfolio   {money(n.net)} {n.home}   "
-                + mark(f"{share(claimed)} claimed by bets   ·   "
-                       f"bars are each row's share of its parent", FAINT))
+                # TERSE BECAUSE THIS LINE DOES NOT WRAP. The first draft spelled all three
+                # clauses out and ran to 163 characters, which truncated the bar rule to
+                # "bars are each…" at 140 columns -- an explanation nobody can read is worse
+                # than the ambiguity it was added to remove.
+                + mark(f"{share(claimed)} of net claimed by bets   ·   "
+                       f"share: bets of reserved, rest of net   ·   "
+                       f"bars: share of parent", FAINT))
             self._gaps = 0
             for g in groups:
                 t.add_row(
                     _cell(g.name, "bold" if g.bet_id else FAINT),
                     _cell(money(g.value), "bold"),
-                    # A BET ROW SHOWS ITS CLAIM, and falls back to its market share when it
-                    # has declared no allocation -- `no bet` never has one, and a bet that
-                    # has not been budgeted still occupies part of the portfolio.
-                    _cell(share(g.claim_pct if g.claim_pct is not None else g.weight_pct)),
+                    # A BET ROW SHOWS ITS SHARE OF THE CAPITAL RESERVED BY BETS, and falls
+                    # back to its market share of net when it has declared no allocation --
+                    # `no bet` never has one, and an unbudgeted bet still occupies part of
+                    # the portfolio. See the docstring for why the basis changed.
+                    _cell(share(g.of_reserved_pct if g.of_reserved_pct is not None
+                                else g.weight_pct)),
                     _cell(share(g.filled_pct) if g.filled_pct is not None else NA,
                           FAINT if g.filled_pct is None else ""),
                     _cell(charts.cell_bar(
-                        g.claim_pct if g.claim_pct is not None else g.weight_pct, 12)),
+                        g.of_reserved_pct if g.of_reserved_pct is not None
+                        else g.weight_pct, 12)),
                     key=f"{self.INERT}grp:{g.bet_id or 'none'}")
                 for p in g.legs:
                     of_net = (None if p.value_base is None or not n.net
@@ -1336,7 +1366,7 @@ class DashboardPane(Pane):
                         _cell(mark(f"  {g.unvalued} leg(s) cannot be valued", WARN)),
                         _cell(NA), _cell(NA), _cell(NA), _cell(""),
                         key=f"{self.INERT}blind:{g.bet_id or 'none'}")
-            # CASH CLOSES THE 100%. Without it the `of net` column summed to 58% on their book
+            # CASH CLOSES THE 100%. Without it the net-based rows summed to 58% on their book
             # and read as an allocation with a hole in it -- when the rest is the most
             # decision-relevant figure there: what is not invested in anything.
             if n.cash is not None:
