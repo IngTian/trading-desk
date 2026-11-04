@@ -45,7 +45,7 @@ from . import config
 # The version desk/schema.sql represents. Kept HERE rather than as an INSERT inside
 # schema.sql so that file stays pure structure -- and a test asserts this matches the
 # live book's MAX(schema_version), so the two cannot drift silently.
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 
 def _structure(sql: str) -> str:

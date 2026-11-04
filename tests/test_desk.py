@@ -5012,7 +5012,7 @@ def test_undo_survives_sqlite_reusing_the_deleted_rows_id(con):
 
 
 def test_deleting_a_leg_does_not_silently_destroy_its_confirmations(con):
-    """`confirmations` and `falsifiers` cascade off trades(id), and undo could not see them.
+    """`confirmations` cascades off trades(id), and undo could not see it.
 
     delete_fill removes an emptied trade and foreign keys are ON, so SQLite deleted the
     attached rows itself -- and the pre-image carried only the trade and the fill. On the real
@@ -5020,32 +5020,40 @@ def test_deleting_a_leg_does_not_silently_destroy_its_confirmations(con):
     three records of a known hole in the record with no message, and `u` then reported
     "restored the fills row" while they stayed gone.
 
-    Turns red if delete_fill stops capturing the children, or restore stops replaying them.
+    `falsifiers` WAS THE OTHER CASCADING CHILD and stopped being one in v17, when
+    falsifiers.trade_id went: a falsifier hangs off a BET. So the second half of this test
+    inverted -- it no longer has to be rescued from the cascade, it has to be UNTOUCHED by
+    it, which is a stronger thing to assert.
+
+    Turns red if delete_fill stops capturing the children, if restore stops replaying them,
+    or if deleting a trade starts reaching the bet's falsifiers.
     """
     tid = "2026-05-04-park"
+    bet = con.execute("SELECT bet_id FROM trades WHERE id=?", (tid,)).fetchone()["bet_id"]
+    assert bet, "fixture: this trade should belong to a bet"
     con.execute("INSERT INTO confirmations(scope,trade_id,field,issue) VALUES (?,?,?,?)",
                 ("trade", tid, "fills[0].price", "was this the per-share price?"))
-    con.execute("INSERT INTO falsifiers(trade_id,role,wrong_if,provenance,cadence) "
+    con.execute("INSERT INTO falsifiers(bet_id,role,wrong_if,provenance,cadence) "
                 "VALUES (?,?,?,?,?)",
-                (tid, "side-leg", "the spread never closes", "at-entry", "quarterly"))
-    before = (con.execute("SELECT COUNT(*) FROM confirmations WHERE trade_id=?",
-                          (tid,)).fetchone()[0],
-              con.execute("SELECT COUNT(*) FROM falsifiers WHERE trade_id=?",
-                          (tid,)).fetchone()[0])
-    assert before == (1, 1), "fixture did not take the dependents"
+                (bet, "side-leg", "the spread never closes", "at-entry", "quarterly"))
+    before = con.execute("SELECT COUNT(*) FROM confirmations WHERE trade_id=?",
+                         (tid,)).fetchone()[0]
+    assert before == 1, "fixture did not take the confirmation"
 
     fill = con.execute("SELECT id FROM fills WHERE trade_id=?", (tid,)).fetchone()["id"]
     pre = book.delete_fill(con, fill)
     assert con.execute("SELECT COUNT(*) FROM confirmations WHERE trade_id=?",
                        (tid,)).fetchone()[0] == 0, "the cascade did not fire"
+    # THE BET'S FALSIFIER IS NOT THE TRADE'S BUSINESS. Deleting a leg must not touch the
+    # reasoning the bet was taken on -- the trade is gone, the thesis it served is not.
+    assert con.execute("SELECT COUNT(*) FROM falsifiers WHERE bet_id=?",
+                       (bet,)).fetchone()[0] == 1, (
+        "deleting a trade destroyed a falsifier belonging to its bet")
 
     book.restore(con, "fills", pre)
-    after = (con.execute("SELECT COUNT(*) FROM confirmations WHERE trade_id=?",
-                         (tid,)).fetchone()[0],
-             con.execute("SELECT COUNT(*) FROM falsifiers WHERE trade_id=?",
-                         (tid,)).fetchone()[0])
-    assert after == before, (
-        f"undo restored the fill but not what the cascade took with it: {after} != {before}")
+    assert con.execute("SELECT COUNT(*) FROM confirmations WHERE trade_id=?",
+                       (tid,)).fetchone()[0] == before, (
+        "undo restored the fill but not what the cascade took with it")
     assert con.execute("SELECT issue FROM confirmations WHERE trade_id=?",
                        (tid,)).fetchone()[0] == "was this the per-share price?", (
         "the row came back with different content")

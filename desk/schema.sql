@@ -105,8 +105,6 @@ CREATE TABLE bets (
                           allocation_set_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
     allocation_rebased_from REAL,   -- the prior figure, when re-baselined
     allocation_rebase_why   TEXT,
-    min_gap_days   INTEGER CHECK (min_gap_days IS NULL OR min_gap_days >= 0),
-    min_gap_move_pct REAL CHECK (min_gap_move_pct IS NULL OR min_gap_move_pct > 0),
 
     -- review_date dropped in v15: `r` wrote it, no screen read it, 0 of 6 bets had one
     notes          TEXT,                      -- mistaken for "preserved the content"
@@ -164,11 +162,10 @@ CREATE TABLE events (
 
 CREATE TABLE falsifiers (
     id          INTEGER PRIMARY KEY,
-    bet_id      TEXT REFERENCES bets(id) ON DELETE CASCADE,
-    trade_id    TEXT REFERENCES trades(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-                -- DEFERRED because a trade cites its exit falsifier and the
-                -- falsifier names its trade: without it the pair is unwritable
-                -- in either order.
+    bet_id      TEXT NOT NULL REFERENCES bets(id) ON DELETE CASCADE,
+                -- NOT NULL since v17. `trade_id` was the alternative parent -- a falsifier
+                -- about the VEHICLE rather than the thesis -- and 0 of 14 rows used it, so
+                -- the either/or CHECK below went with it and bet_id is simply required.
     role        TEXT NOT NULL CHECK (role IN ('main-support','side-leg')),
     leg_label   TEXT,                          -- '1 rate path', '2 consumer mix'
     wrong_if    TEXT NOT NULL,
@@ -195,20 +192,19 @@ CREATE TABLE falsifiers (
 
     resolved_on TEXT CHECK (resolved_on IS NULL OR resolved_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
     outcome     TEXT CHECK (outcome IS NULL OR outcome IN ('held','broken','ambiguous')),
-    revoked_on  TEXT CHECK (revoked_on IS NULL OR revoked_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
-    revoked_why TEXT,
-                -- 2026-08-20-soxl's falsifier was REVOKED rather than obeyed.
-                -- "no trigger was written" and "the written one was withdrawn"
-                -- are different findings and the second is more damning.
-
-    kind        TEXT CHECK (kind IS NULL OR kind IN ('vehicle','parent-evidence')),
+                -- revoked_on / revoked_why WENT IN v17, unwritten on all 14 rows. They
+                -- recorded a withdrawal rather than a resolution, on the argument that
+                -- "the written one was withdrawn" is more damning than "none was written".
+                -- The argument stands; nothing ever used it, and `outcome='ambiguous'`
+                -- covers the honest version. `kind` went with trade_id, which was the only
+                -- thing it labelled.
     notes       TEXT,
 
-    CHECK ((bet_id IS NOT NULL) <> (trade_id IS NOT NULL)),
-    CHECK (trade_id IS NOT NULL OR kind IS NULL),
     CHECK (resolved_on IS NULL OR written_on IS NULL OR resolved_on >= written_on),
+    -- RESOLVING ONE IS ALL-OR-NOTHING: a date without a verdict, or a verdict with no
+    -- date, is half a resolution and reads as a finished one. This CHECK is the reason the
+    -- resolve prompt writes both in a single UPDATE.
     CHECK ((resolved_on IS NULL) = (outcome IS NULL)),
-    CHECK (revoked_on IS NULL OR revoked_why IS NOT NULL),
     -- a dateless falsifier must at least say WHEN in prose, or it is unusable
     CHECK (known_by IS NOT NULL OR known_by_prose IS NOT NULL OR cadence IS NOT NULL)
 ) STRICT;
@@ -371,14 +367,17 @@ CREATE TABLE trades (
     bet_id           TEXT REFERENCES bets(id),
     ticker           TEXT NOT NULL REFERENCES instruments(ticker),
     currency         TEXT NOT NULL,
-    side             TEXT NOT NULL CHECK (side IN ('long','protective-put')),
+    side             TEXT NOT NULL CHECK (side IN ('long')),
+                     -- 'protective-put' WAS THE OTHER VALUE and went with the options
+                     -- columns in v17: 26 of 26 trades are long, no Python ever named it,
+                     -- and without strike/expiry/multiplier a put is wrong by 100x. One
+                     -- allowed value looks silly, and is the honest state -- the column
+                     -- says what the desk can actually record.
                      -- Rule 3 is a wall. But `side` is a LABEL; the arithmetic
                      -- guard is the no_net_short trigger below, because the
                      -- derivation is about a position that GROWS against you and
                      -- a fat-fingered oversell creates one without touching this.
     status           TEXT NOT NULL CHECK (status IN ('planned','open','closed','not-taken')),
-
-    why_this_vehicle TEXT,
 
     opened           TEXT CHECK (opened IS NULL OR opened GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
     closed           TEXT CHECK (closed IS NULL OR closed GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
@@ -390,22 +389,9 @@ CREATE TABLE trades (
     horizon_as_written TEXT,                   -- 'quarters', 'days-to-weeks' -- the
                                                -- record's actual content. Dropping
                                                -- it silently retires rule 4's check.
-    horizon_end      TEXT CHECK (horizon_end IS NULL OR horizon_end GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
-    horizon_end_source TEXT CHECK (horizon_end_source IS NULL OR
-                         horizon_end_source IN ('stated','inferred')),
 
     stop             REAL CHECK (stop IS NULL OR stop > 0),
     target           REAL CHECK (target IS NULL OR target > 0),
-    dollar_cap       REAL CHECK (dollar_cap IS NULL OR dollar_cap > 0),
-    dollar_cap_ccy   TEXT,                     -- 500 is C$693 or C$500: a 38.7%
-                                               -- swing in the number 7d/8/2a
-                                               -- divide by
-    -- Options. Without a multiplier a protective put is wrong by 100x: one put at
-    -- a 5.00 premium records $5 of cost against an actual $500, and that error
-    -- flows straight into the 20% loss limit and the 50% cap.
-    strike           REAL CHECK (strike IS NULL OR strike > 0),
-    expiry           TEXT CHECK (expiry IS NULL OR expiry GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
-    contract_multiplier REAL CHECK (contract_multiplier IS NULL OR contract_multiplier > 0),
 
     -- Rule 1, settled 2026-09-05: leveraged ETF max 10% weight AND a 20% loss
     -- limit on the position. 10% x 20% = 2% of portfolio worst case.
@@ -437,13 +423,14 @@ CREATE TABLE trades (
                      -- 50%->22%->18%->15% and force every existing stop to move.
                      -- It changes only when max_weight_pct changes, which is a
                      -- recorded deviation, i.e. a decision rather than drift.
-    stop_anchor_price REAL CHECK (stop_anchor_price IS NULL OR stop_anchor_price > 0),
     stop_set_on      TEXT CHECK (stop_set_on IS NULL OR
                        stop_set_on GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'),
-                     -- The stop is a PRICE, computed once from the anchor. It is
-                     -- recomputed only when the author adds to THIS trade -- a moment they
-                     -- is already at the keyboard deciding. Nothing elsewhere in
-                     -- the book can move it.
+                     -- WHEN the stop was set, which is the half worth keeping.
+                     -- `stop_anchor_price` went in v17: it existed so a stop could be
+                     -- DERIVED from an anchor by the loss-limit curve, and that curve was
+                     -- deleted in v14. Nothing has ever written it. A stop is hand-set,
+                     -- which `loss_limit_source` already says. Nothing elsewhere in the
+                     -- book can move it.
 
     -- exit_trigger AND exit_falsifier_id DROPPED IN v15, with the CHECK that tied them
     -- ("you may not claim a falsifier exit without naming the falsifier") and the two
@@ -468,9 +455,6 @@ CREATE TABLE trades (
 
     CHECK (status <> 'closed' OR closed IS NOT NULL),
     CHECK (closed IS NULL OR opened IS NULL OR closed >= opened),
-    CHECK (side <> 'protective-put' OR (strike IS NOT NULL AND expiry IS NOT NULL
-                                        AND contract_multiplier IS NOT NULL)),
-    CHECK (dollar_cap IS NULL OR dollar_cap_ccy IS NOT NULL),
     CHECK (loss_limit_pct IS NULL OR loss_limit_basis IS NOT NULL)
 ) STRICT;
 
@@ -483,7 +467,6 @@ CREATE INDEX ix_events_table_row   ON events(table_name, row_key);
 
 CREATE INDEX ix_falsifiers_bet     ON falsifiers(bet_id, role);
 
-CREATE INDEX ix_falsifiers_trade   ON falsifiers(trade_id);
 
 CREATE INDEX ix_fills_trade        ON fills(trade_id);
 
@@ -495,11 +478,12 @@ CREATE INDEX ix_trades_bet         ON trades(bet_id, status);
 CREATE UNIQUE INDEX one_default_account ON accounts(is_default) WHERE is_default=1;
 
 
+-- ONE MAIN SUPPORT PER BET. The `IS NOT NULL` clause went with trade_id in v17: bet_id is
+-- NOT NULL now, so the condition was always true and the partial index is simply a unique
+-- index over the main-support rows. Its twin, ux_one_main_support_trade, went entirely --
+-- there are no trade-level falsifiers to be unique about.
 CREATE UNIQUE INDEX ux_one_main_support_bet
-  ON falsifiers(bet_id)   WHERE role = 'main-support' AND bet_id   IS NOT NULL;
-
-CREATE UNIQUE INDEX ux_one_main_support_trade
-  ON falsifiers(trade_id) WHERE role = 'main-support' AND trade_id IS NOT NULL;
+  ON falsifiers(bet_id) WHERE role = 'main-support';
 
 
 -- ==========================================================================
@@ -552,7 +536,7 @@ CREATE TRIGGER ev_falsifiers_ins AFTER INSERT ON falsifiers BEGIN
   INSERT INTO events(at,actor,action,table_name,row_key,before,after)
   VALUES (datetime('now'), (SELECT actor FROM session), 'insert', 'falsifiers',
           CAST(NEW.id AS TEXT), NULL,
-          json_object('bet_id',NEW.bet_id,'trade_id',NEW.trade_id,'role',NEW.role,
+          json_object('bet_id',NEW.bet_id,'role',NEW.role,
                       'wrong_if',NEW.wrong_if,'known_by',NEW.known_by,
                       'provenance',NEW.provenance,'written_on',NEW.written_on));
 END;
@@ -562,9 +546,9 @@ CREATE TRIGGER ev_falsifiers_upd AFTER UPDATE ON falsifiers BEGIN
   VALUES (datetime('now'), (SELECT actor FROM session), 'update', 'falsifiers',
           CAST(NEW.id AS TEXT),
           json_object('wrong_if',OLD.wrong_if,'known_by',OLD.known_by,
-                      'outcome',OLD.outcome,'revoked_on',OLD.revoked_on),
+                      'outcome',OLD.outcome,'resolved_on',OLD.resolved_on),
           json_object('wrong_if',NEW.wrong_if,'known_by',NEW.known_by,
-                      'outcome',NEW.outcome,'revoked_on',NEW.revoked_on));
+                      'outcome',NEW.outcome,'resolved_on',NEW.resolved_on));
 END;
 
 CREATE TRIGGER ev_fills_ins AFTER INSERT ON fills BEGIN
@@ -609,7 +593,7 @@ BEGIN SELECT RAISE(ABORT,'events is append-only'); END;
 -- dropped in v15 that no writer ever set.
 
 CREATE TRIGGER falsifier_delete_would_unmoor_a_live_bet BEFORE DELETE ON falsifiers
-WHEN OLD.role = 'main-support' AND OLD.bet_id IS NOT NULL
+WHEN OLD.role = 'main-support'
  AND (SELECT status FROM bets WHERE id = OLD.bet_id) = 'live'
  AND NOT EXISTS (SELECT 1 FROM falsifiers
                  WHERE bet_id = OLD.bet_id AND role = 'main-support' AND id <> OLD.id)
