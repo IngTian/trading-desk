@@ -7,7 +7,7 @@ THERE WERE SEVEN SUBCOMMANDS and they are gone: positions, balance, marks, where
 instrument, asof. Each existed for a reason, and each reason is now answered inside the TUI
 rather than beside it:
 
-    desk positions    the positions tab
+    desk positions    the trades tab
     desk balance      the dashboard, which is tab 1
     desk marks        nothing to press: marks refresh every 30s on their own
     desk where        `?`, which names the book in use and why that one
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         # NAMES WHERE EACH ONE WENT. A tool that answers a removed subcommand with
         # "unrecognised arguments" teaches nothing; muscle memory outlives a release.
         moved = {
-            "positions": "the positions tab (2)",
+            "positions": "the trades tab (2)",
             "balance": "the dashboard, which is tab 1",
             # `m` WAS DELETED when the refresh became automatic, so naming it here sent
             # someone to a key that does nothing.

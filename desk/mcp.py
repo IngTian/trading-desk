@@ -9,7 +9,7 @@ have MCP tools to add this reconcillation via llm."
 
 WHY READ-ONLY, AND WHY THAT IS NOT A HALF-MEASURE. The author chose it over write access after
 being told it does not, by itself, get a balance into the book. That is the right trade here.
-Everything this server exposes is DERIVED -- positions, bets, the attribution residual, the
+Everything this server exposes is DERIVED -- trades, bets, the attribution residual, the
 invariants -- so being wrong about it costs a confusing answer. A write is different in kind:
 `add_fill` from a misread statement is a fabricated trade, and unlike a wrong balance nothing
 downstream contradicts it. The book would simply believe it, which is precisely the
@@ -130,8 +130,12 @@ def build_server() -> Any:
         name="trading-desk",
         version=ver,
         instructions=(
-            "Read-only access to a trading book kept by trading-desk: positions, bets, "
+            "Read-only access to a trading book kept by trading-desk: trades, bets, "
             "closed round trips, derived net worth, and a reconciliation panel.\n\n"
+            "A leg's `banked_*` is what its PARTIAL exits have already realised, and it "
+            "is separate from its unrealised `pnl_*`: a trim settles part of a trade "
+            "without closing it. A bet's `realised` includes both its closed legs and "
+            "what its open legs have banked.\n\n"
             "THE TASK THIS EXISTS FOR: the user hands you a broker statement; you compare it "
             "against this book and say what disagrees. `attribution` is the check that "
             "matters -- it asks whether the book can account for its own P&L against a "
@@ -172,12 +176,12 @@ def build_server() -> Any:
             con.close()
 
     @server.tool(
-        name="positions",
+        name="trades",
         description=("Open legs. `*_native` figures are in the leg's own currency; "
                      "`*_base` are in the home currency. null means not recorded."),
         annotations=ro)
     @_answers
-    def positions() -> str:
+    def trades() -> str:
         con = _ro()
         try:
             return json.dumps([{
@@ -185,11 +189,15 @@ def build_server() -> Any:
                 "account": p.account, "currency": p.currency,
                 "qty": p.qty, "entry_per_share": p.entry, "mark": p.mark,
                 "mark_date": p.mark_date, "opened": p.opened,
+                # WHAT ITS EXITS HAVE ALREADY REALISED, in the leg's own currency. null
+                # means not knowable (a sale with no recorded price); 0 means nothing sold.
+                # A model handed a statement needs this to match a broker's realised line,
+                # which reports a trim the day it happens rather than on the final close.
                 "cost_native": _money(p.cost_native), "value_native": _money(p.value_native),
                 "pnl_native": _money(p.pnl_native), "pnl_pct": _pct(p.pnl_pct_native),
                 "cost_base": _money(p.cost_base), "value_base": _money(p.value_base),
                 "unconfirmed_fills": p.unconfirmed_fills,
-            } for p in book.positions(con)], indent=2, allow_nan=False)
+            } for p in book.trades(con)], indent=2, allow_nan=False)
         finally:
             con.close()
 

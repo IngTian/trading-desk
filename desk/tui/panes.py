@@ -152,7 +152,7 @@ def _first_line(text: str | None) -> str:
 class Pane(Vertical):
     """Shared shape: a title line, a body, and a reload() the app calls after a write."""
 
-    scope = "positions"
+    scope = "trades"
     # WHICH ROW A PROMPT IS ARMED AGAINST. Every one of these must be cleared when the
     # prompt is cancelled or the next prompt acts on the wrong row: leaving `_editing` set
     # meant the next plain `n` silently replaced whatever had been under the cursor, and
@@ -279,8 +279,8 @@ class Pane(Vertical):
 
 
 # --------------------------------------------------------------------------- #
-class PositionsPane(Pane):
-    scope = "positions"
+class TradesPane(Pane):
+    scope = "trades"
     title_id = "pos-head"
 
     def compose(self) -> ComposeResult:
@@ -291,7 +291,7 @@ class PositionsPane(Pane):
         # prices in tradingview." They are right -- a price chart is what a charting tool is for,
         # and this pane's job is what they hold and what it cost. The table scrolls itself
         # again, which is one fewer moving part.
-        yield PaneTable(id="pos-table", cursor_type="row", zebra_stripes=False)
+        yield PaneTable(id="trade-table", cursor_type="row", zebra_stripes=False)
 
     # A ROW KEY THAT IS NOT A TRADE STARTS WITH THIS. Group headers and closed legs are
     # rows in the same DataTable -- it has no row spans -- so `x`, `enter` and `s` would
@@ -301,7 +301,7 @@ class PositionsPane(Pane):
     INERT = "·"
 
     def on_mount(self) -> None:
-        t = self.query_one("#pos-table", DataTable)
+        t = self.query_one("#trade-table", DataTable)
         # Widths are budgeted, not guessed: DataTable adds 2 cells of padding per column,
         # so 10 columns cost 20 on top of these, and the sum below is 88 -- exactly the
         # 108 cells a 110-column terminal leaves. (This said 86/106 while the widths
@@ -331,11 +331,11 @@ class PositionsPane(Pane):
         # down which currencies these positions are in right?" -- and the CAT row is the
         # proof: entry 815.5100, last 816.05, value 1,126.64. The prices are USD and the
         # value is CAD, so 1 x 816.05 = 1,126.64 is arithmetic that cannot be right, and the
-        # reader has no way to see why. `Position.currency` was already there; only the
+        # reader has no way to see why. `Trade.currency` was already there; only the
         # column was missing. It sits immediately BEFORE the two columns it governs.
         #
         # `tp` PAID FOR IT, and it cost nothing, because NOTHING IN THIS CODEBASE WRITES
-        # `trades.target`: one read in book.positions() and no UPDATE anywhere. All seven
+        # `trades.target`: one read in book.trades() and no UPDATE anywhere. All seven
         # open legs hold NULL, so the column rendered a full stack of em-dashes that no key
         # could ever fill -- 8 of the 108 cells spent on furniture. Same disease as the two
         # unwritable halves, same cure the author already chose there: delete the reader rather
@@ -361,7 +361,7 @@ class PositionsPane(Pane):
         self.reload()
 
     def redraw(self) -> None:
-        t = self.query_one("#pos-table", DataTable)
+        t = self.query_one("#trade-table", DataTable)
         with self.keeping_the_cursor(t):
             self._fill_table(t)
         self._off_a_heading(t)
@@ -387,11 +387,11 @@ class PositionsPane(Pane):
 
     def _fill_table(self, t: DataTable) -> None:
         t.clear()
-        rows = book.positions(self.con)
+        rows = book.trades(self.con)
         base = book.base_currency(self.con)
         if not rows:
             self.query_one("#pos-head", Static).update(
-                mark("no open positions — press n to record a fill", WARN))
+                mark("no open trades — press n to record a fill", WARN))
             return
         # `or 0.0` HERE WAS A LIE. A leg with no recorded entry contributed nothing to
         # cost and its full market value to value, so this header advertised
@@ -539,7 +539,7 @@ class PositionsPane(Pane):
         for r in legs:
             # NATIVE, not `_base`, so the row adds up: qty x last IS the value shown, and
             # `ccy` two columns to the left says which currency all of it is in. See
-            # Position.cost_native for why this is also the only version that can be shown
+            # Trade.cost_native for why this is also the only version that can be shown
             # when no FX rate is recorded.
             st = trend_style(r.pnl_native)
             t.add_row(
@@ -594,15 +594,23 @@ class PositionsPane(Pane):
         legs = book.closed_legs(self.con)
         if not legs:
             return
-        banked = book.banked_in_open_legs(self.con)
         by_ccy: dict[str, list] = {}
         for leg in legs:
             by_ccy.setdefault(leg.currency, []).append(leg)
         for ccy in sorted(by_ccy):
             self._gap(t)
             group = by_ccy[ccy]
-            got = [x.realised for x in group if x.realised is not None]
-            total = sum(got) if got else None
+            # WITHHELD IF ANY MEMBER IS UNVALUED, rather than summed around it. This used to
+            # filter the Nones out and total the rest, which prints a figure that looks
+            # complete and is short by whatever the dropped legs made -- the same defect as
+            # the `banked in open` line below, one row up. A reader cannot tell a total of
+            # nine legs from a total of eight of them.
+            #
+            # The rows themselves still show their own em dash, so WHICH leg is missing is
+            # visible; it is only the sum that refuses to guess. Every other cross-currency
+            # total in this file withholds the same way.
+            amounts = [x.realised for x in group]
+            total = None if any(a is None for a in amounts) else sum(amounts)
             t.add_row(
                 _cell(f"CLOSED · {ccy}", "bold"),
                 _cell(str(len(group)), FAINT),
@@ -617,15 +625,17 @@ class PositionsPane(Pane):
                       trend_style(total)),
                 _cell(""),
                 key=f"{self.INERT}closed:{ccy}")
-            # A TRIM BANKS MONEY WITHOUT CLOSING ANYTHING, so this total can be short of
-            # the dashboard's `realised` line. Saying so beats letting two figures that
-            # differ by C$5.08 look like a bug in one of them.
-            if ccy in banked:
-                t.add_row(
-                    _cell("  banked in open", FAINT), _cell(""), _cell(ccy, FAINT),
-                    _cell(""), _cell(""), _cell(""), _cell(""), _cell(""),
-                    _cell(signed(banked[ccy]), FAINT), _cell(""),
-                    key=f"{self.INERT}banked:{ccy}")
+            # NO `banked in open` ROW ANY MORE, and its absence is the fix. A trim used to
+            # realise money that no row here carried, so this section appended a separate
+            # line for it OUTSIDE the total above -- the tab showed `realised +850.32` with a
+            # `-4,653.59` printed directly beneath it and no way to reconcile the two from
+            # the screen. The author: "when i close 80 shares of INTC, why dont we just log
+            # that in closed positions. i think that's easier than banked."
+            #
+            # So a partial exit is one of the rows below, and the header sums it like any
+            # other. book.banked_in_open_legs() now returns nothing by construction, and a
+            # test holds it to that -- it is the check that this section accounts for every
+            # realised dollar, not a source of one.
             for leg in group:
                 st = trend_style(leg.realised)
                 t.add_row(
@@ -661,9 +671,9 @@ class PositionsPane(Pane):
         column already says which legs have no stop, in the row it concerns, without
         turning it into an accusation.
         """
-        rows = book.positions(self.con)
+        rows = book.trades(self.con)
         stale = {r.mark_date for r in rows if r.mark_date}
-        bits = [mark("positions", "bold")]
+        bits = [mark("trades", "bold")]
         if stale:
             bits.append(f"marks {min(stale)}")
         if any(r.unconfirmed_fills for r in rows):
@@ -727,7 +737,7 @@ class PositionsPane(Pane):
         look up a trade called that, find nothing, and the failure would be silent; on a
         closed leg it would delete a fill from a finished round trip.
         """
-        t = self.query_one("#pos-table", DataTable)
+        t = self.query_one("#trade-table", DataTable)
         if not t.row_count or not t.is_valid_coordinate(t.cursor_coordinate):
             return None
         key = t.coordinate_to_cell_key(t.cursor_coordinate).row_key.value
@@ -1048,14 +1058,18 @@ class DashboardPane(Pane):
             t.add_column(label, width=width)
         # TWO WEIGHT COLUMNS, because the author named two numbers and neither substitutes for the
         # other: "1. allocated capital vs. entire portfolio 2. deployed capital vs. bet".
-        # `of net` is what the row CLAIMS of the portfolio, `of bet` is a leg's share of its
-        # bet's allocation. On a bet row `of bet` is therefore how full it is.
+        # `of bet` is a leg's share of its bet's allocation; on a bet row it is how full it is.
+        #
+        # `share` WAS CALLED `of net` AND THAT WAS THE PROBLEM. It holds two bases -- a bet
+        # row shares the capital reserved by bets, a leg or cash row shares net worth -- so a
+        # label naming one of them was false on the other half of the table. The head states
+        # both, which is where it costs no rows; see _portfolio.
         #
         # 24+14+8+8+12 = 66, plus 10 padding = 76 -- well inside a 110-column terminal, and
         # deliberately narrower than the positions table because this view carries shares
         # rather than prices.
         pt = self.query_one("#port-table", DataTable)
-        for label, width in (("holding", 24), ("value", 14), ("of net", 8),
+        for label, width in (("holding", 24), ("value", 14), ("share", 8),
                              ("of bet", 8), ("", 12)):
             pt.add_column(label, width=width)
         self.reload()
@@ -1277,10 +1291,19 @@ class DashboardPane(Pane):
         bar beside it.
 
         BOTH WEIGHTS ON EVERY ROW, because they named two and they answer different questions:
-        `of net` is what a bet has RESERVED of the portfolio, `of bet` is how much of that
-        reservation is spent -- and per leg, that leg's share of the same allocation. On their
-        book each bet claims 47.3% while deploying 7.9% and 23.4%, a six-fold gap one number
-        cannot express.
+        `share` is how big this row is, `of bet` is how much of a bet's reservation is spent
+        -- and per leg, that leg's share of the same allocation. A bet can reserve far more
+        than it has deployed, a gap one number cannot express.
+
+        `share` CHANGED BASIS ON 2026-11-02. A bet row used to show its allocation as a share
+        of NET, which was true and unreadable: two bets holding 18,896 and 5,314 both printed
+        61.5% with identical bars, because both had reserved 22,500. The author: "i think this
+        should be the share of sum (total reserved capital for each bet)." Against the other
+        budgets it sums to 100% and says half the committed capital each.
+
+        THE HEADER'S `N% claimed by bets` STILL DIVIDES BY NET, deliberately: over 100% means
+        more has been reserved than the book holds, which is the one figure here that warns
+        about something. Rebasing it would have pinned it to a tautological 100%.
         """
         t = self.query_one("#port-table", DataTable)
         head = self.query_one("#port-head", Static)
@@ -1289,7 +1312,7 @@ class DashboardPane(Pane):
         with self.keeping_the_cursor(t):
             t.clear()
             if not groups:
-                head.update(mark("nothing held — press n on positions", WARN))
+                head.update(mark("nothing held — press n on trades", WARN))
                 return
             claimed = sum(g.claim_pct for g in groups if g.claim_pct is not None)
             # THE BAR RULE, SAID ONCE. Each bar is the row's share of its PARENT -- a bet
@@ -1298,21 +1321,29 @@ class DashboardPane(Pane):
             # meanings in one column needs stating, and the head is where it costs no rows.
             head.update(
                 f"portfolio   {money(n.net)} {n.home}   "
-                + mark(f"{share(claimed)} claimed by bets   ·   "
-                       f"bars are each row's share of its parent", FAINT))
+                # TERSE BECAUSE THIS LINE DOES NOT WRAP. The first draft spelled all three
+                # clauses out and ran to 163 characters, which truncated the bar rule to
+                # "bars are each…" at 140 columns -- an explanation nobody can read is worse
+                # than the ambiguity it was added to remove.
+                + mark(f"{share(claimed)} of net claimed by bets   ·   "
+                       f"share: bets of reserved, rest of net   ·   "
+                       f"bars: share of parent", FAINT))
             self._gaps = 0
             for g in groups:
                 t.add_row(
                     _cell(g.name, "bold" if g.bet_id else FAINT),
                     _cell(money(g.value), "bold"),
-                    # A BET ROW SHOWS ITS CLAIM, and falls back to its market share when it
-                    # has declared no allocation -- `no bet` never has one, and a bet that
-                    # has not been budgeted still occupies part of the portfolio.
-                    _cell(share(g.claim_pct if g.claim_pct is not None else g.weight_pct)),
+                    # A BET ROW SHOWS ITS SHARE OF THE CAPITAL RESERVED BY BETS, and falls
+                    # back to its market share of net when it has declared no allocation --
+                    # `no bet` never has one, and an unbudgeted bet still occupies part of
+                    # the portfolio. See the docstring for why the basis changed.
+                    _cell(share(g.of_reserved_pct if g.of_reserved_pct is not None
+                                else g.weight_pct)),
                     _cell(share(g.filled_pct) if g.filled_pct is not None else NA,
                           FAINT if g.filled_pct is None else ""),
                     _cell(charts.cell_bar(
-                        g.claim_pct if g.claim_pct is not None else g.weight_pct, 12)),
+                        g.of_reserved_pct if g.of_reserved_pct is not None
+                        else g.weight_pct, 12)),
                     key=f"{self.INERT}grp:{g.bet_id or 'none'}")
                 for p in g.legs:
                     of_net = (None if p.value_base is None or not n.net
@@ -1335,7 +1366,7 @@ class DashboardPane(Pane):
                         _cell(mark(f"  {g.unvalued} leg(s) cannot be valued", WARN)),
                         _cell(NA), _cell(NA), _cell(NA), _cell(""),
                         key=f"{self.INERT}blind:{g.bet_id or 'none'}")
-            # CASH CLOSES THE 100%. Without it the `of net` column summed to 58% on their book
+            # CASH CLOSES THE 100%. Without it the net-based rows summed to 58% on their book
             # and read as an allocation with a hole in it -- when the rest is the most
             # decision-relevant figure there: what is not invested in anything.
             if n.cash is not None:
@@ -1786,7 +1817,7 @@ class BetsPane(Pane):
         elif b.allocation is not None and b.cost == 0:
             # ONLY WHEN THE COST IS GENUINELY ZERO. `cost` is 0.0 for a bet with no legs and
             # None when a leg cannot be translated, and this branch used to catch both -- so a
-            # bet holding C$11,125 across eight legs with one missing fx rate printed
+            # bet holding C$10,000 across eight legs with one missing fx rate printed
             # "allocated, nothing spent", which is a false statement about money sitting
             # directly above a HOLDINGS header quoting a percentage.
             facts.append(f"{money(b.allocation)} allocated, nothing spent")
@@ -1859,7 +1890,7 @@ class BetsPane(Pane):
         budget as a row makes the allocation the denominator without the chart knowing.
         """
         # NO INERT CHECK, unlike the positions table: every row here is one bet and its key
-        # is the bet id. `self.INERT` belongs to PositionsPane, whose table carries group
+        # is the bet id. `self.INERT` belongs to TradesPane, whose table carries group
         # headings and blank spacers in the same DataTable -- reaching for it here raised
         # AttributeError, which Pane.reload caught and printed in the pane title.
         bet = self._cursor_bet()

@@ -418,8 +418,8 @@ CREATE TABLE trades (
     -- weighted average of its legs' losses, and a weighted average of numbers
     -- each >= -L is >= -L. So per-trade stops at L bound the bet at L exactly.
     -- The only leak is a stop that does not FILL at its level, which the ledger
-    -- already documents ("the $90 stop was not a floor given three stacked
-    -- mechanical sellers", 2026-08-16-soxl).
+    -- already documents: a stop is not a floor against several stacked
+    -- mechanical sellers, because the level it fills at is the market's choice.
     loss_limit_pct   REAL CHECK (loss_limit_pct IS NULL OR
                                  (loss_limit_pct > 0 AND loss_limit_pct <= 100)),
     loss_limit_basis TEXT CHECK (loss_limit_basis IS NULL OR
@@ -695,7 +695,7 @@ BEGIN SELECT RAISE(ABORT,'trades.ticker names no instrument in the registry'); E
 --     par branch above;
 --   * it measured at COST, which is what was committed rather than what is at risk.
 --
--- desk/book.py:bets() computes it now, where Position.value_base already returns None for
+-- desk/book.py:bets() computes it now, where Trade.value_base already returns None for
 -- an unpriced leg and the home currency comes from the profile. The lesson is not about
 -- this view: a figure that must be WITHHELD when its inputs are missing does not belong in
 -- a view, because every SQL tool for absent values -- COALESCE, IFNULL, a LEFT JOIN

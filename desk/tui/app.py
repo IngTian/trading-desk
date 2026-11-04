@@ -27,7 +27,7 @@ from .. import book, config, parse
 from ..parse import ParseError
 from . import keymap
 from .footer import KeyFooter
-from .panes import BetsPane, DashboardPane, PositionsPane
+from .panes import BetsPane, DashboardPane, TradesPane
 from .prompt import InlinePrompt
 from .themes import ThemePicker
 from .themes import resolve as resolve_theme
@@ -38,7 +38,7 @@ RETRYABLE = (ParseError, book.DeskError, ValueError)
 # TAB ORDER, and it is load-bearing: _step_tab walks this and the digit keys are
 # numbered from it. The dashboard is first because it is the only pane that answers a
 # question you have before deciding anything.
-_TAB_SCOPE = {"tab-dashboard": "dashboard", "tab-positions": "positions",
+_TAB_SCOPE = {"tab-dashboard": "dashboard", "tab-trades": "trades",
               "tab-bets": "bets"}
 _SCOPE_TAB = {v: k for k, v in _TAB_SCOPE.items()}
 
@@ -197,6 +197,9 @@ class DeskApp(App):
         # A HOLDINGS CHANGE THAT ARRIVED WHILE A FETCH WAS RUNNING. Serialised rather than
         # dropped: see _fetch_if_holdings_changed and _fetch_done.
         self._refetch_wanted = False
+        # READ BY THE FETCH THREAD so it can stop between symbols. Set on the UI thread by
+        # app_quit; see _run_prices and prices.main's `should_stop`.
+        self._quitting = False
 
     # -- clock is injected everywhere, never read inline ---------------------
     def now(self) -> dt.datetime:
@@ -207,8 +210,8 @@ class DeskApp(App):
         with TabbedContent(initial="tab-dashboard", id="tabs"):
             with TabPane("1 Dashboard", id="tab-dashboard"):
                 yield DashboardPane(id="dashboard")
-            with TabPane("2 Positions", id="tab-positions"):
-                yield PositionsPane(id="positions")
+            with TabPane("2 Trades", id="tab-trades"):
+                yield TradesPane(id="trades")
             with TabPane("3 Bets", id="tab-bets"):
                 yield BetsPane(id="bets")
         # One bottom-docked container, not two docked widgets: docking both makes the
@@ -516,8 +519,8 @@ class DeskApp(App):
     def app_show_dashboard(self) -> None:
         self._show("dashboard")
 
-    def app_show_positions(self) -> None:
-        self._show("positions")
+    def app_show_trades(self) -> None:
+        self._show("trades")
 
     def app_show_bets(self) -> None:
         self._show("bets")
@@ -559,6 +562,15 @@ class DeskApp(App):
             self.prompt.close()
 
     def app_quit(self) -> None:
+        """`q`. Tell the fetch thread to stop before asking Textual to come down.
+
+        SET BEFORE exit(), not after, and that ordering is the whole fix. The price fetch
+        runs on a worker thread the interpreter joins at exit, so a `q` pressed mid-poll used
+        to wait for the entire run to finish -- every remaining symbol and every retry -- with
+        the TUI already gone and the shell apparently hung. prices.main checks this between
+        symbols, so the wait is now bounded by the single request already in flight.
+        """
+        self._quitting = True
         self.exit()
 
     def app_theme(self) -> None:
@@ -786,7 +798,8 @@ class DeskApp(App):
             # failed reported success, so the header went on reading "marked 1 day ago" with
             # no warning until the marks were a week old. The collected lines already name
             # each failure, which is what a toast needs.
-            rc = mod.main(dry=False, days=7, emit=lines.append)
+            rc = mod.main(dry=False, days=7, emit=lines.append,
+                          should_stop=lambda: self._quitting)
             if rc:
                 failed = [ln.strip() for ln in lines if ln.strip().startswith("!")]
                 return "\n".join(lines), (

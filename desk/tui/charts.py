@@ -75,7 +75,7 @@ def cell_bar(pct: float | None, width: int) -> str:
 def ranked_bars(items: list[tuple[str, float]], *, width: int,
                 label_width: int = 22, bar_width: int = 18,
                 unit: str = "", style: str = "") -> list[Text]:
-    """`label ████████ 43.7%   11,250.00`, one row per item, in the order given.
+    """`label ████████ 43.7%   10,000.00`, one row per item, in the order given.
 
     THE PART-TO-WHOLE FORM FOR A TERMINAL, and the replacement for the pie. Each row is
     self-describing, so there is no legend and no colour vocabulary to learn.

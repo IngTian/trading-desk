@@ -51,7 +51,23 @@ CLAIMS_REAL = re.compile(
     r"|\bhis\s+book(?:'s)?\b"
     r"|\bthe\s+author's\s+(?:book|record|net|sleeve|balance)\b"
     r"|\bon\s+the\s+live\s+one\b"
-    r"|\bin\s+real\s+life\b",
+    r"|\bin\s+real\s+life\b"
+    # A COMMENT THAT SAYS SO ITSELF. "Real numbers:" and "actual figures" are what someone
+    # writes when they are about to quote the record, and one of each was already in the repo.
+    r"|\b(?:real|actual)\s+(?:numbers?|figures?|amounts?)\b"
+    # A TRADE ID NAMING A REAL HOLDING IS A CLAIM. Every real figure that has leaked into
+    # this repo sat beside one -- a comment only names a specific leg when it is reporting
+    # from the record. Found because the identity half of this file flagged a sentence the
+    # figure half passed: "His INTC leg had realised about -US$4,654" matches no phrase above,
+    # because it names the leg rather than the book.
+    #
+    # THE FIXTURE'S TICKERS ARE EXCLUDED BY NAME, and that exclusion is the whole difficulty:
+    # tests/seed.py is full of trade ids like 2026-05-04-usdco sitting next to prices, all of
+    # them invented. A first attempt without this fired on eight such lines, which is the
+    # crying-wolf failure this file's own docstring warns about -- a check that flags the
+    # fixture gets switched off within a week and then catches nothing.
+    r"|\b20\d\d-\d\d(?:-\d\d)?-(?!cadco|usdco|park|levr|acbtest|undated|trim|nopx|tb\b)"
+    r"[a-z][a-z.\-]{1,12}\b",
     re.IGNORECASE)
 
 SKIP_SUFFIX = {".png", ".svg", ".lock", ".db"}

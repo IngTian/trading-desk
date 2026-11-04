@@ -46,6 +46,7 @@ import sqlite3
 import sys
 import time
 import urllib.request
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # NO sys.path HACK. This file lived in book/ and had to reach up a directory to import
 # desk.config, so it carried its own two-line sys.path.insert. It is a module inside the
@@ -91,7 +92,7 @@ def _require_book(path: str) -> None:
             f"  or point at one:   export TRADING_DESK_BOOK=/path/to/hub.db")
 
 
-def fetch_one(symbol: str, since_epoch: int) -> list[dict]:
+def fetch_one(symbol: str, since_epoch: int, should_stop=None) -> list[dict]:
     """Daily bars for one Yahoo symbol. stdlib only, no key.
 
     Copied from watchboard/sources/prices.py. Keep the granularity assert.
@@ -110,7 +111,9 @@ def fetch_one(symbol: str, since_epoch: int) -> list[dict]:
                 payload = json.load(resp)
             break
         except Exception:
-            if attempt == MAX_RETRIES - 1:
+            # STOP RETRYING IF THE CALLER HAS GIVEN UP. Three 30-second attempts is 90
+            # seconds of a quit that already happened; see main().
+            if attempt == MAX_RETRIES - 1 or (should_stop is not None and should_stop()):
                 raise
             time.sleep(BACKOFF_S * (2 ** attempt))
 
@@ -147,12 +150,30 @@ def fetch_one(symbol: str, since_epoch: int) -> list[dict]:
     # from a different day than the balance it was being compared against. At 1.86
     # CAD per pip that was worth more than the residual it was supposed to measure.
     #
-    # gmtoffset is in seconds and is what Yahoo itself uses to lay out the session.
+    # THE ZONE, NOT ONE OFFSET, and that distinction was itself a bug for weeks. `gmtoffset`
+    # is a single number: the offset in force WHEN THE FETCH HAPPENED. Applying it to 400
+    # days of history dates every bar on the other side of a daylight-saving change by an
+    # offset that was not in force when that bar traded.
+    #
+    # London is on GMT in November, so a backfill run now sends gmtoffset=0 -- while a summer
+    # FX bar's true local midnight is 23:00 UTC of the previous day. Those bars came out
+    # dated ONE DAY EARLY, and since the writer is INSERT OR REPLACE a shifted row can
+    # overwrite a correct one. Found in the live book on 2026-11-02: two USD/CAD rates dated
+    # a SATURDAY (2026-09-26, 2026-10-10) when FX is shut on Saturdays, each of them a Sunday
+    # bar pushed back a day, plus one row dated tomorrow.
+    #
+    # A zone knows its own history, so each bar is dated by the rules that applied to it.
+    tzname = meta.get("exchangeTimezoneName")
     offset = meta.get("gmtoffset")
-    if offset is None:
+    try:
+        zone = ZoneInfo(tzname) if tzname else None
+    except ZoneInfoNotFoundError:
+        zone = None
+    if zone is None and offset is None:
         raise RuntimeError(
-            f"{symbol}: no gmtoffset in meta, so a bar's exchange date cannot be "
-            "derived. Refusing to guess -- guessing in UTC is the bug this replaced.")
+            f"{symbol}: meta carries neither exchangeTimezoneName nor gmtoffset, so a bar's "
+            "exchange date cannot be derived. Refusing to guess -- guessing in UTC is the "
+            "bug this replaced.")
 
     out = []
     # strict=True: `stamps` and `closes` come from two separate arrays in one JSON payload
@@ -170,8 +191,12 @@ def fetch_one(symbol: str, since_epoch: int) -> list[dict]:
         if not math.isfinite(close):
             continue
         out.append({
-            "date": dt.datetime.fromtimestamp(
-                ts + offset, dt.UTC).strftime("%Y-%m-%d"),
+            # THE ZONE WHEN WE HAVE ONE, which is per-bar correct across a DST change. The
+            # fixed offset is the fallback and is only right for bars from the same side of
+            # the most recent transition as the fetch.
+            "date": (dt.datetime.fromtimestamp(ts, zone) if zone is not None
+                     else dt.datetime.fromtimestamp(ts + offset, dt.UTC)
+                     ).strftime("%Y-%m-%d"),
             "symbol": symbol,
             "close": float(close),
             "currency": currency,
@@ -301,7 +326,7 @@ def wanted(con) -> list[tuple[str, str, str]]:
     return rows
 
 
-def main(dry: bool, days: int, emit=None) -> int:
+def main(dry: bool, days: int, emit=None, should_stop=None) -> int:
     """Fetch and store the latest close for everything held. Returns 1 if any symbol failed.
 
     `emit` TAKES THE OUTPUT INSTEAD OF print(), and it exists because of a real leak. The desk
@@ -351,10 +376,22 @@ def main(dry: bool, days: int, emit=None) -> int:
 
     stored = skipped = 0
     for i, (base, symbol, kind) in enumerate(targets):
+        # `should_stop` IS WHY QUITTING NO LONGER HANGS THE SHELL. This runs on a worker
+        # thread that @work(exclusive=True) can cancel as a TASK but cannot stop as an OS
+        # THREAD, and the interpreter joins it at exit -- so after `q` the terminal sat
+        # there finishing the whole run. Ten symbols at up to three 30-second attempts each
+        # is fifteen minutes of a desk the author had already closed.
+        #
+        # COOPERATIVE, because a blocking urlopen cannot be interrupted from outside. The
+        # worst case left is the ONE request already in flight, bounded by TIMEOUT, instead
+        # of that times every symbol and every retry still to come.
+        if should_stop is not None and should_stop():
+            say(f"  stopped at the caller's request after {i} of {len(targets)} symbols")
+            break
         if i:
             time.sleep(PAUSE_S)
         try:
-            bars = fetch_one(symbol, since)
+            bars = fetch_one(symbol, since, should_stop=should_stop)
         except Exception as exc:
             say(f"  ! {symbol:<12} {type(exc).__name__}: {exc}")
             skipped += 1
