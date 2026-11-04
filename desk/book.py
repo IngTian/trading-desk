@@ -16,11 +16,12 @@ Two things this module will not do:
 from __future__ import annotations
 
 import contextlib
+import datetime as dt
 import os
 import sqlite3
 from dataclasses import dataclass
 
-from . import config
+from . import config, parse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -1062,6 +1063,14 @@ class Bet:
     closed_cost: float | None = None     # what every exit cost, partial or complete
     closed_legs: int = 0
     unvalued_closed_legs: int = 0        # closed legs with no price or no rate on the day
+    # WHICH PLAYBOOK THIS IS AN INSTANCE OF, or None for a one-off. See bets.setup in
+    # schema.sql: the reasoning lives once per setup, so hundreds of instances cost one row
+    # each instead of one document each.
+    setup: str | None = None
+    # THE DAY IT ENDED, which only became worth carrying when a setup needed a hold span.
+    # None while the bet is live, which is what makes `_span_days` withhold rather than
+    # measure a hold that has not finished.
+    closed: str | None = None
 
     @property
     def unrealised(self) -> float | None:
@@ -1172,7 +1181,7 @@ def bets(con) -> list[Bet]:
     """
     rows = con.execute("""
         SELECT b.id, COALESCE(NULLIF(b.name,''), b.id) AS name, b.status, b.opened,
-               b.notes, b.allocation_base, b.allocation_ccy,
+               b.closed, b.setup, b.notes, b.allocation_base, b.allocation_ccy,
                (SELECT COUNT(*) FROM trades t
                   WHERE t.bet_id = b.id AND t.status = 'open') AS legs
         FROM bets b
@@ -1259,8 +1268,174 @@ def bets(con) -> list[Bet]:
                               else 100.0 * home_alloc[r["id"]] / allocated_total),
             unpriced_legs=len(blind), cost=cost,
             realised=realised, closed_cost=closed_cost,
-            closed_legs=len(done), unvalued_closed_legs=unvalued))
+            closed_legs=len(done), unvalued_closed_legs=unvalued,
+            setup=r["setup"], closed=r["closed"]))
     return out
+
+
+FINISHED = ("closed", "falsified", "retired", "abandoned")
+
+
+@dataclass(frozen=True)
+class Setup:
+    """What one playbook has actually done, across every bet that named it.
+
+    THE FIGURE THAT DECIDES WHAT TO STOP DOING. The author, 2026-11-02, on expecting
+    hundreds of bets a year: "now a bet is mostly a structure and a setup." Once a bet is an
+    instance rather than a thesis, the question stops being "how is this bet doing" and
+    becomes "does this setup make money" -- which needs n instances, not one.
+
+    FINISHED INSTANCES ONLY. A live bet has no verdict, so counting it would move the hit
+    rate every time a price did. `live` is reported beside the record, never inside it.
+    """
+    setup: str
+    live: int                    # instances still running, excluded from every figure below
+    n: int                       # finished instances, the denominator for all of it
+    wins: int
+    pnl: float | None            # summed over finished instances, home currency
+    hold_days: float | None      # mean, over finished instances that carry both dates
+
+    @property
+    def hit_pct(self) -> float | None:
+        return None if not self.n else 100.0 * self.wins / self.n
+
+    @property
+    def expectancy(self) -> float | None:
+        """Mean result per finished instance -- what one more of these is worth."""
+        return None if not self.n or self.pnl is None else self.pnl / self.n
+
+
+def setups(con) -> list[Setup]:
+    """Every named setup, worst expectancy last. Bets with no setup are not a setup.
+
+    WITHHELD RATHER THAN PARTIAL, like every other total here: if any finished instance's
+    P&L cannot be computed -- an untranslatable leg, an unpriced sale -- the setup's `pnl`
+    and `expectancy` are None instead of a sum over the instances that happened to work.
+    `hit_pct` survives that, because whether a bet made money is knowable from its sign more
+    often than its size is.
+    """
+    by: dict[str, list] = {}
+    for b in bets(con):
+        if b.setup:
+            by.setdefault(b.setup, []).append(b)
+
+    out = []
+    for name, group in by.items():
+        done = [b for b in group if b.status in FINISHED]
+        live = len(group) - len(done)
+        got = [b.pnl for b in done]
+        # sum([]) IS 0.0 AND THAT WOULD BE A LIE. A setup whose instances are all still
+        # running has not made nothing -- it has made no verdict yet. Same rule as every
+        # other total in this file: nothing to add is None, not zero.
+        total = None if not got or any(x is None for x in got) else sum(got)
+        wins = sum(1 for x in got if x is not None and x > 0)
+        spans = [_span_days(b.opened, b.closed) for b in done]
+        spans = [d for d in spans if d is not None]
+        out.append(Setup(setup=name, live=live, n=len(done), wins=wins, pnl=total,
+                         hold_days=(sum(spans) / len(spans) if spans else None)))
+    # WORST LAST, and unscoreable setups after the scored ones: a setup with no finished
+    # instance is not a zero-expectancy setup, it is one you cannot judge yet.
+    return sorted(out, key=lambda x: (x.expectancy is None, -(x.expectancy or 0.0)))
+
+
+def _span_days(opened: str | None, closed: str | None) -> float | None:
+    if not opened or not closed:
+        return None
+    try:
+        return (dt.date.fromisoformat(closed) - dt.date.fromisoformat(opened)).days
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class Falsifier:
+    """One recorded way a bet could be wrong, and whether that has been settled.
+
+    INVISIBLE UNTIL v18. Fourteen of these were written, carefully -- `source` names a data
+    release, `notes` links into the vault with a line number -- and no screen in the desk
+    ever showed one, so none was ever resolved. A thing you cannot see is a thing you cannot
+    close.
+    """
+    id: int
+    bet_id: str
+    role: str                    # 'main-support' | 'side-leg'
+    leg_label: str | None
+    wrong_if: str
+    threshold: str | None
+    action: str | None
+    known_by: str | None
+    known_by_prose: str | None
+    cadence: str | None
+    source: str | None
+    written_on: str | None
+    provenance: str
+    resolved_on: str | None
+    outcome: str | None          # 'held' | 'broken' | 'ambiguous'
+    notes: str | None
+
+    @property
+    def settled(self) -> bool:
+        return self.outcome is not None
+
+    @property
+    def when(self) -> str | None:
+        """The best answer to "when would you know" -- a date, else the prose, else cadence."""
+        return self.known_by or self.known_by_prose or self.cadence
+
+
+def falsifiers_of(con, bet_id: str) -> list[Falsifier]:
+    """A bet's falsifiers, main support first, then by id so the order is stable.
+
+    STABLE ORDER MATTERS MORE THAN IT LOOKS: the resolve prompt names one by its position on
+    screen, so a list that reordered between the render and the keystroke would resolve the
+    wrong falsifier. `id` breaks every tie.
+    """
+    rows = con.execute(
+        "SELECT id, bet_id, role, leg_label, wrong_if, threshold, action, known_by, "
+        "       known_by_prose, cadence, source, written_on, provenance, "
+        "       resolved_on, outcome, notes "
+        "  FROM falsifiers WHERE bet_id=? "
+        " ORDER BY role <> 'main-support', id", (bet_id,)).fetchall()
+    return [Falsifier(**dict(r)) for r in rows]
+
+
+def resolve_falsifier(con, fid: int, *, outcome: str, on_date: str) -> dict:
+    """Settle one falsifier: held, broken, or ambiguous, on a date. Pre-image back for undo.
+
+    BOTH FIELDS IN ONE UPDATE, because the schema's CHECK insists: `(resolved_on IS NULL) =
+    (outcome IS NULL)`. A date without a verdict, or a verdict with no date, is half a
+    resolution and reads as a finished one.
+
+    'ambiguous' IS A REAL ANSWER and not a cop-out. It is what `revoked_on`/`revoked_why`
+    were reaching for before they went in v17: sometimes the thing you said you would watch
+    stopped being the thing that mattered, and recording that is more honest than forcing
+    held or broken. What it must not be is left blank, which is what fourteen of these were.
+
+    NOT BEFORE IT WAS WRITTEN -- the schema checks that too. A falsifier resolved earlier
+    than the day it was written is a note reconstructed after the fact and read as foresight,
+    which is the exact failure `provenance` exists to catch.
+    """
+    row = con.execute("SELECT id, resolved_on, outcome FROM falsifiers WHERE id=?",
+                      (fid,)).fetchone()
+    if row is None:
+        raise DeskError(f"no falsifier {fid}")
+    if outcome not in ("held", "broken", "ambiguous"):
+        raise DeskError(f"outcome is held, broken or ambiguous -- not {outcome!r}")
+    pre = dict(row)
+    con.execute("UPDATE falsifiers SET resolved_on=?, outcome=? WHERE id=?",
+                (on_date, outcome, fid))
+    return pre
+
+
+def unresolve_falsifier(con, fid: int) -> dict:
+    """Clear a resolution, for the undo path and for a verdict entered by mistake."""
+    row = con.execute("SELECT id, resolved_on, outcome FROM falsifiers WHERE id=?",
+                      (fid,)).fetchone()
+    if row is None:
+        raise DeskError(f"no falsifier {fid}")
+    pre = dict(row)
+    con.execute("UPDATE falsifiers SET resolved_on=NULL, outcome=NULL WHERE id=?", (fid,))
+    return pre
 
 
 def parked(con) -> float | None:
@@ -2043,6 +2218,26 @@ def set_bet_name(con, bet_id: str, *, name: str) -> dict:
     return pre
 
 
+def set_bet_setup(con, bet_id: str, *, setup: str | None) -> dict:
+    """Name the playbook this bet is an instance of, or clear it. Pre-image back.
+
+    SLUGIFIED, for the reason in schema.sql: a setup groups by exact match, so 'Oversold
+    Bounce' and 'oversold bounce' must not become two playbooks. Same transform that turns a
+    bet's name into its id, so the vocabulary is one thing typed freely and stored exactly.
+
+    AN EMPTY STRING CLEARS IT rather than storing one. '' and NULL would both mean "no
+    setup" and only one of them groups correctly -- the bets tab would grow a nameless
+    heading beside the one-offs it is already showing.
+    """
+    row = con.execute("SELECT id, setup FROM bets WHERE id=?", (bet_id,)).fetchone()
+    if row is None:
+        raise DeskError(f"no bet {bet_id}")
+    pre = dict(row)
+    slug = parse.slugify(setup) if setup and setup.strip() else None
+    con.execute("UPDATE bets SET setup=? WHERE id=?", (slug, bet_id))
+    return pre
+
+
 def set_bet_note(con, bet_id: str, *, note: str | None) -> dict:
     """Replace a bet's note. Returns the pre-image.
 
@@ -2516,7 +2711,12 @@ def restore(con, table: str, row: dict) -> None:
 # through restore() above would try to insert a row that still exists and fail on the
 # primary key, which is undo silently not working, the exact defect this project already
 # shipped once.
-UPDATABLE = {"trades": "id", "bets": "id"}
+# `falsifiers` JOINED IN v18, when resolving one became possible. A resolution is two
+# fields on an existing row, so it undoes the same way a rename does. It is NOT in UNDOABLE
+# above and must not be: that map is table -> DELETE function, and a falsifier should never
+# be removed by pressing `u` -- a trigger already refuses to delete the only main-support
+# falsifier of a live bet, and undo has no business arguing with it.
+UPDATABLE = {"trades": "id", "bets": "id", "falsifiers": "id"}
 
 
 def restore_update(con, table: str, row: dict) -> None:

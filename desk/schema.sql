@@ -69,6 +69,20 @@ CREATE TABLE bets (
     -- diverge freely afterwards: renaming edits the name and leaves every foreign key alone.
     -- NULL means the bet predates this column, and `Bet.name` falls back to the id.
     name           TEXT,
+    -- THE REUSABLE HALF. The author, 2026-11-02: "now a bet is mostly a structure and a
+    -- setup. that might not be complicated and we might see hundreds of bets a year", and on
+    -- where the reasoning then lives: "i think this should be the share of sum" was the
+    -- dashboard, but for docs it is one playbook note per SETUP rather than a thesis per
+    -- instance. Hundreds of instances, a dozen playbooks.
+    --
+    -- A SLUG, like `id`, so it groups exactly: 'oversold-bounce' is one setup however many
+    -- bets name it, and a typo makes a second setup rather than a near-match. The desk
+    -- slugifies what you type, the same way `name` -> `id` works.
+    --
+    -- NULL IS NOT A MISSING VALUE. It means a one-off: a conviction bet carrying its own
+    -- thesis, which is what all six bets predating this column are. Adding the column does
+    -- not retroactively make them instances of anything.
+    setup          TEXT,
     status         TEXT NOT NULL CHECK (status IN
                      ('forming','live','weakened','falsified','closed','retired','abandoned')),
                    -- 'retired' and 'abandoned' added: consumer-rate-path was
@@ -89,7 +103,7 @@ CREATE TABLE bets (
     -- enforced -- enforcing it would retighten every existing leg whenever a new
     -- leg is added, which is the operational failure this design avoids.
 
-    -- 权 dials. Declared BEFORE entry (rules 2 and 6). No CHECK against 50:
+    -- Weight dials. Declared BEFORE entry (rules 2 and 6). No CHECK against 50:
     -- exceeding the default writes a `deviations` row, it is not an error.
     max_weight_pct REAL CHECK (max_weight_pct IS NULL OR max_weight_pct > 0),
 

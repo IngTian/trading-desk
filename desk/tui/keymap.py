@@ -141,6 +141,13 @@ KEYMAP: tuple[Key, ...] = (
     # and 2026-q4-reverse made live by hand-written SQL. `s` here mirrors `s` on positions:
     # both set the field that pane's rules are judged on.
     Key("s", "status", "status", "bets", "write"),
+    # SHIFT, following `R` rename: the common keys are lowercase and the ones you reach for
+    # occasionally are not. `s` was already status, and a setup is not a status.
+    Key("S", "setup", "setup", "bets", "write"),
+    # `f` FOR THE THING THAT WAS NEVER CLOSEABLE. Fourteen falsifiers were written and none
+    # resolved, because no screen in the desk ever showed one -- see FALSIFIERS in the bets
+    # detail pane, which this key is the other half of.
+    Key("f", "falsifier", "falsifier", "bets", "write"),
 )
 
 _TAB_OF = {"dashboard": "tab-dashboard", "trades": "tab-trades",
@@ -227,6 +234,10 @@ HINTS: tuple[Hint, ...] = (
          "tab through the listings · enter picks the one you hold"),
     Hint("bet", "Big Techs and Semis =5000 ~one line if you want one",
          f"name, as words · =allocation · {WHEN} · ~note LAST, it absorbs the rest"),
+    Hint("setup", "Oversold Bounce",
+         "the playbook this bet runs · EMPTY clears it, making this a one-off"),
+    Hint("falsifier", "2 broken @today",
+         f"the number beside it · held, broken or ambiguous · {WHEN} you knew"),
 )
 
 
