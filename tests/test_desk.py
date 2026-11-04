@@ -204,6 +204,18 @@ def test_every_hint_example_actually_parses():
             # exactly that until the test caught it.
             assert r.allocation is not None, "the =allocation in the example was eaten"
             assert "=" not in (r.note or ""), f"the note absorbed a sigil: {r.note!r}"
+        elif h.label == "setup":
+            # FREE TEXT, VERBATIM, like rename -- the slug is derived at the storage layer.
+            assert parse.parse_setup(h.example) == h.example
+            # AND BLANK CLEARS IT, which is the one thing this prompt does that only
+            # `leg bet` also does. The grammar advertises it, so it has to be true.
+            assert parse.parse_setup("") is None
+            assert parse.parse_setup("   ") is None
+        elif h.label == "falsifier":
+            r = parse.parse_falsifier(h.example, now=NOW)
+            assert r.index >= 1, "the example should address a falsifier by its position"
+            assert r.outcome in parse.OUTCOMES
+            assert r.on_date, "the @when in the example was eaten"
         else:
             pytest.fail(f"no parser asserted for hint {h.label!r}")
 
@@ -2793,6 +2805,8 @@ PARSERS = {
     "leg bet": lambda s: parse.parse_trade_bet(
         s, known={"big techs and semis": "big-techs-and-semis"}),
     "rename": lambda s: parse.parse_bet_name(s),
+    "setup": lambda s: parse.parse_setup(s),
+    "falsifier": lambda s: parse.parse_falsifier(s, now=NOW),
 }
 
 
@@ -6060,3 +6074,126 @@ def test_a_trades_subtotal_and_a_bets_pnl_measure_different_scopes_on_purpose(co
     assert b.pnl_pct > trades_pct, (
         f"the bet ({b.pnl_pct:.2f}%) should carry the +400 exit that the trades heading "
         f"({trades_pct:.2f}%) does not")
+
+
+# --------------------------------------------------------------------------- #
+# setups and falsifier resolution. The author, 2026-11-02: "now a bet is mostly
+# a structure and a setup ... we might see hundreds of bets a year", and on the
+# docs: one playbook per setup rather than a thesis per instance.
+# --------------------------------------------------------------------------- #
+def test_a_setup_is_slugified_so_it_groups_and_blank_clears_it(con):
+    """TWO SPELLINGS MUST NOT BECOME TWO PLAYBOOKS.
+
+    A setup groups by exact match, so `Oversold Bounce` and `oversold bounce` have to land
+    on one key -- the same reason a bet's name derives a slug for its id. And blank clears
+    it, because a bet with no setup is a one-off carrying its own thesis, which is the normal
+    state for a conviction bet and has to be reachable again.
+
+    Turns red if set_bet_setup stores raw text, or stores '' instead of NULL -- '' would
+    group as a nameless setup beside the one-offs.
+    """
+    book.set_bet_setup(con, "growth", setup="Oversold Bounce")
+    assert next(b.setup for b in book.bets(con) if b.id == "growth") == "oversold-bounce"
+    book.set_bet_setup(con, "parking", setup="oversold   bounce")
+    assert next(b.setup for b in book.bets(con) if b.id == "parking") == "oversold-bounce"
+    assert len(book.setups(con)) == 1, "two spellings made two setups"
+
+    book.set_bet_setup(con, "parking", setup=None)
+    stored = con.execute("SELECT setup FROM bets WHERE id='parking'").fetchone()["setup"]
+    assert stored is None, f"clearing stored {stored!r} rather than NULL"
+
+
+def test_a_setup_withholds_its_pnl_until_something_has_finished(con):
+    """sum([]) IS 0.0 AND THAT WOULD BE A CLAIM.
+
+    A setup whose instances are all still running has not made nothing -- it has made no
+    verdict yet. Same rule as every other total in book.py: nothing to add is None.
+
+    Turns red if setups() sums an empty list.
+    """
+    book.set_bet_setup(con, "growth", setup="bounce")
+    s = next(x for x in book.setups(con) if x.setup == "bounce")
+    assert s.live == 1 and s.n == 0, "fixture: growth should be live and unfinished"
+    assert s.pnl is None, f"pnl {s.pnl} on a setup with nothing finished"
+    assert s.expectancy is None and s.hit_pct is None
+
+    con.execute("UPDATE bets SET status='closed', closed='2026-07-01' WHERE id='growth'")
+    done = next(x for x in book.setups(con) if x.setup == "bounce")
+    assert done.n == 1 and done.live == 0
+    assert done.pnl is not None, "a finished instance should give the setup a figure"
+    assert done.hit_pct in (0.0, 100.0), "one instance is all or nothing"
+    assert done.hold_days is not None, "opened and closed are both set, so the span is known"
+
+
+async def test_the_bets_tab_lists_falsifiers_and_f_resolves_the_one_you_can_see(
+        con, app, goto):
+    """FOURTEEN WERE WRITTEN AND NONE RESOLVED, because no screen ever showed one.
+
+    `f` takes the POSITION in this list, not a row id -- the id is not on screen, so asking
+    for one would be asking for a guess. falsifiers_of() fixes the order (main support first,
+    then by id) so the number you type and the number you read cannot disagree.
+
+    Turns red if the section stops rendering, stops numbering, or if `f` resolves by id.
+    """
+    # A FALSIFIER ON ANOTHER BET FIRST, which is what makes this test able to fail. Ids are
+    # global to the table while the numbers on screen are per-bet, so without a row in
+    # between, growth's falsifiers would have ids 1 and 2 at positions 1 and 2 -- and
+    # resolving by id instead of by position would give the same answer. It did: the first
+    # version of this test passed against that mutation.
+    con.execute("INSERT INTO falsifiers(bet_id,role,wrong_if,provenance,cadence) "
+                "VALUES ('parking','main-support','a different bet entirely',"
+                "'at-entry','monthly')")
+    con.execute("INSERT INTO falsifiers(bet_id,role,wrong_if,provenance,cadence) "
+                "VALUES ('growth','side-leg','the reorder rate stalls','at-entry','monthly')")
+    rows = book.falsifiers_of(con, "growth")
+    assert len(rows) == 2 and rows[0].role == "main-support", "main support comes first"
+    second = rows[1]
+    assert second.id != 2, (
+        "this fixture needs the screen position and the row id to DIVERGE, or resolving by "
+        "id passes too")
+
+    async with app.run_test(size=(120, 46)) as pilot:
+        await goto(pilot, "bets")
+        shown = "\n".join(_plain(app, "#bet-detail"))
+        assert "FALSIFIERS" in shown
+        assert "1  main" in shown and "2  side" in shown, shown
+        assert "2 of 2 unresolved" in shown, shown
+
+        await pilot.press("f")
+        await pilot.pause()
+        assert app.prompt.label == "falsifier"
+        for ch in "2 broken":
+            await pilot.press("space" if ch == " " else ch)
+        await pilot.press("enter")
+        await pilot.pause()
+        after = "\n".join(_plain(app, "#bet-detail"))
+
+    assert "BROKEN" in after and "1 of 2 unresolved" in after, after
+    got = {f.id: f.outcome for f in book.falsifiers_of(con, "growth")}
+    assert got[second.id] == "broken", "the wrong falsifier was resolved"
+    assert got[rows[0].id] is None, "the main support should be untouched"
+
+
+def test_a_resolution_is_both_fields_or_neither(con):
+    """THE SCHEMA INSISTS: (resolved_on IS NULL) = (outcome IS NULL).
+
+    A date with no verdict, or a verdict with no date, is half a resolution and reads as a
+    finished one. resolve_falsifier writes both in one UPDATE for exactly that reason.
+
+    And a falsifier cannot be resolved BEFORE it was written -- that is the failure
+    `provenance` exists to catch: a note reconstructed after the fact, read as foresight.
+    """
+    f = book.falsifiers_of(con, "growth")[0]
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE falsifiers SET resolved_on='2026-11-04' WHERE id=?", (f.id,))
+    with pytest.raises(sqlite3.IntegrityError):
+        con.execute("UPDATE falsifiers SET outcome='held' WHERE id=?", (f.id,))
+    with pytest.raises(sqlite3.IntegrityError):
+        book.resolve_falsifier(con, f.id, outcome="held", on_date="2026-01-01")
+    with pytest.raises(book.DeskError):
+        book.resolve_falsifier(con, f.id, outcome="probably", on_date="2026-11-04")
+
+    pre = book.resolve_falsifier(con, f.id, outcome="held", on_date="2026-11-04")
+    assert book.falsifiers_of(con, "growth")[0].settled
+    book.restore_update(con, "falsifiers", pre)
+    assert not book.falsifiers_of(con, "growth")[0].settled, "u did not clear the verdict"

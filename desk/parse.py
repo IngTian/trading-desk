@@ -581,6 +581,67 @@ def parse_bet_status(raw: str, *, now: dt.datetime) -> BetStatusInput:
     return BetStatusInput(status=status, on_date=on_date, note=_one(g, "~", "reason"))
 
 
+OUTCOMES = ("held", "broken", "ambiguous")
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """One falsifier settled: which one on screen, how it ended, and when it was known."""
+    index: int                   # the position shown in the FALSIFIERS block, 1-based
+    outcome: str
+    on_date: str
+
+
+def parse_setup(raw: str) -> str | None:
+    """Free text naming a playbook. `Oversold Bounce`. None when blank, which CLEARS it.
+
+    EMPTY IS A VALUE HERE, and that makes this the second prompt after `leg bet` where a
+    blank line means something rather than being refused. A bet with no setup is a one-off
+    carrying its own thesis -- the normal state for a conviction bet -- so there has to be a
+    way back to it, and the way back is to clear the field.
+
+    NOT SLUGIFIED HERE. book.set_bet_setup does that, for the same reason parse_bet_name
+    leaves the slug alone: the parser's job is to say what was typed, and deriving a key
+    from it is a decision about storage.
+    """
+    toks = tokenise(raw)
+    if not toks:
+        return None
+    g = group(toks)
+    _reject_unsupported(g, set(), "setup")
+    text = " ".join(g.plain).strip()
+    return text or None
+
+
+def parse_falsifier(raw: str, *, now: dt.datetime) -> Verdict:
+    """`2 broken @today` -- which falsifier, how it ended, and when you knew.
+
+    THE NUMBER IS A SCREEN POSITION, not a row id. The FALSIFIERS block numbers what it
+    shows and book.falsifiers_of fixes that order, so the two agree; a database id would be
+    a value the reader cannot see and would have to guess.
+
+    `@when` IS THE DAY YOU KNEW, not today by preference -- a CPI print lands on a date and
+    you may be settling it that evening or the following week. It defaults to today through
+    resolve_when, like every other prompt, so the common case stays silent.
+    """
+    toks = tokenise(raw)
+    if not toks:
+        raise ParseError("say which one and how: `2 broken`")
+    g = group(toks)
+    _reject_unsupported(g, {"@"}, "falsifier")
+    words = g.plain
+    if len(words) != 2:
+        raise ParseError("two words: the number beside it, then held, broken or ambiguous")
+    num, outcome = words
+    if not num.isdigit() or int(num) < 1:
+        raise ParseError(f"{num!r} is not one of the numbers in the list")
+    outcome = outcome.lower()
+    if outcome not in OUTCOMES:
+        raise ParseError(f"{outcome!r} is not held, broken or ambiguous")
+    return Verdict(index=int(num), outcome=outcome,
+                   on_date=resolve_when(g.by_sigil.get("@", []), now=now))
+
+
 def parse_bet_name(raw: str) -> str:
     """Free text, for renaming a bet. `Big Techs and Semis`.
 
@@ -871,9 +932,13 @@ class BetInput:
 def slugify(text: str) -> str:
     """`Big Techs and Semis` -> `big-techs-and-semis`. The key, derived once.
 
-    Only ever called when a bet is CREATED. Renaming edits the name and leaves the slug
-    alone, so the id stays a stable foreign key and nine tables are never rewritten for a
-    change of wording.
+    Called when a bet is CREATED, and -- since v18 -- when one is given a SETUP. Renaming
+    edits the name and leaves the slug alone, so the id stays a stable foreign key and nine
+    tables are never rewritten for a change of wording.
+
+    THE SETUP USE IS THE SAME JOB: a setup groups by exact match, so `Oversold Bounce` and
+    `oversold bounce` must not become two playbooks. One transform, typed freely, stored
+    exactly.
     """
     out, prev_dash = [], True
     for ch in text.strip().lower():

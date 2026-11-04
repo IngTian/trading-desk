@@ -1834,6 +1834,7 @@ class BetsPane(Pane):
         out.append(Text("  ·  ".join(facts), style=FAINT))
 
         out += self._section("HOLDINGS", self._composition_block(min(width, 78)))
+        out += self._section("FALSIFIERS", self._falsifiers_block(b, width))
         out += self._section("THESIS", self._thesis_block(b, width))
         target.update(_join(out))
 
@@ -1848,6 +1849,53 @@ class BetsPane(Pane):
         if not body:
             return []
         return [Text(""), Text(title, style="bold")] + body
+
+    def _falsifiers_block(self, b, width: int) -> list[Text]:
+        """What this bet says would make it wrong, numbered, and whether that is settled.
+
+        NOTHING IN THE DESK HAS EVER SHOWN ONE. Fourteen falsifiers were written, and
+        carefully -- `source` names a data release, `notes` links into the vault with a line
+        number -- and not one was ever resolved, because resolving needs seeing. A table that
+        records intentions and never shows them cannot score anything, and this project had
+        already reached that conclusion from the other end: no close cites a falsifier.
+
+        THE NUMBER IS THE ADDRESS. `f` takes the position shown here rather than a database
+        id, because the id is not on screen and asking for one you cannot read is asking for
+        a guess. falsifiers_of() fixes the order so the two cannot disagree.
+
+        OPEN IS THE DEFAULT AND IS NOT COLOURED AS A PROBLEM -- most of a live bet's
+        falsifiers should be open; that is what makes them falsifiers. Only `broken` gets the
+        warning colour, because a broken support is the one state here that asks for a
+        decision today.
+        """
+        rows = book.falsifiers_of(self.con, b.id)
+        if not rows:
+            return [Text("none recorded", style=FAINT)]
+        out: list[Text] = []
+        for i, f in enumerate(rows, 1):
+            lead = f"{i}  {'main' if f.role == 'main-support' else 'side'}"
+            out.append(Text(f"{lead:<9}{_fit(f.wrong_if, max(24, width - 12))}"))
+            # THE SECOND LINE IS WHAT MAKES IT USABLE. A claim with no way to know when it
+            # has fired is a sentence, not a falsifier -- so `when` prefers the date, then
+            # the prose, then the cadence, which is the trio the schema insists on one of.
+            if f.outcome == "broken":
+                verdict, style = f"BROKEN {f.resolved_on}", WARN
+            elif f.settled:
+                verdict, style = f"{f.outcome} {f.resolved_on}", GOOD
+            else:
+                verdict, style = "open", FAINT
+            bits = [x for x in (f"when {f.when}" if f.when else None,
+                                f"watch {f.source}" if f.source else None,
+                                f"then {f.action}" if f.action else None) if x]
+            bits.append(verdict if style is not FAINT else "open")
+            line = "   ".join(bits[:-1])
+            out.append(Text.assemble(
+                " " * 9, (line, FAINT), ("   " if line else ""), (bits[-1], style)))
+        unsettled = sum(1 for f in rows if not f.settled)
+        if unsettled:
+            out.append(Text(f"{unsettled} of {len(rows)} unresolved — f to settle one",
+                            style=FAINT))
+        return out
 
     def _thesis_block(self, b, width: int) -> list[Text]:
         """The note, wrapped to the pane rather than shortened to one line.
@@ -2174,7 +2222,87 @@ class BetsPane(Pane):
             + (f" (re-baselined from {was:,.2f})" if was is not None else "")
             + " · every leg's required stop moves with it · u to undo", timeout=8)
 
+    def key_setup(self) -> None:
+        """Name the playbook this bet runs, or clear it.
+
+        PREFILLED WITH THE CURRENT SETUP, unlike `s` status: the fast path here IS "the same
+        one, I am just checking", and for a bet that already has a setup the common edit is a
+        correction rather than a change. Clearing it needs the field empty, which is one
+        keystroke from prefilled and impossible from blank.
+        """
+        bet = self._cursor_bet()
+        if bet is None:
+            return
+        row = self.con.execute("SELECT setup FROM bets WHERE id=?", (bet,)).fetchone()
+        self._editing_bet = bet
+        self.app.prompt.open("setup", prefill=row["setup"] or "")
+
+    def key_falsifier(self) -> None:
+        """Resolve one of this bet's falsifiers: held, broken or ambiguous.
+
+        THE NUMBERS COME FROM THE SCREEN. The detail pane below lists this bet's falsifiers
+        in a fixed order -- main support first, then by id -- and this prompt takes the
+        position you can see rather than a database id, because the id is not on screen and
+        asking for one you cannot read is asking for a guess.
+        """
+        bet = self._cursor_bet()
+        if bet is None:
+            return
+        rows = book.falsifiers_of(self.con, bet)
+        if not rows:
+            self.app.notify(f"{bet} has no falsifiers to resolve", timeout=4)
+            return
+        open_ones = [i for i, f in enumerate(rows, 1) if not f.settled]
+        self._editing_bet = bet
+        self.app.prompt.open("falsifier")
+        self.app.notify(
+            f"{len(rows)} falsifier(s) on {bet}"
+            + (f", unresolved: {', '.join(str(i) for i in open_ones)}" if open_ones
+               else ", all resolved — re-answering replaces the verdict"), timeout=8)
+
+    def _set_setup(self, value: str) -> None:
+        bet = self._editing_bet
+        if bet is None:
+            return
+        pre = book.set_bet_setup(self.con, bet, setup=parse.parse_setup(value))
+        self.app.stack_undo_update("bets", pre)
+        self.reload()
+        self.app.refresh_all()
+        now = self.con.execute("SELECT setup FROM bets WHERE id=?", (bet,)).fetchone()["setup"]
+        self.app.notify(
+            (f"{bet} runs {now} — write the playbook under that name" if now
+             else f"{bet} is a one-off again, with no setup") + " · u to undo", timeout=7)
+
+    def _resolve_falsifier(self, value: str) -> None:
+        """`2 broken @today`. The number is the position in the list on screen."""
+        bet = self._editing_bet
+        if bet is None:
+            return
+        rows = book.falsifiers_of(self.con, bet)
+        v = parse.parse_falsifier(value, now=self.app.now())
+        # THE RANGE IS THE PANE'S BUSINESS, not the parser's: the parser cannot know how many
+        # falsifiers are on screen, and a number out of range is a different mistake from a
+        # number that is not a number.
+        if v.index > len(rows):
+            raise book.DeskError(
+                f"{v.index} is past the end — this bet has {len(rows)}")
+        target = rows[v.index - 1]
+        pre = book.resolve_falsifier(self.con, target.id,
+                                     outcome=v.outcome, on_date=v.on_date)
+        self.app.stack_undo_update("falsifiers", pre)
+        self.reload()
+        self.app.refresh_all()
+        self.app.notify(
+            f"{_fit(target.wrong_if, 48)} — {v.outcome} as of {v.on_date} · u to undo",
+            timeout=7)
+
     def handle_prompt(self, label: str, value: str) -> None:
+        if label == "setup":
+            self._set_setup(value)
+            return
+        if label == "falsifier":
+            self._resolve_falsifier(value)
+            return
         if label == "allocation":
             self._set_allocation(value)
             return
