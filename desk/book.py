@@ -2370,14 +2370,20 @@ def set_bet_status(con, bet_id: str, *, status: str, on_date: str,
 # and a typo in either place is an undo that silently half-works.
 _ORPHANED_TRADE = "__trade__"
 
-# The same trick for the rows SQLite deletes on our behalf. `confirmations` and `falsifiers`
-# both declare `REFERENCES trades(id) ON DELETE CASCADE`, and foreign keys are ON for every
-# connection this module opens -- so deleting an emptied trade silently removed them, and the
-# pre-image carried only the trade and the fill. On the live book one OPEN trade holds three
+# The same trick for the rows SQLite deletes on our behalf. `confirmations` declares
+# `REFERENCES trades(id) ON DELETE CASCADE`, and foreign keys are ON for every connection
+# this module opens -- so deleting an emptied trade silently removed them, and the pre-image
+# carried only the trade and the fill. On the live book one OPEN trade holds three
 # confirmations rows, so `x` on its last fill destroyed three records of a known hole in the
 # record, with no message, and `u` reported "restored the fills row" while they stayed gone.
+#
+# `falsifiers` WAS THE SECOND MEMBER and left in v17 with falsifiers.trade_id. A falsifier
+# hangs off a BET now, so deleting a trade cannot cascade one away and there is nothing for
+# the pre-image to carry. Leaving it here was not harmless: the SELECT below names
+# `trade_id` on every child, so it raised `no such column` and took six delete/undo paths
+# with it.
 _ORPHANED_CHILDREN = "__children__"
-_CASCADE_OFF_TRADES = ("confirmations", "falsifiers")
+_CASCADE_OFF_TRADES = ("confirmations",)
 
 
 def delete_fill(con, fill_id: int) -> dict | None:
