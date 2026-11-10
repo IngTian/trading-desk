@@ -51,16 +51,19 @@ REPO = Path(__file__).resolve().parent.parent
 
 ENV_HOME = "TRADING_DESK_HOME"
 ENV_BOOK = "TRADING_DESK_BOOK"
+ENV_DB = "TRADING_DESK_DB"
 
-# THERE IS NO VAULT SETTING. There was one, briefly, and the author removed it on
-# 2026-09-07: "maybe we should remove the TRADING_DESK_VAULT as well. so the tool
-# stays on the book only. i manually handle the thesis, i create notes via shortcuts
-# in obsidian or by chatting with AI, the book tool only manages the [book]."
+# THE VAULT SETTING WAS REMOVED, THEN RESTORED. The author removed it on 2026-09-07:
+# "maybe we should remove the TRADING_DESK_VAULT as well. so the tool stays on the
+# book only. i manually handle the thesis, i create notes via shortcuts in obsidian or
+# by chatting with AI, the book tool only manages the [book]."
 #
-# So this tool touches exactly one thing: the book. It does not read the vault, write
-# to it, create folders in it, or have an opinion about whether a bet's thesis exists.
-# The two live in separate repositories and share one string -- the bet's name -- and
-# nothing resolves that string to a file any more.
+# v1 deliberately reverses that. The spec's §2 defines the desk↔vault boundary: the
+# desk reads the vault (for active bets' theses and rules) and writes to it (bet
+# reports, the trade journal, the reconciliation log). So the vault path returns in
+# `config.toml` as an OPTIONAL setting -- the vault is required only if you use the
+# features that touch it. The ENVIRONMENT VARIABLE stays gone: vault path comes from
+# config.toml only, so there is no one-off override the way TRADING_DESK_DB provides.
 
 
 _config_cache: dict | None = None
@@ -155,6 +158,56 @@ def book_path(explicit: str | os.PathLike | None = None) -> Path:
         # A relative path in config.toml is relative to the ROOT, not to the cwd --
         # otherwise the same config means different books from different directories.
         return (p if p.is_absolute() else home() / p).resolve()
+    return (home() / "hub.db").resolve()
+
+
+def data_dir() -> Path:
+    """The v1 data root. Everything v1 uses lives here."""
+    return home()
+
+
+def db_path(explicit: str | os.PathLike | None = None) -> Path:
+    """The v1 event store. Precedence: explicit → env var → config.toml → default."""
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    from_env = os.environ.get(ENV_DB)
+    if from_env:
+        return Path(from_env).expanduser().resolve()
+    from_file = config().get("db")
+    if from_file:
+        p = Path(str(from_file)).expanduser()
+        return (p if p.is_absolute() else home() / p).resolve()
+    return (home() / "desk.db").resolve()
+
+
+def rules_path() -> Path:
+    """The user's trading rules, in Markdown."""
+    return (home() / "rules.md").resolve()
+
+
+def bars_dir() -> Path:
+    """Where fetched OHLC bars are cached."""
+    return (home() / "bars").resolve()
+
+
+def reports_dir() -> Path:
+    """Where generated reports are written."""
+    return (home() / "reports").resolve()
+
+
+def imports_dir() -> Path:
+    """Where imported trade CSVs are staged."""
+    return (home() / "imports").resolve()
+
+
+def vault_path() -> Path | None:
+    """The obsidian vault. Optional; comes from config.toml only."""
+    from_file = config().get("vault")
+    return Path(str(from_file)).expanduser() if from_file else None
+
+
+def legacy_book() -> Path:
+    """The v0 book, for migration. Same as the old default."""
     return (home() / "hub.db").resolve()
 
 
