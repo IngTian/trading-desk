@@ -31,16 +31,6 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
-# AN EXTRA, SO A PLAIN INSTALL STAYS ONE DEPENDENCY. `textual` is all `pip install
-# trading-desk` pulls in; the MCP server is for one workflow -- handing a model a broker
-# statement and asking it what disagrees with the book -- so it is opt-in:
-#
-#     pip install 'trading-desk[mcp]'
-#
-# `mcp>=2` is not a guess: FastMCP was renamed MCPServer in 2.0, so v1 code does not import
-# and a floor below 2 would install an SDK this module cannot use.
-[project.optional-dependencies]
-mcp = ["mcp>=2,<3"]
 
 [project.urls]
 Homepage = "https://github.com/IngTian/trading-desk"
@@ -56,49 +46,18 @@ Issues = "https://github.com/IngTian/trading-desk/issues"
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "mcp>=2,<3"]
 
-# THE POINT OF INSTALLING THIS: you type `desk`.
-#
-# Without it the only way in was `uv run python -m desk`, and a bare `python -m desk`
-# failed with ModuleNotFoundError for anyone whose `python` is not the project's --
-# which is what happened. Same shape as daylogs' `day`.
-#
-# A PyInstaller build path existed and was deleted on 2026-09-27; the benchmark that
-# argued against it lived in three places with three different sets of numbers, which is
-# one reason to have one owner for a fact.
-#
-# `desk-migrate` AND `desk-check` ship because an installed user needs them and had
-# neither: the book is created by `desk-migrate --new` (or by answering `desk`'s own
-# prompt on a first run), and a schema change since the book was built is reported by
-# `desk-migrate --check`. `prices` needs no entry point -- the desk refreshes marks on
-# its own timer, so a command would be a second surface for something already automatic.
-[project.scripts]
-desk = "desk.__main__:main"
-desk-migrate = "desk.migrate:main"
-desk-check = "desk.check:cli"
-# `desk-mcp` SPEAKS MCP OVER STDIO and is READ-ONLY -- see desk/mcp.py for why that is the
-# whole design rather than a first step. It is listed unconditionally because a console
-# script costs nothing when its extra is absent: running it without `[mcp]` installed fails
-# with a plain ModuleNotFoundError naming `mcp`, which is the right error.
-desk-mcp = "desk.mcp:main"
 
 [tool.setuptools.packages.find]
 include = ["desk*"]
 
-# TWO FILES THE WHEEL WOULD OTHERWISE DROP, and each has bitten a release once.
-#
-# `*.tcss`: Textual loads app.tcss via App.CSS_PATH at runtime, and setuptools ships no
-# non-Python files by default -- so without this a non-editable install starts with no
-# stylesheet at all. Copied from daylogs, which learned it the same way.
-#
 # `schema.sql`: the schema IS the tool, and it used to live in book/ which was not a
 # package. An installed copy resolved it to `site-packages/book/schema.sql`, which does
 # not exist -- so `pip install trading-desk` produced something that could not create a
-# book. Proven by installing the wheel in a clean venv. Both are asserted by CI against
+# book. Proven by installing the wheel in a clean venv. Asserted by CI against
 # a real built wheel, because an editable install reads the source tree and so cannot
 # catch a missing declaration.
 [tool.setuptools.package-data]
 "desk" = ["schema.sql"]
-"desk.tui" = ["*.tcss"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

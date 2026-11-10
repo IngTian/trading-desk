@@ -260,7 +260,7 @@ def book_source() -> str:
 
 
 def schema_sql() -> Path:
-    """The schema is CODE and ships with the tool, wherever the data is.
+    """The v1 event-store schema. Package-relative.
 
     PACKAGE-RELATIVE, NOT REPO-RELATIVE, and that was a real defect rather than a tidy-up.
     It returned `REPO / "book" / "schema.sql"` where REPO is this file's grandparent -- which
@@ -270,17 +270,6 @@ def schema_sql() -> Path:
     installing the wheel in a clean venv before the move.
 
     A plain path works for both cases because a wheel is unpacked into site-packages, so
-    `desk/schema.sql` is a real file on disk either way -- no importlib.resources needed, and
-    `--new` can hand the path to sqlite3 directly the way it always has.
-
-    NO BUNDLE BRANCH. This also read sys._MEIPASS so a PyInstaller build could find the
-    schema it had bundled; the build path was deleted on 2026-09-27 -- the author: "No --
-    delete it" -- because its artifact started ~80x slower than the console script and
-    could not create the book it refused to start without.
+    `desk/schema.sql` is a real file on disk either way -- no importlib.resources needed.
     """
     return Path(__file__).resolve().parent / "schema.sql"
-
-
-def schema_v1_sql() -> Path:
-    """The v1 event-store schema. Package-relative, same reasoning as schema_sql()."""
-    return Path(__file__).resolve().parent / "schema_v1.sql"

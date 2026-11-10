@@ -36,14 +36,14 @@ KINDS = (
 
 
 def create(path: Path | None = None) -> None:
-    """Execute schema_v1.sql into a new file. Refuses to overwrite an existing one."""
+    """Execute schema.sql into a new file. Refuses to overwrite an existing one."""
     db = path or config.db_path()
     if db.exists():
         raise FileExistsError(f"{db} already exists")
     db.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(db)
     try:
-        schema = config.schema_v1_sql().read_text()
+        schema = config.schema_sql().read_text()
         con.executescript(schema)
         con.commit()
     finally:
