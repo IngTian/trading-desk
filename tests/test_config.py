@@ -32,3 +32,27 @@ def test_an_env_var_beats_config_toml_for_the_db(tmp_path, monkeypatch):
     # With the env var, it overrides config.toml
     monkeypatch.setenv("TRADING_DESK_DB", str(tmp_path / "override.db"))
     assert config.db_path() == (tmp_path / "override.db").resolve()
+
+
+def test_legacy_book_honours_trading_desk_book_env_var(tmp_path, monkeypatch):
+    """legacy_book() must respect TRADING_DESK_BOOK like the old book_path() does."""
+    monkeypatch.setenv("TRADING_DESK_HOME", str(tmp_path))
+    # Default: hub.db under home
+    assert config.legacy_book() == (tmp_path / "hub.db").resolve()
+    # With env var: the specified path
+    custom_book = tmp_path / "custom.db"
+    monkeypatch.setenv("TRADING_DESK_BOOK", str(custom_book))
+    assert config.legacy_book() == custom_book.resolve()
+
+
+def test_vault_path_resolves_relative_paths_against_home(tmp_path, monkeypatch):
+    """A relative vault path in config.toml must resolve against home(), not cwd."""
+    monkeypatch.setenv("TRADING_DESK_HOME", str(tmp_path))
+    # Absolute path: returned as-is
+    (tmp_path / "config.toml").write_text('vault = "/absolute/vault"\n')
+    config._config_cache = None
+    assert config.vault_path() == Path("/absolute/vault").resolve()
+    # Relative path: resolved against home(), not cwd
+    (tmp_path / "config.toml").write_text('vault = "my-vault"\n')
+    config._config_cache = None
+    assert config.vault_path() == (tmp_path / "my-vault").resolve()

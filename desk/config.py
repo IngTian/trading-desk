@@ -203,12 +203,15 @@ def imports_dir() -> Path:
 def vault_path() -> Path | None:
     """The obsidian vault. Optional; comes from config.toml only."""
     from_file = config().get("vault")
-    return Path(str(from_file)).expanduser() if from_file else None
+    if not from_file:
+        return None
+    p = Path(str(from_file)).expanduser()
+    return (p if p.is_absolute() else home() / p).resolve()
 
 
 def legacy_book() -> Path:
-    """The v0 book, for migration. Same as the old default."""
-    return (home() / "hub.db").resolve()
+    """The v0 book, for migration. Same path resolution as book_path()."""
+    return book_path()
 
 
 # The currencies the book can translate between. Two, because there are exactly two
