@@ -279,3 +279,8 @@ def schema_sql() -> Path:
     could not create the book it refused to start without.
     """
     return Path(__file__).resolve().parent / "schema.sql"
+
+
+def schema_v1_sql() -> Path:
+    """The v1 event-store schema. Package-relative, same reasoning as schema_sql()."""
+    return Path(__file__).resolve().parent / "schema_v1.sql"
