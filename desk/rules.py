@@ -111,6 +111,12 @@ class RulesFile:
                 end += 1
                 continue
 
+            # List items outside ask section (e.g., Changes entries)
+            if line.startswith("- "):
+                ask_items.append(line[2:])
+                end += 1
+                continue
+
             end += 1
 
         return {

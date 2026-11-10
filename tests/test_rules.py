@@ -76,3 +76,16 @@ def test_a_malformed_rules_block_names_the_line(tmp_path):
     err = str(exc_info.value)
     assert str(p) in err, "error should name the file"
     assert "4" in err or "line 4" in err.lower(), "error should name line 4"
+
+
+def test_changes_are_parsed_with_dates_and_text_verbatim():
+    r = rules.load(FIXTURE).for_scope("real", None, INVENTED_CHECKS)
+    assert len(r.changes) == 3
+    # Verify dates
+    assert r.changes[0].date == "2026-01-15"
+    assert r.changes[1].date == "2026-02-20"
+    assert r.changes[2].date == "2026-03-10"
+    # Verify text is verbatim after the colon
+    assert r.changes[0].text == "Initial rules"
+    assert r.changes[1].text == "Increased real min_reward_risk to 3"
+    assert r.changes[2].text == "Added paper run 2 with higher position limit"
