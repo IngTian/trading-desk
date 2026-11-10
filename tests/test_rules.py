@@ -89,3 +89,61 @@ def test_changes_are_parsed_with_dates_and_text_verbatim():
     assert r.changes[0].text == "Initial rules"
     assert r.changes[1].text == "Increased real min_reward_risk to 3"
     assert r.changes[2].text == "Added paper run 2 with higher position limit"
+
+
+def test_prose_bullets_outside_ask_or_changes_are_ignored(tmp_path):
+    """Stray list items should not become ask-me items or changes."""
+    content = """## All
+
+```rules
+foo: 1
+```
+
+- This is a prose bullet, not an ask-me item
+- Another stray bullet
+
+## Real
+
+- Prose under Real section
+
+### Ask me
+
+- This IS an ask-me item
+
+## Changes
+
+- 2026-01-01: This IS a change
+"""
+    p = tmp_path / "rules.md"
+    p.write_text(content)
+    r = rules.load(p).for_scope("real", None, frozenset())
+
+    # Only the Ask me item should appear in ask
+    assert r.ask == ("This IS an ask-me item",)
+    # Only the Changes item should appear in changes
+    assert len(r.changes) == 1
+    assert r.changes[0].text == "This IS a change"
+
+
+def test_ask_me_ordering_is_scope_composition_order(tmp_path):
+    """Ask-me items from All come before Real, regardless of file position."""
+    content = """## Real
+
+### Ask me
+
+- Real question
+
+## All
+
+### Ask me
+
+- All question
+"""
+    p = tmp_path / "rules.md"
+    p.write_text(content)
+    r = rules.load(p).for_scope("real", None, frozenset())
+
+    # All's ask-me comes first despite Real appearing first in file
+    assert len(r.ask) == 2
+    assert r.ask[0] == "All question"
+    assert r.ask[1] == "Real question"

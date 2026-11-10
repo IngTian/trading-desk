@@ -47,7 +47,7 @@ class RulesFile:
             if line.startswith("## "):
                 section_name = line[3:].strip()
                 i += 1
-                section_data = self._parse_section_content(lines, i)
+                section_data = self._parse_section_content(section_name, lines, i)
                 sections[section_name] = section_data
                 i = section_data["_end_line"]
             else:
@@ -55,14 +55,16 @@ class RulesFile:
 
         return sections
 
-    def _parse_section_content(self, lines: list[str], start: int) -> dict:
+    def _parse_section_content(self, section_name: str, lines: list[str], start: int) -> dict:
         """Parse content of a section until next ## header."""
         rules_dict: dict[str, str] = {}
         ask_items: list[str] = []
+        change_items: list[str] = []
         end = start
 
         in_rules_block = False
         in_ask_section = False
+        is_changes_section = (section_name == "Changes")
 
         while end < len(lines):
             line = lines[end]
@@ -111,9 +113,9 @@ class RulesFile:
                 end += 1
                 continue
 
-            # List items outside ask section (e.g., Changes entries)
-            if line.startswith("- "):
-                ask_items.append(line[2:])
+            # List items in Changes section
+            if is_changes_section and line.startswith("- "):
+                change_items.append(line[2:])
                 end += 1
                 continue
 
@@ -122,6 +124,7 @@ class RulesFile:
         return {
             "rules": rules_dict,
             "ask": ask_items,
+            "changes": change_items,
             "_end_line": end,
         }
 
@@ -131,7 +134,11 @@ class RulesFile:
         """Resolve rules for a specific scope.
 
         Composition order: All → account section → run section.
-        Later sections override earlier ones.
+        Later sections override earlier rule names.
+
+        Ask-me items accumulate in scope-composition order (All → account → run),
+        the same order rules compose in. Within each section's list, items remain
+        in file order relative to each other.
 
         Args:
             account: "real", "paper", or "replay"
@@ -171,7 +178,7 @@ class RulesFile:
         # Parse Changes section specially
         changes_list: list[Change] = []
         if "Changes" in self._sections:
-            for item in self._sections["Changes"]["ask"]:  # Changes stored as "ask" items
+            for item in self._sections["Changes"]["changes"]:
                 # Format: "2026-01-15: Description"
                 if ":" in item:
                     date, text = item.split(":", 1)
