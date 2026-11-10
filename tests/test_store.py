@@ -120,3 +120,62 @@ def test_read_only_open_cannot_write(tmp_path):
                 source="chat",
                 payload={"text": "x"},
             )
+
+
+def test_trade_returns_the_immutable_identity_row(con):
+    """store.trade() returns the full trade row, or None if not found."""
+    row = store.trade(con, T)
+    assert row is not None
+    assert row["id"] == T
+    assert row["ticker"] == "ACME"
+    assert row["side"] == "long"
+    assert row["instrument"] == "stock"
+    assert row["point_value"] == 1.0
+    assert row["currency"] == "USD"
+
+    # Non-existent trade returns None
+    assert store.trade(con, "nonexistent") is None
+
+
+def test_trade_ids_returns_all_ids_ordered(tmp_path):
+    """store.trade_ids() returns all trade IDs ordered by created_at."""
+    db = tmp_path / "test.db"
+    store.create(db)
+    with store.open(db) as conn:
+        # Add three trades
+        store.add_trade(
+            conn,
+            trade_id="trade-1",
+            account="paper",
+            run_id=None,
+            ticker="ACME",
+            instrument="stock",
+            point_value=1.0,
+            currency="USD",
+            side="long",
+        )
+        store.add_trade(
+            conn,
+            trade_id="trade-2",
+            account="paper",
+            run_id=None,
+            ticker="WXYZ",
+            instrument="stock",
+            point_value=1.0,
+            currency="USD",
+            side="short",
+        )
+        store.add_trade(
+            conn,
+            trade_id="trade-3",
+            account="real",
+            run_id=None,
+            ticker="TEST",
+            instrument="etf",
+            point_value=1.0,
+            currency="CAD",
+            side="long",
+        )
+
+        ids = store.trade_ids(conn)
+        assert ids == ["trade-1", "trade-2", "trade-3"]

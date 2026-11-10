@@ -88,10 +88,7 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
     them in taken_against.
     """
     # Get the trade metadata
-    trade_row = con.execute(
-        "SELECT side FROM trades WHERE id = ?",
-        (trade_id,),
-    ).fetchone()
+    trade_row = store.trade(con, trade_id)
 
     if not trade_row:
         raise ValueError(f"Trade {trade_id} not found")
@@ -208,10 +205,10 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
 def open_trades(con: sqlite3.Connection) -> list[TradeState]:
     """Return all trades with status 'open'."""
     # Get all trade IDs
-    rows = con.execute("SELECT id FROM trades").fetchall()
+    trade_ids = store.trade_ids(con)
 
     # Compute state for each and filter to open ones
     return [
-        state for state in (state_of(con, row["id"]) for row in rows)
+        state for state in (state_of(con, trade_id) for trade_id in trade_ids)
         if state.status == "open"
     ]

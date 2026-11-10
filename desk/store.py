@@ -120,6 +120,20 @@ def events(
     return rows
 
 
+def trade(con: sqlite3.Connection, trade_id: str) -> sqlite3.Row | None:
+    """Fetch the immutable identity row for a trade. Returns None if not found."""
+    return con.execute(
+        "SELECT * FROM trades WHERE id = ?",
+        (trade_id,),
+    ).fetchone()
+
+
+def trade_ids(con: sqlite3.Connection) -> list[str]:
+    """Fetch all trade IDs, ordered by created_at."""
+    rows = con.execute("SELECT id FROM trades ORDER BY created_at").fetchall()
+    return [row["id"] for row in rows]
+
+
 def add_trade(
     con: sqlite3.Connection,
     *,
