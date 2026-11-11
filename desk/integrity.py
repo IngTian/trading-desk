@@ -11,11 +11,18 @@ declares `corrects INTEGER REFERENCES events(id)`, but whether that constraint
 applies depends on how the file was written, not what the file contains. A database
 created with foreign keys off can hold dangling references that would be impossible
 to insert with them on. This checker catches those.
+
+## What this does not cover
+
+Dangling foreign keys in `events.trade_id` (no row in `trades`) and `events.session_id`
+(no session row) are the same class of corruption — they require foreign keys off — but
+are not checked here. A trade_id with no trade makes every fold query fail immediately,
+so it is self-reporting rather than silent.
 """
 from __future__ import annotations
 
 import sqlite3
-import sys
+from collections.abc import Callable
 
 from desk import model, store
 
@@ -31,9 +38,9 @@ def _exit_exceeds_open_size(con: sqlite3.Connection) -> list[str]:
     for trade_id in store.trade_ids(con):
         state = model.state_of(con, trade_id)
         if "exit_exceeds_size" in state.taken_against:
-            failures.append(
-                f"trade {trade_id}: an exit exceeded the open position (entry size: shares)"
-            )
+            # The fold detected an over-exit but doesn't preserve which specific exit
+            # or by how much, so we report that it happened without claiming exact figures
+            failures.append(f"trade {trade_id}: an exit exceeded the open position")
     return failures
 
 
@@ -50,6 +57,7 @@ def _event_before_trade_started(con: sqlite3.Connection) -> list[str]:
             SELECT trade_id, MIN(id) AS first_start_id
             FROM events
             WHERE kind IN ('checked', 'imported')
+              AND id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
             GROUP BY trade_id
         )
         SELECT e.trade_id, e.id, e.kind
@@ -57,6 +65,7 @@ def _event_before_trade_started(con: sqlite3.Connection) -> list[str]:
         JOIN trade_starts ts ON e.trade_id = ts.trade_id
         WHERE e.id < ts.first_start_id
           AND e.kind NOT IN ('checked', 'imported')
+          AND e.id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
         ORDER BY e.trade_id, e.id
         """
     ).fetchall()
@@ -121,11 +130,16 @@ def _trade_with_no_start(con: sqlite3.Connection) -> list[str]:
         """
         SELECT t.id
         FROM trades t
-        WHERE EXISTS (SELECT 1 FROM events WHERE trade_id = t.id)
+        WHERE EXISTS (
+            SELECT 1 FROM events
+            WHERE trade_id = t.id
+              AND id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
+          )
           AND NOT EXISTS (
               SELECT 1 FROM events
               WHERE trade_id = t.id
                 AND kind IN ('checked', 'imported')
+                AND id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
           )
         ORDER BY t.id
         """
@@ -154,12 +168,14 @@ def _exit_without_entry(con: sqlite3.Connection) -> list[str]:
             SELECT trade_id, MIN(id) AS first_entered_id
             FROM events
             WHERE kind = 'entered'
+              AND id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
             GROUP BY trade_id
         )
         SELECT e.trade_id, e.id AS exit_id
         FROM events e
         LEFT JOIN first_entries fe ON e.trade_id = fe.trade_id
         WHERE e.kind = 'exited'
+          AND e.id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
           AND (fe.first_entered_id IS NULL OR e.id < fe.first_entered_id)
         ORDER BY e.trade_id, e.id
         """
@@ -168,7 +184,7 @@ def _exit_without_entry(con: sqlite3.Connection) -> list[str]:
     for row in rows:
         failures.append(
             f"trade {row['trade_id']}: exit event {row['exit_id']} "
-            f"has no preceding entered event (exit results require entry ACB)"
+            f"has no preceding entered event (exit results require entry adjusted cost base)"
         )
     return failures
 
@@ -184,24 +200,24 @@ INVARIANTS = {
 }
 
 
-def run(con: sqlite3.Connection, *, emit: callable | None = None) -> int:
+def run(con: sqlite3.Connection, *, emit: Callable[[str], None] | None = None) -> int:
     """Run all integrity checks. Returns 0 if all pass, 1 if any fail.
 
     emit: optional callable to receive failure lines. Defaults to print.
     """
     if emit is None:
-        emit = lambda line: print(line, file=sys.stdout)
+        emit = print
 
     total_failures = 0
 
     for name, check_fn in INVARIANTS.items():
         failures = check_fn(con)
         for line in failures:
-            emit(line)
+            emit(f"{name}: {line}")
             total_failures += 1
 
     if total_failures > 0:
-        emit(f"\n{total_failures} integrity violation(s) found")
-        return 1
+        emit("")
+    emit(f"{total_failures} integrity violation(s) found")
 
-    return 0
+    return 1 if total_failures > 0 else 0
