@@ -51,9 +51,12 @@ class Plan:
     point_value: float
     currency: str
     entry: float
-    stop: float
-    target: float
-    size: int
+    # Optional because the rules are what demand them: stop_required and target_required
+    # exist precisely because a plan can arrive without one, and a check withholds its figure
+    # rather than reading a breach into a missing input.
+    stop: float | None
+    target: float | None
+    size: int | None
     horizon: str
     setup: str
     thesis: str
@@ -65,6 +68,7 @@ class Plan:
 class TradeState:
     """The derived current state of a trade."""
     trade_id: str
+    ticker: str  # from the trade's identity row: no_open_trade_in_group needs it
     status: str  # planned | open | closed | passed
     entry: float | None
     stop: float | None
@@ -185,6 +189,7 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
 
     return TradeState(
         trade_id=trade_id,
+        ticker=trade_row["ticker"],
         status=status,
         entry=entry,
         stop=stop,
