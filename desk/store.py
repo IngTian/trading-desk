@@ -77,6 +77,35 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
     return con
 
 
+def _append_no_commit(
+    con: sqlite3.Connection,
+    *,
+    kind: str,
+    actor: str,
+    source: str,
+    trade_id: str | None = None,
+    session_id: int | None = None,
+    corrects: int | None = None,
+    payload: dict,
+    rules_hash: str | None = None,
+    at: str,
+) -> int:
+    """Internal: append an event without committing. Used by append and add_trade_with_event."""
+    cur = con.execute(
+        """
+        INSERT INTO events (
+            at, actor, source, kind, trade_id, session_id, corrects, rules_hash, payload
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (at, actor, source, kind, trade_id, session_id, corrects, rules_hash,
+         json.dumps(payload, allow_nan=False)),
+    )
+    if cur.lastrowid is None:
+        raise RuntimeError("INSERT succeeded but lastrowid is None")
+    return cur.lastrowid
+
+
 def append(
     con: sqlite3.Connection,
     *,
@@ -93,20 +122,20 @@ def append(
     """Append an event. Returns the new event id."""
     if at is None:
         at = datetime.now(UTC).isoformat()
-    cur = con.execute(
-        """
-        INSERT INTO events (
-            at, actor, source, kind, trade_id, session_id, corrects, rules_hash, payload
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (at, actor, source, kind, trade_id, session_id, corrects, rules_hash,
-         json.dumps(payload, allow_nan=False)),
+    event_id = _append_no_commit(
+        con,
+        kind=kind,
+        actor=actor,
+        source=source,
+        trade_id=trade_id,
+        session_id=session_id,
+        corrects=corrects,
+        payload=payload,
+        rules_hash=rules_hash,
+        at=at,
     )
     con.commit()
-    if cur.lastrowid is None:
-        raise RuntimeError("INSERT succeeded but lastrowid is None")
-    return cur.lastrowid
+    return event_id
 
 
 def events(
@@ -145,6 +174,32 @@ def trade_ids(con: sqlite3.Connection) -> list[str]:
     return [row["id"] for row in rows]
 
 
+def _add_trade_no_commit(
+    con: sqlite3.Connection,
+    *,
+    trade_id: str,
+    account: str,
+    run_id: str | None,
+    ticker: str,
+    instrument: str,
+    point_value: float,
+    currency: str,
+    side: str,
+    created_at: str,
+) -> None:
+    """Internal: add a trade without committing. Used by add_trade and add_trade_with_event."""
+    con.execute(
+        """
+        INSERT INTO trades (
+            id, account, account_name, run_id, ticker, instrument,
+            point_value, currency, side, created_at
+        )
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (trade_id, account, run_id, ticker, instrument, point_value, currency, side, created_at),
+    )
+
+
 def add_trade(
     con: sqlite3.Connection,
     *,
@@ -159,14 +214,96 @@ def add_trade(
 ) -> None:
     """Add a trade. Only what never changes: the mutable state derives from events."""
     created_at = datetime.now(UTC).isoformat()
-    con.execute(
-        """
-        INSERT INTO trades (
-            id, account, account_name, run_id, ticker, instrument,
-            point_value, currency, side, created_at
-        )
-        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (trade_id, account, run_id, ticker, instrument, point_value, currency, side, created_at),
+    _add_trade_no_commit(
+        con,
+        trade_id=trade_id,
+        account=account,
+        run_id=run_id,
+        ticker=ticker,
+        instrument=instrument,
+        point_value=point_value,
+        currency=currency,
+        side=side,
+        created_at=created_at,
     )
     con.commit()
+
+
+def add_trade_with_event(
+    con: sqlite3.Connection,
+    *,
+    trade_id: str,
+    account: str,
+    run_id: str | None,
+    ticker: str,
+    instrument: str,
+    point_value: float,
+    currency: str,
+    side: str,
+    kind: str,
+    actor: str,
+    source: str,
+    payload: dict,
+    rules_hash: str,
+    at: str,
+) -> int:
+    """Add a trade and its first event atomically.
+
+    The trade row and its checked/imported event must be written together because
+    integrity._trade_with_no_start requires every trade to have one. Any failure between
+    the two writes would commit the trade and lose the event, leaving a permanent integrity
+    violation in the append-only log.
+
+    Returns the new event id.
+    """
+    try:
+        _add_trade_no_commit(
+            con,
+            trade_id=trade_id,
+            account=account,
+            run_id=run_id,
+            ticker=ticker,
+            instrument=instrument,
+            point_value=point_value,
+            currency=currency,
+            side=side,
+            created_at=at,
+        )
+        event_id = _append_no_commit(
+            con,
+            kind=kind,
+            actor=actor,
+            source=source,
+            trade_id=trade_id,
+            payload=payload,
+            rules_hash=rules_hash,
+            at=at,
+        )
+        con.commit()
+        return event_id
+    except Exception:
+        con.rollback()
+        raise
+
+
+def ensure_run(
+    con: sqlite3.Connection,
+    *,
+    run_id: str,
+    kind: str,
+    started: str,
+    rules_section: str,
+) -> bool:
+    """Create a run row if it doesn't exist. Returns True if created, False if already exists."""
+    existing = con.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+    if existing:
+        return False
+    con.execute(
+        """
+        INSERT INTO runs (id, kind, started, rules_section)
+        VALUES (?, ?, ?, ?)
+        """,
+        (run_id, kind, started, rules_section),
+    )
+    con.commit()
+    return True

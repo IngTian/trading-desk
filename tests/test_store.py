@@ -191,3 +191,42 @@ def test_open_raises_on_missing_database_when_not_read_only(tmp_path):
     assert str(missing) in str(exc.value)
     # The guard must not leave a stray file
     assert not missing.exists()
+
+
+def test_add_trade_with_event_is_atomic(tmp_path):
+    """If the event insert fails, no trade row is left behind (atomicity)."""
+    db = tmp_path / "test.db"
+    store.create(db)
+    con = store.open(db)
+
+    # Create a payload that will fail json.dumps
+    # A Python object that's not JSON-serializable will cause the INSERT to fail
+    class NotSerializable:
+        pass
+
+    try:
+        store.add_trade_with_event(
+            con,
+            trade_id="test-trade",
+            account="paper",
+            run_id=None,
+            ticker="ACME",
+            instrument="stock",
+            point_value=1.0,
+            currency="USD",
+            side="long",
+            kind="checked",
+            actor="ing",
+            source="chat",
+            payload={"bad": NotSerializable()},  # This will fail json.dumps
+            rules_hash="abc123",
+            at="2026-11-10T10:00:00Z",
+        )
+        raise AssertionError("Expected TypeError from json.dumps")
+    except TypeError:
+        # Expected: json.dumps cannot serialize the object
+        pass
+
+    # Verify no trade row was created (atomicity: both or neither)
+    trade_ids = store.trade_ids(con)
+    assert trade_ids == [], f"Expected no trades, found {trade_ids}"

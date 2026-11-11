@@ -32,27 +32,6 @@ def _generate_trade_id(ticker: str, local_date: str, existing_ids: list[str]) ->
     return f"{base}-{suffix}"
 
 
-def _create_run_if_needed(con, account: str, run_id: str, now_utc: datetime) -> bool:
-    """Create a runs row if it doesn't exist. Returns True if created.
-
-    run_id is assumed to be already normalized (run-N format).
-    """
-    existing = con.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
-    if existing:
-        return False
-    # Derive kind from account: real is not a run, so this is only called for paper/replay
-    kind = account  # "paper" or "replay"
-    # Build section name using the same function for_scope uses
-    run_section = rules.build_run_section_name(account, run_id)
-    con.execute(
-        """
-        INSERT INTO runs (id, kind, started, rules_section)
-        VALUES (?, ?, ?, ?)
-        """,
-        (run_id, kind, now_utc.isoformat(), run_section),
-    )
-    con.commit()
-    return True
 
 
 def cmd_check(args: argparse.Namespace) -> int:
@@ -139,7 +118,17 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     # Create run if needed
     if args.run:
-        run_created = _create_run_if_needed(con, args.account, args.run, now_utc)
+        # Derive kind from account: real is not a run, so this is only called for paper/replay
+        kind = args.account  # "paper" or "replay"
+        # Build section name using the same function for_scope uses
+        run_section = rules.build_run_section_name(args.account, args.run)
+        run_created = store.ensure_run(
+            con,
+            run_id=args.run,
+            kind=kind,
+            started=now_utc.isoformat(),
+            rules_section=run_section,
+        )
         if run_created:
             # Route to stderr so --json stdout stays pure
             print(f"Created run {args.run}", file=sys.stderr)
@@ -183,25 +172,6 @@ def cmd_check(args: argparse.Namespace) -> int:
     existing_ids = store.trade_ids(con)
     trade_id = _generate_trade_id(args.ticker, local_date, existing_ids)
 
-    # Write trade row and checked event in ONE transaction to prevent integrity violations.
-    # The brief's ruling requires they be written together because every trade must have a
-    # checked or imported event. Any failure between them would commit the trade and lose
-    # the event, leaving a permanent defect in an append-only log.
-    #
-    # store's own functions commit internally, defeating `with con:`, so we do both INSERTs here.
-    created_at = now_utc.isoformat()
-    con.execute(
-        """
-        INSERT INTO trades (
-            id, account, account_name, run_id, ticker, instrument,
-            point_value, currency, side, created_at
-        )
-        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (trade_id, args.account, args.run, args.ticker, instrument, point_value,
-         args.currency, args.side, created_at),
-    )
-
     # Build the payload with asdict to prevent divergence
     payload = {
         "plan": asdict(plan),
@@ -210,21 +180,27 @@ def cmd_check(args: argparse.Namespace) -> int:
         "rules_hash": rules_file.hash,
     }
 
-    # Append the checked event in the same transaction
+    # Write trade row and checked event atomically
     # source="chat" because the product's loop is chat-driven: the owner chats with an AI about
     # a trade, the AI suggests a check, and the owner runs it. A CLI invocation is the execution
     # of that chat-originated decision.
-    con.execute(
-        """
-        INSERT INTO events (
-            at, actor, source, kind, trade_id, session_id, corrects, rules_hash, payload
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (created_at, "ing", "chat", "checked", trade_id, None, None, rules_file.hash,
-         json.dumps(payload, allow_nan=False)),
+    store.add_trade_with_event(
+        con,
+        trade_id=trade_id,
+        account=args.account,
+        run_id=args.run,
+        ticker=args.ticker,
+        instrument=instrument,
+        point_value=point_value,
+        currency=args.currency,
+        side=args.side,
+        kind="checked",
+        actor="ing",
+        source="chat",
+        payload=payload,
+        rules_hash=rules_file.hash,
+        at=now_utc.isoformat(),
     )
-    con.commit()
 
     return 0
 
