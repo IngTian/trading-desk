@@ -126,7 +126,7 @@ def _trade_with_no_start(con: sqlite3.Connection) -> list[str]:
     """Every trade must have a checked or imported event.
 
     A trade is created by a checked or imported event. Any trade in the trades
-    table with events but no checked/imported is malformed.
+    table without a checked/imported is malformed, whether it has other events or not.
 
     Does not exclude superseded events: the question is whether the trade was ever
     checked, and a corrected check still means it was checked. The correction revises
@@ -137,8 +137,7 @@ def _trade_with_no_start(con: sqlite3.Connection) -> list[str]:
         """
         SELECT t.id
         FROM trades t
-        WHERE EXISTS (SELECT 1 FROM events WHERE trade_id = t.id)
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
               SELECT 1 FROM events
               WHERE trade_id = t.id
                 AND kind IN ('checked', 'imported')
@@ -149,7 +148,7 @@ def _trade_with_no_start(con: sqlite3.Connection) -> list[str]:
 
     for row in rows:
         failures.append(
-            f"trade {row['id']}: has events but no checked or imported event "
+            f"trade {row['id']}: has no checked or imported event "
             f"(every trade must start with one of these)"
         )
     return failures

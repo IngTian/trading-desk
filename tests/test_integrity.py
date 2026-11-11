@@ -292,3 +292,35 @@ def test_sql_invariants_exclude_superseded_events(con):
     # But the exit came BEFORE the corrected entry, so it has no entry to price against
     fired = [n for n, f in integrity.INVARIANTS.items() if f(con)]
     assert "exit_without_entry" in fired, "Should detect exit orphaned by correction"
+
+
+def test_trade_with_no_start_catches_trade_with_zero_events(con):
+    """A trade with no events at all should be caught by _trade_with_no_start."""
+    # Directly insert a trade row without any events
+    # (This is what store.add_trade() produces on its own, which is why add_trade_with_event exists)
+    con.execute(
+        """
+        INSERT INTO trades (
+            id, account, account_name, run_id, ticker, instrument,
+            point_value, currency, side, created_at
+        )
+        VALUES (?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            invented.TEST_TRADE_ID,
+            "paper",
+            invented.TICKERS[0],
+            "stock",
+            1.0,
+            "USD",
+            "long",
+            "2026-01-01T00:00:00Z",
+        ),
+    )
+    con.commit()
+
+    # This trade has zero events, which is never legitimate
+    failures = integrity._trade_with_no_start(con)
+    assert len(failures) == 1
+    assert invented.TEST_TRADE_ID in failures[0]
+    assert "no checked or imported event" in failures[0]

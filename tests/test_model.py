@@ -464,3 +464,246 @@ def test_the_most_recent_stop_on_a_ticker_is_the_one_that_counts(con):
     _close(con, "trade-b", STOPPED_AT)
 
     assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}
+
+
+def test_trade_state_carries_account_and_run_id(con):
+    """TradeState includes account and run_id from the trades row."""
+    store.add_trade(
+        con,
+        trade_id=invented.TEST_TRADE_ID,
+        account="real",
+        run_id=None,
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="chat",
+        trade_id=invented.TEST_TRADE_ID,
+        payload={
+            "entry": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "size": 10,
+            "horizon": "2w",
+            "setup": "test-setup",
+            "thesis": "test thesis",
+        },
+    )
+
+    state = model.state_of(con, invented.TEST_TRADE_ID)
+    assert state.account == "real"
+    assert state.run_id is None
+
+
+def test_open_trades_filters_by_account(con):
+    """A paper trade must not appear in open_trades(con, account='real')."""
+    # Create a real trade
+    store.add_trade(
+        con,
+        trade_id="real-1",
+        account="real",
+        run_id=None,
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="chat",
+        trade_id="real-1",
+        payload={
+            "entry": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "size": 10,
+            "horizon": "2w",
+            "setup": "test-setup",
+            "thesis": "test thesis",
+        },
+    )
+
+    # Create a run for paper trades
+    store.ensure_run(
+        con,
+        run_id="run-1",
+        kind="paper",
+        started="2026-01-01T00:00:00Z",
+        rules_section="## Paper · run-1",
+    )
+
+    # Create a paper trade
+    store.add_trade(
+        con,
+        trade_id="paper-1",
+        account="paper",
+        run_id="run-1",
+        ticker=invented.TICKERS[1],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="chat",
+        trade_id="paper-1",
+        payload={
+            "entry": 50.0,
+            "stop": 45.0,
+            "target": 60.0,
+            "size": 20,
+            "horizon": "1w",
+            "setup": "test-setup",
+            "thesis": "test thesis",
+        },
+    )
+
+    # Unscoped: both trades
+    all_open = model.open_trades(con)
+    assert len(all_open) == 2
+    assert {t.trade_id for t in all_open} == {"real-1", "paper-1"}
+
+    # Scoped to real: only real-1
+    real_open = model.open_trades(con, account="real")
+    assert len(real_open) == 1
+    assert real_open[0].trade_id == "real-1"
+
+    # Scoped to paper: only paper-1
+    paper_open = model.open_trades(con, account="paper")
+    assert len(paper_open) == 1
+    assert paper_open[0].trade_id == "paper-1"
+
+
+def test_open_trades_filters_by_run_id(con):
+    """A run-2 trade must not appear under run_id='run-3'."""
+    # Create runs
+    store.ensure_run(
+        con,
+        run_id="run-1",
+        kind="paper",
+        started="2026-01-01T00:00:00Z",
+        rules_section="## Paper · run-1",
+    )
+    store.ensure_run(
+        con,
+        run_id="run-2",
+        kind="paper",
+        started="2026-01-02T00:00:00Z",
+        rules_section="## Paper · run-2",
+    )
+
+    # Create a trade in run-1
+    store.add_trade(
+        con,
+        trade_id="paper-run1",
+        account="paper",
+        run_id="run-1",
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="chat",
+        trade_id="paper-run1",
+        payload={
+            "entry": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "size": 10,
+            "horizon": "2w",
+            "setup": "test-setup",
+            "thesis": "test thesis",
+        },
+    )
+
+    # Create a trade in run-2
+    store.add_trade(
+        con,
+        trade_id="paper-run2",
+        account="paper",
+        run_id="run-2",
+        ticker=invented.TICKERS[1],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="chat",
+        trade_id="paper-run2",
+        payload={
+            "entry": 50.0,
+            "stop": 45.0,
+            "target": 60.0,
+            "size": 20,
+            "horizon": "1w",
+            "setup": "test-setup",
+            "thesis": "test thesis",
+        },
+    )
+
+    # Scoped to run-1: only paper-run1
+    run1_open = model.open_trades(con, account="paper", run_id="run-1")
+    assert len(run1_open) == 1
+    assert run1_open[0].trade_id == "paper-run1"
+
+    # Scoped to run-2: only paper-run2
+    run2_open = model.open_trades(con, account="paper", run_id="run-2")
+    assert len(run2_open) == 1
+    assert run2_open[0].trade_id == "paper-run2"
+
+    # Scoped to run-3: none
+    run3_open = model.open_trades(con, account="paper", run_id="run-3")
+    assert len(run3_open) == 0
+
+
+def test_stopped_closes_filters_by_account(con):
+    """Paper stop must not appear in stopped_closes(con, account='real')."""
+    # Real account stopped trade
+    _trade(con, "real-stopped", ticker=invented.TICKERS[0])
+    # Override the account (the _trade helper defaults to paper)
+    con.execute("UPDATE trades SET account = 'real' WHERE id = 'real-stopped'")
+    _exit(con, "real-stopped", 94.0, STOPPED_AT)
+    _close(con, "real-stopped", STOPPED_AT)
+
+    # Paper account stopped trade
+    _trade(con, "paper-stopped", ticker=invented.TICKERS[1])
+    _exit(con, "paper-stopped", 44.0, STOPPED_AT)
+    _close(con, "paper-stopped", STOPPED_AT)
+
+    # Unscoped: both tickers
+    all_stopped = model.stopped_closes(con)
+    assert len(all_stopped) == 2
+    assert set(all_stopped.keys()) == {invented.TICKERS[0], invented.TICKERS[1]}
+
+    # Scoped to real: only TICKERS[0]
+    real_stopped = model.stopped_closes(con, account="real")
+    assert len(real_stopped) == 1
+    assert invented.TICKERS[0] in real_stopped
+    assert invented.TICKERS[1] not in real_stopped
+
+    # Scoped to paper: only TICKERS[1]
+    paper_stopped = model.stopped_closes(con, account="paper")
+    assert len(paper_stopped) == 1
+    assert invented.TICKERS[1] in paper_stopped
+    assert invented.TICKERS[0] not in paper_stopped

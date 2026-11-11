@@ -7,9 +7,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import invented
 import pytest
 
-from desk import cli, config, rules, store
+from desk import cli, config, integrity, rules, store
 
 FIXTURE = Path(__file__).parent / "fixtures" / "rules_invented.md"
 
@@ -727,3 +728,295 @@ def test_cmd_check_creates_home_directory_so_suggested_cp_works(fresh_desk_home,
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--account", "real", "--currency", "USD"])
     assert rc == 0
+
+
+def test_entered_refuses_unknown_trade_id(fresh_desk_home, capsys):
+    """entered on an unknown trade id should refuse and exit non-zero."""
+    # Create the database first
+    store.create()
+    rc = cli.main(["entered", "unknown-trade", "--entry", "100", "--stop", "95",
+                   "--target", "110", "--size", "10"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "Unknown trade id: unknown-trade" in captured.err
+
+
+def test_entered_refuses_duplicate_entry(fresh_desk_home, capsys):
+    """entered on a trade that already has an entered event should refuse."""
+    # Create the database first
+    store.create()
+    # Create a trade with an entered event
+    con = store.open()
+    store.add_trade_with_event(
+        con,
+        trade_id="test-trade",
+        account="paper",
+        run_id=None,
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+        kind="checked",
+        actor="ing",
+        source="cli",
+        payload={"plan": {}},
+        rules_hash="test-hash",
+        at="2026-01-01T00:00:00Z",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="cli",
+        trade_id="test-trade",
+        payload={
+            "entry": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "size": 10,
+            "horizon": "1w",
+            "setup": "test",
+            "thesis": "test",
+        },
+        at="2026-01-01T01:00:00Z",
+    )
+
+    # Try to enter again
+    rc = cli.main(["entered", "test-trade", "--entry", "101", "--stop", "96",
+                   "--target", "111", "--size", "10"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "already entered on 2026-01-01" in captured.err
+    assert "correction" in captured.err
+
+
+def test_exited_refuses_unknown_trade_id(fresh_desk_home, capsys):
+    """exited on an unknown trade id should refuse and exit non-zero."""
+    store.create()
+    rc = cli.main(["exited", "unknown-trade", "--price", "105", "--size", "10"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "Unknown trade id: unknown-trade" in captured.err
+
+
+def test_exited_refuses_exit_without_entry(fresh_desk_home, capsys):
+    """exited on a trade with no entered event should refuse."""
+    store.create()
+    # Create a trade without an entered event
+    con = store.open()
+    store.add_trade_with_event(
+        con,
+        trade_id="test-trade",
+        account="paper",
+        run_id=None,
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+        kind="checked",
+        actor="ing",
+        source="cli",
+        payload={"plan": {}},
+        rules_hash="test-hash",
+        at="2026-01-01T00:00:00Z",
+    )
+
+    # Try to exit
+    rc = cli.main(["exited", "test-trade", "--price", "105", "--size", "10"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "has no entered event" in captured.err
+
+
+def test_exited_refuses_over_exit(fresh_desk_home, capsys):
+    """exited with size larger than open size should refuse."""
+    store.create()
+    # Create a trade with 10 shares open
+    con = store.open()
+    store.add_trade_with_event(
+        con,
+        trade_id="test-trade",
+        account="paper",
+        run_id=None,
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+        kind="checked",
+        actor="ing",
+        source="cli",
+        payload={"plan": {}},
+        rules_hash="test-hash",
+        at="2026-01-01T00:00:00Z",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="cli",
+        trade_id="test-trade",
+        payload={
+            "entry": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "size": 10,
+            "horizon": "1w",
+            "setup": "test",
+            "thesis": "test",
+        },
+        at="2026-01-01T01:00:00Z",
+    )
+
+    # Try to exit 20 shares (exceeds open size of 10)
+    rc = cli.main(["exited", "test-trade", "--price", "105", "--size", "20"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "cannot exit 20 shares" in captured.err
+    assert "10" in captured.err
+
+
+def test_stop_moved_refuses_without_entry(fresh_desk_home, capsys):
+    """stop-moved on a trade with no entered event should refuse."""
+    store.create()
+    # Create a trade without an entered event
+    con = store.open()
+    store.add_trade_with_event(
+        con,
+        trade_id="test-trade",
+        account="paper",
+        run_id=None,
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+        kind="checked",
+        actor="ing",
+        source="cli",
+        payload={"plan": {}},
+        rules_hash="test-hash",
+        at="2026-01-01T00:00:00Z",
+    )
+
+    # Try to move the stop
+    rc = cli.main(["stop-moved", "test-trade", "--stop", "96"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "has no entered event" in captured.err
+
+
+def test_closed_refuses_when_still_holding_size(fresh_desk_home, capsys):
+    """closed on a trade still holding size should refuse."""
+    store.create()
+    # Create a trade with 10 shares open
+    con = store.open()
+    store.add_trade_with_event(
+        con,
+        trade_id="test-trade",
+        account="paper",
+        run_id=None,
+        ticker=invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side="long",
+        kind="checked",
+        actor="ing",
+        source="cli",
+        payload={"plan": {}},
+        rules_hash="test-hash",
+        at="2026-01-01T00:00:00Z",
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="cli",
+        trade_id="test-trade",
+        payload={
+            "entry": 100.0,
+            "stop": 95.0,
+            "target": 110.0,
+            "size": 10,
+            "horizon": "1w",
+            "setup": "test",
+            "thesis": "test",
+        },
+        at="2026-01-01T01:00:00Z",
+    )
+
+    # Try to close while still holding 10 shares
+    rc = cli.main(["closed", "test-trade"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "still holding" in captured.err
+    assert "10" in captured.err
+
+
+def test_full_recording_loop_passes_integrity(desk_home, capsys):
+    """A realistic sequence: check, entered, partial exit, full exit, closed passes integrity."""
+    # 1. Check a plan
+    rc = cli.main([
+        "check",
+        "--ticker", invented.TICKERS[0],
+        "--side", "long",
+        "--entry", "100",
+        "--stop", "95",
+        "--target", "110",
+        "--size", "100",
+        "--account", "paper",
+        "--currency", "USD",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Extract trade_id from "recorded as <trade-id>"
+    import re
+    match = re.search(r"recorded as ([\w-]+)", captured.err)
+    assert match, f"Could not find trade id in: {captured.err}"
+    trade_id = match.group(1)
+
+    # 2. Enter the trade
+    rc = cli.main([
+        "entered", trade_id,
+        "--entry", "100",
+        "--stop", "95",
+        "--target", "110",
+        "--size", "100",
+    ])
+    assert rc == 0
+
+    # 3. Check a second plan on the same account to verify max_open_trades counts the first
+    rc = cli.main([
+        "check",
+        "--ticker", invented.TICKERS[1],
+        "--side", "long",
+        "--entry", "50",
+        "--stop", "45",
+        "--target", "60",
+        "--size", "50",
+        "--account", "paper",
+        "--currency", "USD",
+    ])
+    assert rc == 0
+    # If max_open_trades is configured, it should now see 1 trade already open
+    # (We're not testing the rule itself here, just that the fold is scoped)
+
+    # 4. Partial exit
+    rc = cli.main(["exited", trade_id, "--price", "105", "--size", "60"])
+    assert rc == 0
+
+    # 5. Exit the rest
+    rc = cli.main(["exited", trade_id, "--price", "108", "--size", "40"])
+    assert rc == 0
+
+    # 6. Close the trade
+    rc = cli.main(["closed", trade_id])
+    assert rc == 0
+
+    # 7. Verify integrity passes
+    con = store.open()
+    violations = integrity.run(con)
+    assert violations == 0, "Integrity check should pass after a full recording loop"

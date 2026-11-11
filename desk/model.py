@@ -5,6 +5,13 @@ everything derives from the append-only log.
 
 ## Payload-key contract (what each event kind carries)
 
+- **checked**: nested structure — `plan` (a Plan dict), `results` (list of Result dicts), `ask`,
+  `sections_used`, `rules_hash`. Unlike every other kind, `checked` is not flat: to reach the
+  entry price you read `payload["plan"]["entry"]`, not `payload["entry"]`. Nesting is deliberate:
+  the fold never reads a `checked` event's payload (the check result is advisory, not a fact about
+  the trade), so flattening it would merge the plan's keys into the event's namespace and risk
+  collision with event-level fields.
+- **imported**: (reserved for plan 2; carries what the importer read)
 - **entered**: `entry`, `stop`, `target`, `size`, `horizon`, `setup`, `thesis`
 - **stop_moved**: `stop`
 - **target_moved**: `target`
@@ -73,6 +80,8 @@ class TradeState:
     # a fold needs them: no_open_trade_in_group needs the ticker, stopped_closes the side.
     ticker: str
     side: str  # long | short
+    account: str
+    run_id: str | None
     status: str  # planned | open | closed | passed
     entry: float | None
     stop: float | None
@@ -195,6 +204,8 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
         trade_id=trade_id,
         ticker=trade_row["ticker"],
         side=side,
+        account=trade_row["account"],
+        run_id=trade_row["run_id"],
         status=status,
         entry=entry,
         stop=stop,
@@ -218,7 +229,12 @@ def _moment(at: str) -> dt.datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=dt.UTC)
 
 
-def stopped_closes(con: sqlite3.Connection) -> dict[str, dt.datetime]:
+def stopped_closes(
+    con: sqlite3.Connection,
+    *,
+    account: str | None = None,
+    run_id: str | None = None,
+) -> dict[str, dt.datetime]:
     """Ticker -> when the most recent trade stopped out on that ticker closed.
 
     Derived state, so it folds the log here rather than in a consumer: it feeds
@@ -240,10 +256,19 @@ def stopped_closes(con: sqlite3.Connection) -> dict[str, dt.datetime]:
     An empty dict means the log was read and holds no stop. That is a different answer from
     "not supplied", which the caller says by passing None, and the two must not be confused:
     one lets a trade through, the other withholds the figure.
+
+    With account=None, returns stops from all accounts; with account given, only that account's
+    stops. When run_id is also given, narrows to that run: a run is a bounded block of trading,
+    so run 3's cooldowns count only run 3's stops.
     """
     latest: dict[str, dt.datetime] = {}
     for trade_id in store.trade_ids(con):
         state = state_of(con, trade_id)
+        # Filter by account and run_id
+        if account is not None and state.account != account:
+            continue
+        if run_id is not None and state.run_id != run_id:
+            continue
         if state.status != "closed" or state.stop is None or not state.fills:
             continue
         stopped = [f for f in state.fills if _signed(state.side, f.price, state.stop) >= 0]
@@ -259,8 +284,18 @@ def stopped_closes(con: sqlite3.Connection) -> dict[str, dt.datetime]:
     return latest
 
 
-def open_trades(con: sqlite3.Connection) -> list[TradeState]:
-    """Return all trades with status 'open'."""
+def open_trades(
+    con: sqlite3.Connection,
+    *,
+    account: str | None = None,
+    run_id: str | None = None,
+) -> list[TradeState]:
+    """Return all trades with status 'open'.
+
+    With account=None, returns open trades from all accounts; with account given, only that
+    account's trades. When run_id is also given, narrows to that run: a run is a bounded block
+    of trading, so run 3's max_open_trades counts only run 3's trades.
+    """
     # Get all trade IDs
     trade_ids = store.trade_ids(con)
 
@@ -268,4 +303,6 @@ def open_trades(con: sqlite3.Connection) -> list[TradeState]:
     return [
         state for state in (state_of(con, trade_id) for trade_id in trade_ids)
         if state.status == "open"
+        and (account is None or state.account == account)
+        and (run_id is None or state.run_id == run_id)
     ]
