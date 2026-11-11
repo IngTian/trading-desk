@@ -7,7 +7,7 @@ CREATE TABLE events (
     id         INTEGER PRIMARY KEY,
     at         TEXT NOT NULL,              -- ISO-8601 with a UTC offset
     actor      TEXT NOT NULL CHECK (actor  IN ('ing','tracker','import')),
-    source     TEXT NOT NULL CHECK (source IN ('chat','export','yahoo')),
+    source     TEXT NOT NULL CHECK (source IN ('chat','cli','export','yahoo')),
     kind       TEXT NOT NULL CHECK (kind   IN ('checked','imported','passed','entered',
                  'stop_moved','target_moved','exit_proposed','exited','note','closed',
                  'labelled','corrected','session_started','session_ended',

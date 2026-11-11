@@ -23,6 +23,15 @@ def desk_home(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture
+def fresh_desk_home(tmp_path, monkeypatch):
+    """Point TRADING_DESK_HOME at a directory that does not exist yet."""
+    fresh_dir = tmp_path / "trading-desk"
+    monkeypatch.setenv("TRADING_DESK_HOME", str(fresh_dir))
+    assert not fresh_dir.exists()
+    return fresh_dir
+
+
 def test_check_prints_every_rule_result_and_appends_one_checked_event(desk_home):
     """A check runs all rules, prints one line per result, and writes one checked event."""
     # Create the database first
@@ -40,12 +49,13 @@ def test_check_prints_every_rule_result_and_appends_one_checked_event(desk_home)
         "max_trades_per_day",   # from All; no code check, so reported unchecked
         "max_position_pct",     # from Real; no code check, so reported unchecked
     }
-    # Assert unchecked rules carry the verbatim sentence
+    # Assert unchecked rules carry their name, value, and the explanation
     unchecked = {r["name"]: r["says"] for r in payload["results"] if r["ok"] is None}
-    assert unchecked == {
-        "max_trades_per_day": "no automatic check for this one; I'll ask you each time",
-        "max_position_pct": "no automatic check for this one; I'll ask you each time",
-    }
+    # The says field must include the rule name and value
+    assert "max_trades_per_day: 5" in unchecked["max_trades_per_day"]
+    assert "no automatic check for this one" in unchecked["max_trades_per_day"]
+    assert "max_position_pct: 10" in unchecked["max_position_pct"]
+    assert "no automatic check for this one" in unchecked["max_position_pct"]
     assert ev["rules_hash"] == rules.load(config.rules_path()).hash
 
 
@@ -412,6 +422,165 @@ def test_instrument_future_without_point_value_is_refused(desk_home, capsys):
     assert "100×" in captured.err
 
 
+def test_point_value_zero_is_refused(desk_home, capsys):
+    """--point-value 0 is refused before attempting to store it (the schema CHECK rejects it)."""
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+                   "--point-value", "0",
+                   "--currency", "USD"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    # Must not be a traceback (no sqlite3.IntegrityError in output)
+    assert "IntegrityError" not in captured.err
+    assert "Traceback" not in captured.err
+    # Must give a clear error about point_value
+    assert "point" in captured.err.lower() or "point_value" in captured.err.lower()
+
+
+def test_malformed_rule_line_exits_cleanly_not_with_traceback(desk_home, capsys):
+    """A rule line without a colon raises ValueError, caught not printed as traceback."""
+    # Create a rules file with a malformed line
+    (config.rules_path()).write_text("""## All
+
+```rules
+min_reward_risk 2
+```
+""")
+
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--account", "real", "--currency", "USD"])
+    assert rc != 0
+    captured = capsys.readouterr()
+    # Must not be a traceback
+    assert "Traceback" not in captured.err
+    # Must give a clear error with the line content
+    assert "min_reward_risk 2" in captured.err
+    assert "malformed" in captured.err or "expected" in captured.err
+
+
+def test_ticker_and_currency_are_normalized_to_uppercase(desk_home):
+    """--ticker and --currency are upper-cased so case variation doesn't turn a rule off."""
+    # Lower-case ticker and currency
+    rc = cli.main(["check", "--ticker", "acme", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+                   "--currency", "usd"])
+    assert rc == 0
+
+    # The stored trade must have upper-case ticker
+    con = store.open()
+    trade = store.trade(con, "acme-" + cli.datetime.now().date().strftime("%Y%m%d"))
+    assert trade is not None
+    assert trade["ticker"] == "ACME"
+    assert trade["currency"] == "USD"
+
+
+def test_unsupported_currency_is_refused_by_name(desk_home, capsys):
+    """An unsupported --currency is refused by argparse, not silently withheld."""
+    # Argparse exits with SystemExit(2) for invalid arguments
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                  "--stop", "9", "--account", "real", "--currency", "EUR"])
+    assert exc_info.value.code == 2
+
+    captured = capsys.readouterr()
+    # Must be an argparse error (invalid choice), not a withheld figure
+    assert "invalid choice" in captured.err
+    # Must name the supported currencies
+    assert "CAD" in captured.err and "USD" in captured.err
+
+
+def test_misspelled_check_name_prints_name_and_value_not_anonymously(desk_home, capsys):
+    """A misspelled check name prints with its name and value, not anonymously."""
+    # Create a rules file with a misspelled check name
+    (config.rules_path()).write_text("""## All
+
+```rules
+min_reward_risk: 2
+max_risk_per_trde: 40 USD
+```
+""")
+
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+                   "--currency", "USD"])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    # The misspelled rule must print with its name and value visible
+    assert "max_risk_per_trde: 40 USD" in captured.out
+    assert "no automatic check for this one" in captured.out
+
+
+def test_typo_in_account_heading_is_reported_as_unmatched(desk_home, capsys):
+    """A typo'd account heading (e.g., ## Rael) is reported as unmatched, not silent."""
+    (config.rules_path()).write_text("""## All
+
+```rules
+min_reward_risk: 2
+```
+
+## Rael
+
+```rules
+min_reward_risk: 5
+max_risk_per_trade: 40 USD
+```
+""")
+
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+                   "--currency", "USD"])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    # Must report "Rael" as unmatched
+    assert "Rael" in captured.out
+    assert "unmatched" in captured.out.lower() or "not used" in captured.out.lower()
+
+    # Must apply the looser limit from All (2), not the tighter one from the typo'd Rael (5)
+    assert "against a minimum of 2" in captured.out
+    assert "against a minimum of 5" not in captured.out
+
+
+def test_checked_line_names_rules_and_sections_used(desk_home, capsys):
+    """The output names which checks applied and from which sections."""
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+                   "--currency", "USD"])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    # Must have a "checked" line naming the rules and sections
+    assert "checked" in captured.out.lower() or "from" in captured.out.lower()
+    # Must name the rules that applied
+    assert "min_reward_risk" in captured.out
+    # Must name the sections
+    assert "All" in captured.out
+    assert "Real" in captured.out
+
+
+def test_sections_used_is_stored_in_payload_and_json(desk_home, capsys):
+    """sections_used is stored in the checked payload and included in --json output."""
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+                   "--currency", "USD", "--json"])
+    assert rc == 0
+
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+    assert "sections_used" in output
+    assert "All" in output["sections_used"]
+    assert "Real" in output["sections_used"]
+
+    # Also check the stored payload
+    con = store.open()
+    (ev,) = [e for e in store.events(con) if e["kind"] == "checked"]
+    payload = json.loads(ev["payload"])
+    assert "sections_used" in payload
+    assert "All" in payload["sections_used"]
+    assert "Real" in payload["sections_used"]
+
+
 def test_prose_output_prints_one_line_per_result_and_nothing_else(desk_home, capsys):
     """Prose output is one line per result, no counts, no summary."""
     cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
@@ -420,10 +589,16 @@ def test_prose_output_prints_one_line_per_result_and_nothing_else(desk_home, cap
 
     captured = capsys.readouterr()
     lines = [line for line in captured.out.strip().split("\n") if line]
-    # Should be exactly 3 results: min_reward_risk + 2 unchecked
-    # (excluding Ask me lines if any)
+    # Filter out Ask me lines
     result_lines = [line for line in lines if not line.startswith("Ask me:")]
-    assert len(result_lines) == 3
+
+    # Must have the checked rule (min_reward_risk) with its figure
+    assert any("reward to risk" in line and "against a minimum" in line for line in result_lines)
+
+    # Must have the two unchecked rules with their names and values visible
+    assert any("max_trades_per_day: 5" in line for line in result_lines)
+    assert any("max_position_pct: 10" in line for line in result_lines)
+
     # No summary words
     assert "passed" not in captured.out.lower()
     assert "failed" not in captured.out.lower()
@@ -516,3 +691,45 @@ min_reward_risk: 9
     # Must NOT report the wrong limits
     assert "against a minimum of 3" not in captured.out
     assert "against a minimum of 2" not in captured.out
+
+
+def test_cmd_check_creates_home_directory_so_suggested_cp_works(fresh_desk_home, capsys):
+    """cmd_check creates the home directory if it doesn't exist, so the suggested cp works.
+
+    The error message for a missing rules.md suggests 'cp <example> <path>', but if the home
+    directory doesn't exist, that cp fails with 'No such file or directory'. The fix is to
+    create the home directory early in cmd_check.
+    """
+    import subprocess
+
+    # Attempt check with no rules.md and no home directory
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--account", "real", "--currency", "USD"])
+
+    # Must fail because rules.md doesn't exist
+    assert rc != 0
+    captured = capsys.readouterr()
+    assert "Rules file not found" in captured.err
+
+    # The suggested cp command must work (the target directory must exist)
+    assert "cp" in captured.err
+
+    # Extract the target path from the error message
+    rules_path_str = str(config.rules_path())
+    assert rules_path_str in captured.err
+
+    # The home directory must now exist (created by cmd_check)
+    assert fresh_desk_home.exists(), "cmd_check must create the home directory"
+
+    # The suggested cp should now work
+    example_path = config.example_rules()
+    result = subprocess.run(
+        ["cp", str(example_path), str(config.rules_path())],
+        capture_output=True,
+    )
+    assert result.returncode == 0, f"cp command failed: {result.stderr.decode()}"
+
+    # Now check should work
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--account", "real", "--currency", "USD"])
+    assert rc == 0

@@ -230,3 +230,19 @@ def test_add_trade_with_event_is_atomic(tmp_path):
     # Verify no trade row was created (atomicity: both or neither)
     trade_ids = store.trade_ids(con)
     assert trade_ids == [], f"Expected no trades, found {trade_ids}"
+
+
+def test_cli_is_a_valid_event_source(con):
+    """'cli' is in store.SOURCES and accepted by the schema CHECK."""
+    assert "cli" in store.SOURCES
+    # The schema CHECK must accept it
+    eid = store.append(
+        con,
+        kind="checked",
+        actor="ing",
+        source="cli",
+        trade_id=T,
+        payload={"entry": 10.0},
+    )
+    row = con.execute("SELECT * FROM events WHERE id = ?", (eid,)).fetchone()
+    assert row["source"] == "cli"

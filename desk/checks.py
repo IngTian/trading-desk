@@ -581,11 +581,12 @@ def run_checks(plan: Plan, rules: Rules, ctx: Context) -> list[Result]:
         if name in rules.numbers
     ]
     # A name in the file that this module does not implement is asked, never dropped silently,
-    # and its Result carries the value as written so the desk can quote the rule back.
+    # and its Result carries the value as written so the desk can quote the rule back. The says
+    # field includes both the rule name and value so a misspelling is visible on the line.
     # rules.unchecked already holds them when for_scope was given CHECK_NAMES; the second half
     # catches a caller that passed a wider `known` set.
     asked = {**rules.unchecked,
              **{n: v for n, v in rules.numbers.items() if n not in _CHECKS}}
-    results.extend(Result(name, None, None, value, ASKED, None)
+    results.extend(Result(name, None, None, value, f"{name}: {value} — {ASKED}", None)
                    for name, value in asked.items())
     return results

@@ -480,7 +480,9 @@ FULL_CTX = checks.Context(
 def test_an_unchecked_rule_is_asked_never_estimated():
     r = one(checks.run_checks(PLAN, rules_with(unchecked={"feels_right": "strongly"}), CTX))
     assert r.name == "feels_right" and r.ok is None and r.figure is None
-    assert r.says == "no automatic check for this one; I'll ask you each time"
+    # The says field includes the rule name and value so a misspelling is visible
+    expected = "feels_right: strongly — no automatic check for this one; I'll ask you each time"
+    assert r.says == expected
     assert r.limit == "strongly", "the value is carried so the desk can quote the rule back"
 
 

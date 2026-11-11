@@ -14,7 +14,7 @@ from desk import config
 
 # The tuples the CHECKs use, exported so tests and later tasks do not re-declare them.
 ACTORS = ("ing", "tracker", "import")
-SOURCES = ("chat", "export", "yahoo")
+SOURCES = ("chat", "cli", "export", "yahoo")
 KINDS = (
     "checked",
     "imported",

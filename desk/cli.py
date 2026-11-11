@@ -41,15 +41,30 @@ def cmd_check(args: argparse.Namespace) -> int:
     now_utc = datetime.now(UTC)
     local_date = datetime.now().date().strftime("%Y%m%d")
 
+    # Create the home directory if it doesn't exist, so the error message's suggested
+    # 'cp <example> <rules_path>' works without failing on 'No such file or directory'.
+    config.home().mkdir(parents=True, exist_ok=True)
+
     # Normalize run_id early
     if args.run:
         args.run = rules.normalize_run_id(args.run)
+
+    # Normalize ticker to upper-case at the boundary, so case variation in arguments doesn't
+    # turn a rule off. Two of three string comparisons in checks.py already normalize; the
+    # group-membership check does not, which is why --ticker acme silently passes a group rule
+    # that should apply. Trade IDs stay lower-case (they're filename slugs). Currency is
+    # normalized and validated by argparse's type function.
+    args.ticker = args.ticker.upper()
 
     # Load rules
     rules_path = config.rules_path()
     try:
         rules_file = rules.load(rules_path)
     except FileNotFoundError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    except ValueError as e:
+        # Malformed rule line (no colon, etc.)
         print(str(e), file=sys.stderr)
         return 1
 
@@ -65,6 +80,15 @@ def cmd_check(args: argparse.Namespace) -> int:
             "--point-value is required when --instrument future: risk is size × stop distance × "
             "point value, so a futures contract at 100 per point makes a 1.5-point stop a 150 risk "
             "rather than 1.5. Defaulting to 1.0 would under-report risk by 100×.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Reject --point-value 0 (the schema CHECK requires point_value > 0)
+    if args.point_value is not None and args.point_value <= 0:
+        print(
+            "--point-value must be positive: a zero or negative point value would make every "
+            "risk calculation wrong. For a stock or ETF, omit --point-value (the default is 1.0).",
             file=sys.stderr,
         )
         return 1
@@ -150,18 +174,30 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     # Print results (prose or JSON)
     if args.json:
-        # JSON output: plan, results, ask items, and rules hash
+        # JSON output: plan, results, ask items, sections_used, and rules hash
         # allow_nan=False is belt-and-braces: checks already withhold rather than dividing by
         # zero, but this ensures an Infinity can never escape as invalid JSON.
         output = {
             "plan": asdict(plan),
             "results": [asdict(r) for r in results],
             "ask": list(scoped_rules.ask),
+            "sections_used": list(scoped_rules.sections_used),
             "rules_hash": rules_file.hash,
         }
         print(json.dumps(output, allow_nan=False))
     else:
-        # Prose output: one line per result, then ask questions
+        # Prose output: first, which rules applied and from which sections
+        rule_names = sorted({r.name for r in results if r.ok is not None})
+        section_names = ", ".join(scoped_rules.sections_used)
+        print(f"checked {', '.join(rule_names)} — from {section_names}")
+
+        # Report any headings that were parsed but not used (typos, duplicates, wrong case)
+        unmatched = sorted(set(rules_file._sections.keys()) - set(scoped_rules.sections_used) -
+                          {"Groups", "Changes"})
+        if unmatched:
+            print(f"unmatched sections (not used for this scope): {', '.join(unmatched)}")
+
+        # Then one line per result
         for result in results:
             print(result.says)
         # The owner's ### Ask me questions, verbatim
@@ -177,13 +213,14 @@ def cmd_check(args: argparse.Namespace) -> int:
         "plan": asdict(plan),
         "results": [asdict(r) for r in results],
         "ask": list(scoped_rules.ask),
+        "sections_used": list(scoped_rules.sections_used),
         "rules_hash": rules_file.hash,
     }
 
     # Write trade row and checked event atomically
-    # source="chat" because the product's loop is chat-driven: the owner chats with an AI about
-    # a trade, the AI suggests a check, and the owner runs it. A CLI invocation is the execution
-    # of that chat-originated decision.
+    # source="cli" because the command originates from the CLI. The product's loop is chat-driven:
+    # the owner chats with an AI about a trade, the AI suggests a check, and the owner runs it via
+    # the CLI. But the event's provenance is the CLI invocation, not the chat itself.
     store.add_trade_with_event(
         con,
         trade_id=trade_id,
@@ -196,7 +233,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         side=args.side,
         kind="checked",
         actor="ing",
-        source="chat",
+        source="cli",
         payload=payload,
         rules_hash=rules_file.hash,
         at=now_utc.isoformat(),
@@ -251,9 +288,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Point value: dollar value per point of price movement (default: 1.0 for stock/etf; "
              "required for futures, e.g. 100 for ES)",
     )
+    def _currency_type(value: str) -> str:
+        """Normalize currency to upper-case, then validate against CURRENCIES."""
+        normalized = value.upper()
+        if normalized not in config.CURRENCIES:
+            raise argparse.ArgumentTypeError(
+                f"invalid choice: {value!r} (choose from {', '.join(config.CURRENCIES)})"
+            )
+        return normalized
+
     check_parser.add_argument(
         "--currency",
         required=True,
+        type=_currency_type,
         help="Currency (e.g., USD, CAD)",
     )
     check_parser.add_argument(
