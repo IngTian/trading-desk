@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from desk import config
+
 
 def normalize_run_id(run_id: str) -> str:
     """Normalize run ID to run-N format: "2" -> "run-2", "run-2" -> "run-2", "run 2" -> "run-2"."""
@@ -254,6 +256,9 @@ class RulesFile:
 def load(path: Path) -> RulesFile:
     """Load and parse a rules.md file."""
     if not path.exists():
-        raise FileNotFoundError(f"Rules file not found: {path}")
+        raise FileNotFoundError(
+            f"Rules file not found: {path}\n"
+            f"Copy the example to get started: cp {config.example_rules()} {path}"
+        )
     content = path.read_text()
     return RulesFile(path, content)

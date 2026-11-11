@@ -31,9 +31,15 @@ Rules for real-money trades. Stricter limits while building skill.
 entry to target is twice the distance from entry to stop, so if the trade works you gain 2R and if
 it fails you lose 1R.
 
+**A limit's currency must match the trade's**, or the check withholds instead of guessing. This
+version carries no exchange rates, so `max_risk_per_trade: 100 CAD` checked against a USD trade
+reports *"I have no USD to CAD rate, so the risk cannot be stated in the limit's currency"* — and
+because `size: computed` derives from that limit, it withholds too. Write your limits in the
+currency you trade in. If you trade in more than one, give each its own account section.
+
 ```rules
 min_reward_risk: 2.5
-max_risk_per_trade: 100 CAD
+max_risk_per_trade: 100 USD
 size: computed
 max_open_trades: 2
 no_open_trade_in_group: tech
@@ -75,6 +81,20 @@ price bars and will report "cannot compute" until they are available.
 
 - Is this setup worth tracking for later real-money use?
 - What would I do differently with real money on the line?
+
+## Paper — run 2
+
+A numbered run narrows a section further, for a block of paper trading with its own limits. Reach
+it with `--run 2`, and whatever it sets overrides `## Paper`, which in turn overrides `## All`.
+
+```rules
+max_risk_per_trade: 150 USD
+max_open_trades: 3
+```
+
+The heading must read `## Paper — run 2` with an em dash (`—`), matching the account name. If the
+section is missing, `--run 2` **refuses and names the headings it found** rather than quietly
+falling back to `## Paper` — a limit that silently loosens is worse than an error.
 
 ## Replay
 

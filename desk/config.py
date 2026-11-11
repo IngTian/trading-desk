@@ -273,3 +273,17 @@ def schema_sql() -> Path:
     `desk/schema.sql` is a real file on disk either way -- no importlib.resources needed.
     """
     return Path(__file__).resolve().parent / "schema.sql"
+
+
+def example_rules() -> Path:
+    """The worked example rules file a new user copies to start their own. Package-relative.
+
+    PACKAGE-RELATIVE, NOT REPO-RELATIVE, for the same reason as schema_sql(). This file
+    lived in docs/ which is deliberately ignored (for Claude-generated design specs), and
+    force-adding it there was wrong -- it is a shipped artifact, not a doc. Moved to desk/
+    and declared in package-data so an installed copy finds it the same way a checkout does.
+
+    A plain path works for both cases because a wheel is unpacked into site-packages, so
+    `desk/rules.example.md` is a real file on disk either way -- no importlib.resources needed.
+    """
+    return Path(__file__).resolve().parent / "rules.example.md"

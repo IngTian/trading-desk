@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from desk import checks, rules
+from desk import checks, config, rules
 
 FIXTURE = Path(__file__).parent / "fixtures" / "rules_invented.md"
 
@@ -156,6 +156,6 @@ def test_ask_me_ordering_is_scope_composition_order(tmp_path):
 
 
 def test_the_shipped_example_rules_file_parses_and_uses_no_real_figures():
-    example = Path(__file__).parent.parent / "docs" / "rules.example.md"
+    example = config.example_rules()
     r = rules.load(example).for_scope("real", None, checks.CHECK_NAMES)
     assert r.numbers and not r.unchecked, "the example must only use implemented checks"

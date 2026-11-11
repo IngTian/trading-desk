@@ -59,8 +59,13 @@ include = ["desk*"]
 # book. Proven by installing the wheel in a clean venv. Asserted by CI against
 # a real built wheel, because an editable install reads the source tree and so cannot
 # catch a missing declaration.
+#
+# `rules.example.md`: the worked example a new user copies to start their own rules. It
+# lived in docs/ which is deliberately ignored, and force-adding past that was wrong --
+# it is a shipped artifact, not a design doc. Moved to desk/ and declared here so an
+# installed copy can find it.
 [tool.setuptools.package-data]
-"desk" = ["schema.sql"]
+"desk" = ["schema.sql", "rules.example.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
