@@ -97,12 +97,35 @@ def test_check_with_no_rules_file_says_which_path_it_wanted(desk_home):
     assert rc == 1
 
 
-def test_check_json_output_is_valid_json_and_refuses_nan(desk_home):
-    """json.dumps defaults to allow_nan=True and emits Infinity, which is not JSON."""
+def test_check_json_output_is_valid_json_and_refuses_nan(desk_home, capsys):
+    """--json outputs valid JSON with allow_nan=False enforced."""
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+                   "--currency", "USD", "--json"])
+    assert rc == 0
+
+    # Capture and parse JSON output
+    captured = capsys.readouterr()
+    output = json.loads(captured.out)
+
+    # Verify structure
+    assert "plan" in output
+    assert "results" in output
+    assert "rules_hash" in output
+    assert output["plan"]["ticker"] == "ACME"
+    assert {r["name"] for r in output["results"]} == {
+        "min_reward_risk", "max_trades_per_day", "max_position_pct"
+    }
+
+    # Re-serialize with allow_nan=False (would raise TypeError if NaN/Infinity present)
+    json.dumps(output, allow_nan=False)
+
+
+def test_stored_payload_is_valid_json(desk_home):
+    """The event payload stored in the database is also valid JSON."""
     cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
               "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-              "--currency", "USD",
-             ])
+              "--currency", "USD"])
 
     con = store.open()
     (ev,) = [e for e in store.events(con) if e["kind"] == "checked"]
@@ -111,8 +134,8 @@ def test_check_json_output_is_valid_json_and_refuses_nan(desk_home):
     # This must not raise
     payload = json.loads(payload_str)
 
-    # Re-serialize and verify it's still valid (catches NaN/Infinity)
-    json.dumps(payload)  # would raise TypeError if NaN present
+    # Re-serialize with allow_nan=False
+    json.dumps(payload, allow_nan=False)
 
 
 def test_a_misspelled_side_is_refused_rather_than_treated_as_a_short(desk_home):
@@ -246,3 +269,20 @@ def test_integrity_subcommand_runs_all_checks(desk_home):
 
     rc = cli.main(["integrity"])
     assert rc == 0  # Should pass with a clean log
+
+
+def test_trade_id_uses_local_date_not_utc(desk_home):
+    """Trade ID date comes from local time, not UTC (for day-scoped rules)."""
+    from datetime import datetime
+
+    cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+              "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
+              "--currency", "USD"])
+
+    con = store.open()
+    trade_ids = store.trade_ids(con)
+    assert len(trade_ids) == 1
+
+    # The trade ID should contain today's local date
+    local_date = datetime.now().date().strftime("%Y%m%d")
+    assert trade_ids[0] == f"acme-{local_date}"

@@ -6,15 +6,23 @@ becomes a field on Plan or part of Context.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import UTC, datetime
 
 from desk import checks, config, integrity, model, rules, store
 
 
-def _generate_trade_id(ticker: str, now: datetime, existing_ids: list[str]) -> str:
-    """Generate a trade ID: ticker-YYYYMMDD, with -2/-3/... suffixes for collisions."""
-    base = f"{ticker.lower()}-{now:%Y%m%d}"
+def _generate_trade_id(ticker: str, local_date: str, existing_ids: list[str]) -> str:
+    """Generate a trade ID: ticker-YYYYMMDD, with -2/-3/... suffixes for collisions.
+
+    The date is the trader's LOCAL calendar date (not UTC), because "today" in any day-scoped
+    rule means the trader's day. A trade checked on the evening of 2026-11-10 local time gets
+    an id dated 20261110, even if UTC has already rolled over to the 11th. Plan 3 fills in
+    closed_today_r and the session clock; if those reach for UTC, a trade lands in the wrong
+    day's count.
+    """
+    base = f"{ticker.lower()}-{local_date}"
     if base not in existing_ids:
         return base
     suffix = 2
@@ -23,7 +31,7 @@ def _generate_trade_id(ticker: str, now: datetime, existing_ids: list[str]) -> s
     return f"{base}-{suffix}"
 
 
-def _create_run_if_needed(con, run_id: str, now: datetime) -> bool:
+def _create_run_if_needed(con, run_id: str, now_utc: datetime) -> bool:
     """Create a runs row if it doesn't exist. Returns True if created."""
     existing = con.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
     if existing:
@@ -35,7 +43,7 @@ def _create_run_if_needed(con, run_id: str, now: datetime) -> bool:
         INSERT INTO runs (id, kind, started, rules_section)
         VALUES (?, ?, ?, ?)
         """,
-        (run_id, "paper", now.isoformat(), f"Paper — {run_section}"),
+        (run_id, "paper", now_utc.isoformat(), f"Paper — {run_section}"),
     )
     con.commit()
     return True
@@ -43,7 +51,10 @@ def _create_run_if_needed(con, run_id: str, now: datetime) -> bool:
 
 def cmd_check(args: argparse.Namespace) -> int:
     """Run checks on a planned trade and record the event."""
-    now = datetime.now(UTC)
+    # Two clocks: local date for the trade id (because "today" means the trader's day),
+    # UTC timestamp for events.at (for storage and consistent comparisons).
+    now_utc = datetime.now(UTC)
+    local_date = datetime.now().date().strftime("%Y%m%d")
 
     # Load rules
     rules_path = config.rules_path()
@@ -105,19 +116,21 @@ def cmd_check(args: argparse.Namespace) -> int:
     db_path = config.db_path()
     if not db_path.exists():
         store.create()
-        print(f"Created book at {db_path}")
+        if not args.json:
+            print(f"Created book at {db_path}")
 
     con = store.open()
 
     # Create run if needed
     if args.run:
-        run_created = _create_run_if_needed(con, args.run, now)
+        run_created = _create_run_if_needed(con, args.run, now_utc)
         if run_created:
-            print(f"Created run {args.run}")
+            if not args.json:
+                print(f"Created run {args.run}")
 
     # Build context (bars-dependent fields None until plan 3)
     ctx = checks.Context(
-        now=now,
+        now=now_utc,
         open_trades=model.open_trades(con),
         session_started=None,
         closed_today_r=None,
@@ -130,13 +143,50 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Run the checks
     results = checks.run_checks(plan, scoped_rules, ctx)
 
-    # Print results
-    for result in results:
-        print(result.says)
+    # Print results (prose or JSON)
+    if args.json:
+        # JSON output: plan, results, and rules hash
+        # allow_nan=False is belt-and-braces: checks already withhold rather than dividing by
+        # zero, but this ensures an Infinity can never escape as invalid JSON.
+        output = {
+            "plan": {
+                "ticker": plan.ticker,
+                "side": plan.side,
+                "entry": plan.entry,
+                "stop": plan.stop,
+                "target": plan.target,
+                "size": plan.size,
+                "horizon": plan.horizon,
+                "setup": plan.setup,
+                "thesis": plan.thesis,
+                "instrument": plan.instrument,
+                "point_value": plan.point_value,
+                "currency": plan.currency,
+                "account": plan.account,
+                "run_id": plan.run_id,
+            },
+            "results": [
+                {
+                    "name": r.name,
+                    "ok": r.ok,
+                    "figure": r.figure,
+                    "limit": r.limit,
+                    "says": r.says,
+                    "unit": r.unit,
+                }
+                for r in results
+            ],
+            "rules_hash": rules_file.hash,
+        }
+        print(json.dumps(output, allow_nan=False))
+    else:
+        # Prose output: one line per result
+        for result in results:
+            print(result.says)
 
     # Generate trade ID with collision handling
     existing_ids = store.trade_ids(con)
-    trade_id = _generate_trade_id(args.ticker, now, existing_ids)
+    trade_id = _generate_trade_id(args.ticker, local_date, existing_ids)
 
     # Create the trade row
     store.add_trade(
@@ -189,7 +239,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         trade_id=trade_id,
         payload=payload,
         rules_hash=rules_file.hash,
-        at=now.isoformat(),
+        at=now_utc.isoformat(),
     )
 
     return 0
@@ -287,6 +337,11 @@ def main(argv: list[str] | None = None) -> int:
     check_parser.add_argument(
         "--run",
         help="Run ID (e.g., run-1) for paper/replay trades",
+    )
+    check_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON instead of prose",
     )
 
     # integrity subcommand
