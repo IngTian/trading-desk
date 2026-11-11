@@ -69,6 +69,7 @@ class RulesFile:
     def _parse_sections(self) -> dict[str, dict]:
         """Parse all sections from the file."""
         sections: dict[str, dict] = {}
+        section_lines: dict[str, int] = {}  # Track which line each section was defined on
         lines = self.content.split("\n")
         i = 0
 
@@ -77,6 +78,14 @@ class RulesFile:
             # Match section headers: ## Name
             if line.startswith("## "):
                 section_name = line[3:].strip()
+                line_number = i + 1  # Convert to 1-indexed
+                # Check for duplicate section heading
+                if section_name in sections:
+                    raise ValueError(
+                        f"{self.path}:{line_number}: duplicate section {section_name!r} "
+                        f"(already defined at line {section_lines[section_name]})"
+                    )
+                section_lines[section_name] = line_number
                 i += 1
                 section_data = self._parse_section_content(section_name, lines, i)
                 sections[section_name] = section_data
@@ -105,7 +114,17 @@ class RulesFile:
                 break
 
             # Rules fenced block
-            if line.strip() == "```rules":
+            stripped = line.strip()
+            # Detect near-miss fences: if normalizing yields "rules" but it's not exactly
+            # "```rules", it's a typo (e.g., "``` rules" with a space).
+            if stripped.startswith("```") and len(stripped) > 3:
+                info_string = stripped[3:].strip().lower()
+                if info_string == "rules" and stripped != "```rules":
+                    raise ValueError(
+                        f"{self.path}:{end + 1}: malformed rules fence {stripped!r} "
+                        f"(expected '```rules')"
+                    )
+            if stripped == "```rules":
                 in_rules_block = True
                 in_ask_section = False
                 end += 1

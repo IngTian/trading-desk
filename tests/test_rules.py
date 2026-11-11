@@ -159,3 +159,54 @@ def test_the_shipped_example_rules_file_parses_and_uses_no_real_figures():
     example = config.example_rules()
     r = rules.load(example).for_scope("real", None, checks.CHECK_NAMES)
     assert r.numbers and not r.unchecked, "the example must only use implemented checks"
+
+
+def test_mistyped_rules_fence_is_refused_not_silently_accepted(tmp_path):
+    """A fence with a space (``` rules instead of ```rules) is a typo and must be refused."""
+    content = """## Real
+
+``` rules
+min_reward_risk: 5
+```
+"""
+    p = tmp_path / "rules.md"
+    p.write_text(content)
+
+    with pytest.raises(ValueError) as exc_info:
+        rules.load(p)
+
+    # Must name the line number and show the malformed fence
+    err = str(exc_info.value)
+    assert "rules.md" in err or str(p) in err
+    assert "``` rules" in err or "rules" in err.lower()
+    assert "malformed" in err.lower() or "expected" in err.lower()
+    # Must include line number
+    assert any(char.isdigit() for char in err)
+
+
+def test_duplicate_section_heading_is_refused(tmp_path):
+    """Two ## Real headings: the second would overwrite the first, so refuse."""
+    content = """## Real
+
+```rules
+max_risk_per_trade: 40 USD
+```
+
+## Real
+
+```rules
+min_reward_risk: 5
+```
+"""
+    p = tmp_path / "rules.md"
+    p.write_text(content)
+
+    with pytest.raises(ValueError) as exc_info:
+        rules.load(p)
+
+    # Must name both line numbers and the section name
+    err = str(exc_info.value)
+    assert "Real" in err
+    assert "duplicate" in err.lower()
+    # Must include line numbers for both occurrences
+    assert any(char.isdigit() for char in err)

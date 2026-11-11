@@ -369,15 +369,9 @@ def test_run_id_normalization(desk_home):
 
 def test_replay_run_stores_correct_kind_and_section(desk_home):
     """A replay run stores kind='replay' and looks for Replay — ... section."""
-    # Add Replay and Replay — run 1 sections to rules
+    # Add Replay — run 1 section to rules (fixture already has ## Replay)
     rules_file = config.rules_path()
     rules_file.write_text(rules_file.read_text() + """
-## Replay
-
-```rules
-min_reward_risk: 2
-```
-
 ## Replay — run 1
 
 ```rules
