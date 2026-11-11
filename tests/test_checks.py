@@ -42,6 +42,7 @@ def rules_with(groups=None, unchecked=None, **numbers) -> rules.Rules:
         hash="0123456789ab",
         path=FIXTURE,
         sections_used=("All",),
+        sections_wanted=("All",),
         unchecked=dict(unchecked or {}),
     )
 

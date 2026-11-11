@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import asdict
 from datetime import UTC, datetime
 
 from desk import checks, config, integrity, model, rules, store
@@ -31,19 +32,24 @@ def _generate_trade_id(ticker: str, local_date: str, existing_ids: list[str]) ->
     return f"{base}-{suffix}"
 
 
-def _create_run_if_needed(con, run_id: str, now_utc: datetime) -> bool:
-    """Create a runs row if it doesn't exist. Returns True if created."""
+def _create_run_if_needed(con, account: str, run_id: str, now_utc: datetime) -> bool:
+    """Create a runs row if it doesn't exist. Returns True if created.
+
+    run_id is assumed to be already normalized (run-N format).
+    """
     existing = con.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
     if existing:
         return False
-    # Extract the run identifier from run-N format: "run-5" -> "run 5"
-    run_section = run_id.replace("-", " ")  # "run-5" -> "run 5"
+    # Derive kind from account: real is not a run, so this is only called for paper/replay
+    kind = account  # "paper" or "replay"
+    # Build section name using the same function for_scope uses
+    run_section = rules.build_run_section_name(account, run_id)
     con.execute(
         """
         INSERT INTO runs (id, kind, started, rules_section)
         VALUES (?, ?, ?, ?)
         """,
-        (run_id, "paper", now_utc.isoformat(), f"Paper — {run_section}"),
+        (run_id, kind, now_utc.isoformat(), run_section),
     )
     con.commit()
     return True
@@ -56,6 +62,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     now_utc = datetime.now(UTC)
     local_date = datetime.now().date().strftime("%Y%m%d")
 
+    # Normalize run_id early
+    if args.run:
+        args.run = rules.normalize_run_id(args.run)
+
     # Load rules
     rules_path = config.rules_path()
     try:
@@ -65,7 +75,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         return 1
 
     # Check for --run with --account real contradiction
-    if args.run is not None and args.account == "real":
+    if args.run and args.account == "real":
         print("--run cannot be used with --account real (runs are paper or replay constructs)",
               file=sys.stderr)
         return 1
@@ -85,12 +95,18 @@ def cmd_check(args: argparse.Namespace) -> int:
     point_value = args.point_value if args.point_value is not None else 1.0
 
     # Scope the rules
-    scoped_rules = rules_file.for_scope(args.account, args.run, checks.CHECK_NAMES)
+    try:
+        scoped_rules = rules_file.for_scope(args.account, args.run, checks.CHECK_NAMES)
+    except ValueError as e:
+        # Run section does not exist
+        print(str(e), file=sys.stderr)
+        return 1
 
     # Check for empty rules (no sections matched)
     if not scoped_rules.numbers and not scoped_rules.unchecked:
         print(f"The rules file at {rules_path} has no rules for account={args.account} "
-              f"run_id={args.run}. Sections found: {list(rules_file._sections.keys())}",
+              f"run_id={args.run}. Sections wanted: {scoped_rules.sections_wanted}. "
+              f"Sections found: {sorted(rules_file._sections.keys())}",
               file=sys.stderr)
         return 1
 
@@ -115,18 +131,18 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Open or create the database
     db_path = config.db_path()
     if not db_path.exists():
-        store.create()
-        if not args.json:
-            print(f"Created book at {db_path}")
+        store.create(db_path)
+        # Route to stderr so --json stdout stays pure
+        print(f"Created book at {db_path}", file=sys.stderr)
 
     con = store.open()
 
     # Create run if needed
     if args.run:
-        run_created = _create_run_if_needed(con, args.run, now_utc)
+        run_created = _create_run_if_needed(con, args.account, args.run, now_utc)
         if run_created:
-            if not args.json:
-                print(f"Created run {args.run}")
+            # Route to stderr so --json stdout stays pure
+            print(f"Created run {args.run}", file=sys.stderr)
 
     # Build context (bars-dependent fields None until plan 3)
     ctx = checks.Context(
@@ -145,102 +161,70 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     # Print results (prose or JSON)
     if args.json:
-        # JSON output: plan, results, and rules hash
+        # JSON output: plan, results, ask items, and rules hash
         # allow_nan=False is belt-and-braces: checks already withhold rather than dividing by
         # zero, but this ensures an Infinity can never escape as invalid JSON.
         output = {
-            "plan": {
-                "ticker": plan.ticker,
-                "side": plan.side,
-                "entry": plan.entry,
-                "stop": plan.stop,
-                "target": plan.target,
-                "size": plan.size,
-                "horizon": plan.horizon,
-                "setup": plan.setup,
-                "thesis": plan.thesis,
-                "instrument": plan.instrument,
-                "point_value": plan.point_value,
-                "currency": plan.currency,
-                "account": plan.account,
-                "run_id": plan.run_id,
-            },
-            "results": [
-                {
-                    "name": r.name,
-                    "ok": r.ok,
-                    "figure": r.figure,
-                    "limit": r.limit,
-                    "says": r.says,
-                    "unit": r.unit,
-                }
-                for r in results
-            ],
+            "plan": asdict(plan),
+            "results": [asdict(r) for r in results],
+            "ask": list(scoped_rules.ask),
             "rules_hash": rules_file.hash,
         }
         print(json.dumps(output, allow_nan=False))
     else:
-        # Prose output: one line per result
+        # Prose output: one line per result, then ask questions
         for result in results:
             print(result.says)
+        # The owner's ### Ask me questions, verbatim
+        for question in scoped_rules.ask:
+            print(f"Ask me: {question}")
 
     # Generate trade ID with collision handling
     existing_ids = store.trade_ids(con)
     trade_id = _generate_trade_id(args.ticker, local_date, existing_ids)
 
-    # Create the trade row
-    store.add_trade(
-        con,
-        trade_id=trade_id,
-        account=args.account,
-        run_id=args.run,
-        ticker=args.ticker,
-        instrument=instrument,
-        point_value=point_value,
-        currency=args.currency,
-        side=args.side,
+    # Write trade row and checked event in ONE transaction to prevent integrity violations.
+    # The brief's ruling requires they be written together because every trade must have a
+    # checked or imported event. Any failure between them would commit the trade and lose
+    # the event, leaving a permanent defect in an append-only log.
+    #
+    # store's own functions commit internally, defeating `with con:`, so we do both INSERTs here.
+    created_at = now_utc.isoformat()
+    con.execute(
+        """
+        INSERT INTO trades (
+            id, account, account_name, run_id, ticker, instrument,
+            point_value, currency, side, created_at
+        )
+        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (trade_id, args.account, args.run, args.ticker, instrument, point_value,
+         args.currency, args.side, created_at),
     )
 
-    # Build the payload with results serialized to dicts
+    # Build the payload with asdict to prevent divergence
     payload = {
-        "plan": {
-            "ticker": plan.ticker,
-            "side": plan.side,
-            "entry": plan.entry,
-            "stop": plan.stop,
-            "target": plan.target,
-            "size": plan.size,
-            "horizon": plan.horizon,
-            "setup": plan.setup,
-            "thesis": plan.thesis,
-            "instrument": plan.instrument,
-            "point_value": plan.point_value,
-            "currency": plan.currency,
-        },
-        "results": [
-            {
-                "name": r.name,
-                "ok": r.ok,
-                "figure": r.figure,
-                "limit": r.limit,
-                "says": r.says,
-                "unit": r.unit,
-            }
-            for r in results
-        ],
+        "plan": asdict(plan),
+        "results": [asdict(r) for r in results],
+        "ask": list(scoped_rules.ask),
+        "rules_hash": rules_file.hash,
     }
 
-    # Append the checked event
-    store.append(
-        con,
-        kind="checked",
-        actor="ing",
-        source="chat",
-        trade_id=trade_id,
-        payload=payload,
-        rules_hash=rules_file.hash,
-        at=now_utc.isoformat(),
+    # Append the checked event in the same transaction
+    # source="chat" because the product's loop is chat-driven: the owner chats with an AI about
+    # a trade, the AI suggests a check, and the owner runs it. A CLI invocation is the execution
+    # of that chat-originated decision.
+    con.execute(
+        """
+        INSERT INTO events (
+            at, actor, source, kind, trade_id, session_id, corrects, rules_hash, payload
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (created_at, "ing", "chat", "checked", trade_id, None, None, rules_file.hash,
+         json.dumps(payload, allow_nan=False)),
     )
+    con.commit()
 
     return 0
 
@@ -288,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         "--point-value",
         type=float,
         default=None,
-        help="Point value (default: 1.0 for stock/etf; required for future)",
+        help="Point value: dollar value per point of price movement (default: 1.0 for stock/etf; "
+             "required for futures, e.g. 100 for ES)",
     )
     check_parser.add_argument(
         "--currency",
@@ -299,34 +284,34 @@ def main(argv: list[str] | None = None) -> int:
         "--entry",
         type=float,
         required=True,
-        help="Entry price",
+        help="Entry price: the price you plan to enter at",
     )
     check_parser.add_argument(
         "--stop",
         type=float,
-        help="Stop price (optional)",
+        help="Stop price: where you exit if the trade moves against you (optional but recommended)",
     )
     check_parser.add_argument(
         "--target",
         type=float,
-        help="Target price (optional)",
+        help="Target price: where you exit if the trade works (optional)",
     )
     check_parser.add_argument(
         "--size",
         type=int,
-        help="Position size in shares/contracts (optional)",
+        help="Position size in shares or contracts (optional)",
     )
     check_parser.add_argument(
         "--horizon",
-        help="Time horizon (e.g., 1d, 2w)",
+        help="Time horizon: how long you plan to hold (e.g., 1d, 2w)",
     )
     check_parser.add_argument(
         "--setup",
-        help="Setup name/description",
+        help="Setup: the chart pattern or technical condition (e.g., 'breakout', 'pullback')",
     )
     check_parser.add_argument(
         "--thesis",
-        help="Trade thesis",
+        help="Trade thesis: why you believe this trade will work",
     )
     check_parser.add_argument(
         "--account",

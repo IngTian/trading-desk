@@ -100,7 +100,8 @@ def append(
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (at, actor, source, kind, trade_id, session_id, corrects, rules_hash, json.dumps(payload)),
+        (at, actor, source, kind, trade_id, session_id, corrects, rules_hash,
+         json.dumps(payload, allow_nan=False)),
     )
     con.commit()
     if cur.lastrowid is None:

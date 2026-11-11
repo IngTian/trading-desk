@@ -2,8 +2,33 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def normalize_run_id(run_id: str) -> str:
+    """Normalize run ID to run-N format: "2" -> "run-2", "run-2" -> "run-2", "run 2" -> "run-2"."""
+    # Extract number from any format
+    match = re.search(r'\d+', run_id)
+    if not match:
+        # If no number, return as-is (will fail downstream)
+        return run_id
+    return f"run-{match.group()}"
+
+
+def build_run_section_name(account: str, run_id: str) -> str:
+    """Build the section name for a run: "Paper — run 2" for account="paper", run_id="run-2".
+
+    This is the single source of truth for run section names. Both the CLI (when creating runs
+    table rows) and for_scope (when looking up sections) must call this function, because their
+    correctness is defined entirely by the two agreeing.
+    """
+    # Normalize the run_id first
+    normalized = normalize_run_id(run_id)
+    # Build section name: capitalize account, replace hyphens with spaces in run id
+    run_title = normalized.replace("-", " ")  # "run-2" -> "run 2"
+    return f"{account.capitalize()} — {run_title}"
 
 
 @dataclass(frozen=True)
@@ -22,7 +47,8 @@ class Rules:
     changes: tuple[Change, ...]       # changelog
     hash: str                         # file hash (first 12 chars of sha256)
     path: Path                        # source file
-    sections_used: tuple[str, ...]    # composition order
+    sections_used: tuple[str, ...]    # composition order (sections found)
+    sections_wanted: tuple[str, ...]  # sections looked for (for error messages)
     # Rules with no code check, name -> value. The VALUE is kept, not just the name: the desk
     # reports these as "your rules say `feels_right: strongly` -- no automatic check for this
     # one; I'll ask you each time", and it cannot say that from a name alone.
@@ -145,20 +171,33 @@ class RulesFile:
 
         Args:
             account: "real", "paper", or "replay"
-            run_id: Optional run identifier like "run-2" for paper runs
+            run_id: Optional run identifier like "run-2" for paper runs (normalized to run-N)
             known: Set of rule names that have code checks (checks.CHECK_NAMES). A name
                 outside it lands in `unchecked` WITH its value, so the desk can quote the
                 rule back while saying it will ask about it.
+
+        Raises:
+            ValueError: When a run_id is provided but no matching run section exists.
         """
+        # Normalize run_id if provided
+        if run_id:
+            run_id = normalize_run_id(run_id)
+
         # Normalize account name to match section headers
         account_title = account.capitalize()
 
         # Composition order
         section_names = ["All", account_title]
         if run_id:
-            # Format: "Paper — run 2" for run_id="run-2"
-            run_title = run_id.replace("-", " ")
-            section_names.append(f"{account_title} — {run_title}")
+            run_section = build_run_section_name(account, run_id)
+            section_names.append(run_section)
+            # Check that the run section exists
+            if run_section not in self._sections:
+                available = sorted(self._sections.keys())
+                raise ValueError(
+                    f"The rules file at {self.path} has no section {run_section!r} for "
+                    f"run_id={run_id!r}. Sections found: {available}"
+                )
 
         # Merge rules from sections in order
         merged_rules: dict[str, str] = {}
@@ -207,6 +246,7 @@ class RulesFile:
             hash=self.hash,
             path=self.path,
             sections_used=tuple(sections_found),
+            sections_wanted=tuple(section_names),
             unchecked=unchecked_rules,
         )
 
