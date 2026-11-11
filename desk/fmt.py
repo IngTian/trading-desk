@@ -40,7 +40,10 @@ def pct(value: float | None, places: int = 2) -> str:
 
 
 def share(value: float | None, places: int = 1) -> str:
-    """A PROPORTION, so it carries no sign: 1.4%, 89%.
+    """A PROPORTION (percentage), so it carries no sign: 1.4%, 89%.
+
+    NOT a share count (units of stock). This is for portfolio allocation: what percentage
+    of total capital is in this position. For share counts, print the integer plainly.
 
     Separate from pct() because a leading `+` on a portfolio weight reads as a change --
     "+1.4%" looks like the bet grew by 1.4%, when it means the bet IS 1.4% of the book. A

@@ -507,7 +507,7 @@ max_risk_per_trde: 40 USD
 
 
 def test_typo_in_account_heading_is_reported_as_unmatched(desk_home, capsys):
-    """A typo'd account heading (e.g., ## Rael) is reported as unmatched, not silent."""
+    """A typo'd account heading (e.g., ## Rael) is reported as unrecognised, not silent."""
     (config.rules_path()).write_text("""## All
 
 ```rules
@@ -528,9 +528,9 @@ max_risk_per_trade: 40 USD
     assert rc == 0
 
     captured = capsys.readouterr()
-    # Must report "Rael" as unmatched
+    # Must report "Rael" as unrecognised
     assert "Rael" in captured.out
-    assert "unmatched" in captured.out.lower() or "not used" in captured.out.lower()
+    assert "unrecognised" in captured.out
 
     # Must apply the looser limit from All (2), not the tighter one from the typo'd Rael (5)
     assert "against a minimum of 2" in captured.out
@@ -728,6 +728,35 @@ def test_cmd_check_creates_home_directory_so_suggested_cp_works(fresh_desk_home,
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--account", "real", "--currency", "USD"])
     assert rc == 0
+
+
+def test_check_with_clean_rules_prints_no_unrecognised_line(desk_home, capsys):
+    """A rules file with only legitimate sections prints no unrecognised-section line."""
+    # desk_home fixture already loads the example rules file, which has only legitimate sections
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--account", "real", "--currency", "USD"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Should not mention unrecognised or unmatched
+    assert "unrecognised" not in captured.out
+    assert "unmatched" not in captured.out
+
+
+def test_check_with_typo_section_reports_it_as_unrecognised(desk_home, capsys):
+    """A section with a typo (Rael instead of Real) is reported as unrecognised."""
+    # Append a typo section to the rules file
+    rules_path = config.rules_path()
+    with open(rules_path, "a") as f:
+        f.write("\n## Rael\nmax_risk_per_trade: 100 USD\n")
+
+    rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
+                   "--stop", "9", "--account", "real", "--currency", "USD"])
+    assert rc == 0
+    captured = capsys.readouterr()
+    # Should report Rael as unrecognised
+    assert "unrecognised section 'Rael'" in captured.out
+    assert "matches no account or run" in captured.out
+    assert "none of its rules will ever apply" in captured.out
 
 
 def test_entered_refuses_unknown_trade_id(fresh_desk_home, capsys):

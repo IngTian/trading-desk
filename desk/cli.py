@@ -191,11 +191,30 @@ def cmd_check(args: argparse.Namespace) -> int:
         section_names = ", ".join(scoped_rules.sections_used)
         print(f"checked {', '.join(rule_names)} — from {section_names}")
 
-        # Report any headings that were parsed but not used (typos, duplicates, wrong case)
-        unmatched = sorted(set(rules_file._sections.keys()) - set(scoped_rules.sections_used) -
-                          {"Groups", "Changes"})
-        if unmatched:
-            print(f"unmatched sections (not used for this scope): {', '.join(unmatched)}")
+        # Report any sections that match no recognized shape (typos, wrong case)
+        # Recognized: All, Real/Paper/Replay, "<Account> — run <anything>", Groups, Changes
+        def _is_recognized(section_name: str) -> bool:
+            """True if the section name matches a recognized shape."""
+            if section_name in ("All", "Groups", "Changes"):
+                return True
+            if section_name in ("Real", "Paper", "Replay"):
+                return True
+            # Match "<Account> — run <anything>"
+            if " — run " in section_name:
+                account_part = section_name.split(" — run ")[0]
+                if account_part in ("Real", "Paper", "Replay"):
+                    return True
+            return False
+
+        unrecognised = sorted([
+            s for s in rules_file._sections.keys()
+            if not _is_recognized(s)
+        ])
+        for section_name in unrecognised:
+            print(
+                f"unrecognised section '{section_name}': it matches no account or run, "
+                f"so none of its rules will ever apply"
+            )
 
         # Then one line per result
         for result in results:
@@ -256,9 +275,13 @@ def cmd_integrity(args: argparse.Namespace) -> int:
     return integrity.run(con)
 
 
+def _unit_name(instrument: str) -> str:
+    """Return the unit name for an instrument: shares for stock/etf, contracts for futures."""
+    return "contracts" if instrument == "future" else "shares"
+
+
 def cmd_entered(args: argparse.Namespace) -> int:
     """Record an entered event: the trade was actually taken at these terms."""
-    from desk import fmt
     db_path = config.db_path()
     if not db_path.exists():
         print(f"No database at {db_path}", file=sys.stderr)
@@ -309,7 +332,8 @@ def cmd_entered(args: argparse.Namespace) -> int:
 
     # Print the resulting state
     state = model.state_of(con, trade_id)
-    print(f"{trade_id}: {fmt.share(state.size_open, 0)} shares open")
+    unit = _unit_name(trade_row["instrument"])
+    print(f"{trade_id}: {state.size_open} {unit} open")
     return 0
 
 
@@ -340,10 +364,11 @@ def cmd_exited(args: argparse.Namespace) -> int:
         return 1
 
     # Check if exit size exceeds open size
+    unit = _unit_name(trade_row["instrument"])
     if state.size_open is None or args.size > state.size_open:
         print(
-            f"Trade {trade_id}: cannot exit {args.size} shares when only "
-            f"{fmt.share(state.size_open, 0)} are open.",
+            f"Trade {trade_id}: cannot exit {args.size} {unit} when only "
+            f"{state.size_open} are open.",
             file=sys.stderr
         )
         return 1
@@ -368,7 +393,7 @@ def cmd_exited(args: argparse.Namespace) -> int:
     state = model.state_of(con, trade_id)
     parts = [f"{trade_id}:"]
     if state.size_open is not None and state.size_open > 0:
-        parts.append(f"{fmt.share(state.size_open, 0)} shares open")
+        parts.append(f"{state.size_open} {unit} open")
     else:
         # Flat
         parts.append("flat")
@@ -436,7 +461,6 @@ def cmd_stop_moved(args: argparse.Namespace) -> int:
 
 def cmd_closed(args: argparse.Namespace) -> int:
     """Record a closed event: this trade is finished, no longer being tracked."""
-    from desk import fmt
     db_path = config.db_path()
     if not db_path.exists():
         print(f"No database at {db_path}", file=sys.stderr)
@@ -453,9 +477,10 @@ def cmd_closed(args: argparse.Namespace) -> int:
 
     # Check if trade is still holding size
     state = model.state_of(con, trade_id)
+    unit = _unit_name(trade_row["instrument"])
     if state.size_open is not None and state.size_open > 0:
         print(
-            f"Trade {trade_id} still holding {fmt.share(state.size_open, 0)} shares; "
+            f"Trade {trade_id} still holding {state.size_open} {unit}; "
             f"exit them first before closing.",
             file=sys.stderr
         )
