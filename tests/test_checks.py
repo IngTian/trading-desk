@@ -209,6 +209,14 @@ def test_the_size_and_the_risk_checks_cannot_disagree_at_the_boundary():
         assert named(results, "size").ok is inside
         assert named(results, "max_risk_per_trade").ok is inside, "the two must agree"
 
+    # And on a cent grid, where 100 / (90.00 - 89.96) is 2499.9999999996094: 2500 shares risk
+    # exactly the limit, so neither check may call it a breach.
+    cents = plan(entry=90.0, stop=89.96, size=2500)
+    results = checks.run_checks(cents, rs, CTX)
+    assert named(results, "max_risk_per_trade").ok is True
+    assert named(results, "size").ok is True, "flooring float residue would invent a breach"
+    assert checks.suggest_size(rs, cents, CTX) == 2500
+
 
 def test_a_size_is_not_suggested_without_a_risk_rule_to_size_against():
     r = one(checks.run_checks(PLAN, rules_with(size="computed"), CTX))
@@ -255,6 +263,19 @@ def test_a_stop_or_target_on_the_wrong_side_of_the_entry_is_reported():
     assert named(good_side, "target_required").ok is True
 
 
+def test_a_misspelt_stop_required_withholds_rather_than_switching_the_rule_off():
+    """`ture` must not be the thing that turns the stop requirement off. `no` still means no."""
+    stopless = plan(stop=None)
+    for typo in ("ture", "definitely", ""):
+        r = named(checks.run_checks(stopless, rules_with(stop_required=typo), CTX),
+                  "stop_required")
+        assert r.ok is None, f"{typo!r} is neither a yes nor a no"
+        assert repr(typo) in r.says, "the value is quoted back so the owner can fix it"
+
+    off = named(checks.run_checks(stopless, rules_with(stop_required="no"), CTX), "stop_required")
+    assert off.ok is True, "a rule the owner switched off is not a breach"
+
+
 # ----------------------------------------------------------- open trades ---
 def test_max_open_trades_counts_the_stores_open_trades(con):
     empty = checks.Context(now=NOW, open_trades=model.open_trades(con))
@@ -265,7 +286,8 @@ def test_max_open_trades_counts_the_stores_open_trades(con):
     ctx = checks.Context(now=NOW, open_trades=model.open_trades(con))
     r = one(checks.run_checks(PLAN, rules_with(max_open_trades="1"), ctx))
     assert r.figure == pytest.approx(1.0) and r.ok is False
-    assert "1" in r.says
+    # The sentence must support the breach: "1 open against a limit of 1" would not.
+    assert "this would make 2" in r.says and "limit of 1" in r.says
 
 
 def test_a_fully_exited_trade_with_no_close_event_is_not_counted_as_open(con):
@@ -359,6 +381,19 @@ def test_max_session_length_measures_from_the_session_start():
     under = checks.Context(now=NOW, session_started=NOW - dt.timedelta(minutes=30))
     assert one(checks.run_checks(PLAN, rs, under)).ok is True
     assert one(checks.run_checks(PLAN, rs, CTX)).ok is None, "no session is not a pass"
+
+
+def test_a_clock_that_disagrees_with_itself_is_withheld_not_passed():
+    """Negative elapsed time is nonsense in either direction: neither a pass nor a breach."""
+    ahead = checks.Context(
+        now=NOW,
+        session_started=NOW + dt.timedelta(hours=1),
+        stopped_closes={TICKER: NOW + dt.timedelta(hours=1)},
+    )
+    rs = rules_with(max_session_length="2h", cooldown_after_stop="1 day, same ticker")
+    for r in checks.run_checks(PLAN, rs, ahead):
+        assert r.ok is None, f"{r.name} must not read a figure off a skewed clock"
+        assert "in the future" in r.says and "clocks disagree" in r.says
 
 
 def test_daily_loss_limit_sums_todays_closed_r():

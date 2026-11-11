@@ -92,6 +92,10 @@ _HOURS = {
     "w": 168.0, "week": 168.0, "weeks": 168.0,
 }
 _YES = {"yes", "y", "true", "1", "required", "on"}
+# A value in neither vocabulary is withheld, never read as a no: `stop_required: ture` must not
+# be the thing that turns the stop requirement off. In this codebase a typo has twice failed
+# open, and this is the check whose whole job is to notice a missing stop.
+_NO = {"no", "n", "false", "0", "off", "optional"}
 
 
 def _number(value: str) -> float | None:
@@ -114,8 +118,10 @@ def _hours(value: str) -> float | None:
     return float(found.group(1)) * _HOURS[found.group(2).lower()]
 
 
-def _yes(value: str) -> bool:
-    return value.strip().lower() in _YES
+def _yes(value: str) -> bool | None:
+    """True, False, or None when the value reads as neither -- which is not a no."""
+    word = value.strip().lower()
+    return True if word in _YES else False if word in _NO else None
 
 
 def _withheld(name: str, value: str, says: str, unit: str | None = None) -> Result:
@@ -284,8 +290,11 @@ def _suggest(rules: Rules, plan: Plan, ctx: Context) -> tuple[int | None, str]:
     if each is None:
         return None, (f"I have no {plan.currency} to {currency} rate, so the budget cannot be "
                       f"applied to this trade's prices")
-    # Rounded down: rounding up would exceed the limit by part of one unit.
-    return math.floor(budget / each), ""
+    # Rounded down, because rounding up would exceed the limit by part of one unit -- but
+    # through _at first, or the floor turns float residue into a false breach: 100 over a
+    # 90.00/89.96 stop divides to 2499.9999999996094, and flooring that raw reports 2499
+    # allowed on a trade whose 2500 shares risk exactly the limit.
+    return math.floor(_at(budget / each)), ""
 
 
 def suggest_size(rules: Rules, plan: Plan, ctx: Context) -> int | None:
@@ -320,7 +329,13 @@ def size(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
 def _order_required(name: str, plan: Plan, value: str, price: float | None, reward: bool) -> Result:
     """stop_required and target_required: present, and on the right side of the entry."""
     word = "target" if reward else "stop"
-    if not _yes(value):
+    required = _yes(value)
+    if required is None:
+        return _withheld(
+            name, value,
+            f"I could not read {value!r} as a yes or a no, so I cannot tell whether a {word} "
+            f"is required")
+    if not required:
         return Result(name, True, None, value, f"the rules do not require a {word} ({value})", None)
     if price is None:
         return Result(name, False, None, value, f"the plan has no {word}", None)
@@ -383,9 +398,12 @@ def max_open_trades(plan: Plan, value: str, ctx: Context, rules: Rules) -> Resul
     if why:
         return _withheld("max_open_trades", value, why, "trades")
     count = len(holding)
+    # The sentence states the figure the limit is compared against -- the book WITH this trade
+    # on it -- or "1 open against a limit of 1" would read as a pass beside ok=False.
     return Result(
         "max_open_trades", count + 1 <= limit, float(count), value,
-        f"{_units(count, 'trades')} already open against a limit of {value}", "trades")
+        f"{_units(count, 'trades')} already open; this would make {count + 1} against a limit "
+        f"of {value}", "trades")
 
 
 def no_open_trade_in_group(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
@@ -442,6 +460,12 @@ def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> R
             "cooldown_after_stop", value,
             "the time now and the last stop's close cannot be compared: one carries a time "
             "zone and the other does not", "h")
+    if elapsed < 0:
+        # Nonsense in either direction: a breach would be as wrong as a pass.
+        return _withheld(
+            "cooldown_after_stop", value,
+            f"the last stop{scope} closed {abs(elapsed):.1f} h in the future, so the clocks "
+            f"disagree and the cooldown cannot be measured", "h")
     return Result(
         "cooldown_after_stop", _at(elapsed, 1) >= hours, elapsed, value,
         f"the last stop{scope} closed {elapsed:.1f} h ago against a cooldown of {value}", "h")
@@ -462,6 +486,13 @@ def max_session_length(plan: Plan, value: str, ctx: Context, rules: Rules) -> Re
             "max_session_length", value,
             "the time now and the session's start cannot be compared: one carries a time zone "
             "and the other does not", "h")
+    if elapsed < 0:
+        # A session that has not started yet has no length; "-1.0 h against a limit of 2h" was
+        # passing, which is a figure no clock can produce.
+        return _withheld(
+            "max_session_length", value,
+            f"the session's start is {abs(elapsed):.1f} h in the future, so the clocks "
+            f"disagree and the session's length cannot be measured", "h")
     return Result(
         "max_session_length", _at(elapsed, 1) <= hours, elapsed, value,
         f"the session has run {elapsed:.1f} h against a limit of {value}", "h")

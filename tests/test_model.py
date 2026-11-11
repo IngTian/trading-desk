@@ -46,6 +46,11 @@ def _exit(con, trade_id, price, at, *, size=10):
                  payload={"price": price, "size": size}, at=at.isoformat())
 
 
+def _close(con, trade_id, at):
+    store.append(con, kind="closed", actor="ing", source="chat", trade_id=trade_id,
+                 payload={}, at=at.isoformat())
+
+
 @pytest.fixture
 def con(tmp_path):
     """A fresh database for each test."""
@@ -407,10 +412,23 @@ def test_a_stop_fill_dates_the_cooldown_from_the_trades_close(con):
     _trade(con, "trade-a")
     _exit(con, "trade-a", 95.0, STOPPED_AT)
     closed_at = STOPPED_AT + dt.timedelta(minutes=10)
-    store.append(con, kind="closed", actor="ing", source="chat", trade_id="trade-a",
-                 payload={}, at=closed_at.isoformat())
+    _close(con, "trade-a", closed_at)
 
     assert model.stopped_closes(con) == {invented.TICKERS[0]: closed_at}
+
+
+def test_a_trade_still_open_through_its_stop_is_not_a_stopped_close(con):
+    """The rule measures from a CLOSE, and a partial fill through the stop is not one."""
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 94.0, STOPPED_AT, size=4)  # 6 of 10 still open
+
+    state = model.state_of(con, "trade-a")
+    assert state.status == "open" and state.size_open == 6
+    assert model.stopped_closes(con) == {}, "a trade in progress starts no cooldown"
+
+    # It counts once it is closed.
+    _close(con, "trade-a", STOPPED_AT)
+    assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}
 
 
 def test_a_trade_that_hit_its_target_is_not_a_stop(con):
@@ -426,19 +444,23 @@ def test_a_short_stops_out_above_its_stop_not_below(con):
     """The side decides which way a stop is breached, so _signed does it here too."""
     _trade(con, "trade-a", side="short", stop=105.0)
     _exit(con, "trade-a", 106.0, STOPPED_AT)
-    # No `closed` event: the stopping fill's own time stands in, so the stop is not invisible.
+    _close(con, "trade-a", STOPPED_AT)
     assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}
 
     # The same fill on a long would be a profit, not a stop.
     _trade(con, "trade-b", ticker=invented.TICKERS[1])
     _exit(con, "trade-b", 106.0, STOPPED_AT)
+    _close(con, "trade-b", STOPPED_AT)
     assert invented.TICKERS[1] not in model.stopped_closes(con)
 
 
 def test_the_most_recent_stop_on_a_ticker_is_the_one_that_counts(con):
+    earlier = STOPPED_AT - dt.timedelta(days=2)
     _trade(con, "trade-a")
-    _exit(con, "trade-a", 94.0, STOPPED_AT - dt.timedelta(days=2))
+    _exit(con, "trade-a", 94.0, earlier)
+    _close(con, "trade-a", earlier)
     _trade(con, "trade-b")
     _exit(con, "trade-b", 95.0, STOPPED_AT)
+    _close(con, "trade-b", STOPPED_AT)
 
     assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}

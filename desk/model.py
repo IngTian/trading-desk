@@ -229,9 +229,13 @@ def stopped_closes(con: sqlite3.Connection) -> dict[str, dt.datetime]:
     above it. The stop is the one the fold ends with, which is the stop as it stood when the
     trade finished.
 
-    WHICH TIME: the `closed` event's, since a cooldown runs from the trade's close; and when
-    there is no `closed` event yet, the stopping fill's own time, so a stop nobody has written
-    up still starts the clock instead of being invisible.
+    ONLY CLOSED TRADES COUNT. The rule is "time since the last stopped trade's close", so a
+    trade that is still open cannot be one -- and a partial fill through the stop on a trade
+    still holding shares is not a stop-out, it is a trade in progress.
+
+    WHICH TIME: the `closed` event's, which is what "close" means here. A stopped trade nobody
+    has closed yet therefore starts no cooldown; the fix is to close it, and the integrity
+    checker is where an unclosed empty trade belongs.
 
     An empty dict means the log was read and holds no stop. That is a different answer from
     "not supplied", which the caller says by passing None, and the two must not be confused:
@@ -240,14 +244,14 @@ def stopped_closes(con: sqlite3.Connection) -> dict[str, dt.datetime]:
     latest: dict[str, dt.datetime] = {}
     for trade_id in store.trade_ids(con):
         state = state_of(con, trade_id)
-        if state.stop is None or not state.fills:
+        if state.status != "closed" or state.stop is None or not state.fills:
             continue
         stopped = [f for f in state.fills if _signed(state.side, f.price, state.stop) >= 0]
         if not stopped:
             continue
         times = {e["id"]: e["at"] for e in store.events(con, trade_id=trade_id)}
-        at = times.get(state.closed_at) or times.get(stopped[-1].event_id)
-        if at is None:
+        at = times.get(state.closed_at)
+        if at is None:  # a closed status always carries one; a corrupt log might not
             continue
         moment = _moment(at)
         if state.ticker not in latest or moment > latest[state.ticker]:
