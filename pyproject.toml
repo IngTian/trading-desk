@@ -9,14 +9,21 @@ build-backend = "setuptools.build_meta"
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
 version = "0.4.0"
-description = "A trading book in the terminal: SQLite, a Textual TUI, and a checker that will not let the record contradict itself"
+description = "Check a trade against your own written rules before you click, and record what you actually did: an append-only log in SQLite"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["tui", "terminal", "textual", "trading", "portfolio", "bookkeeping",
-            "sqlite", "mcp"]
-dependencies = ["textual>=8.2,<9"]
+keywords = ["trading", "rules", "risk", "sqlite", "event-sourcing", "cli", "mcp"]
+# No runtime dependencies, and that is a property worth keeping. Every import under `desk/`
+# is standard library — `sqlite3`, `argparse`, `tomllib`, `dataclasses`, `datetime`, `json`,
+# `hashlib`, `math`, `re` — so `pip install trading-desk` pulls nothing else in.
+#
+# `textual>=8.2,<9` was here until 2026-11-11 and nothing under `desk/` imported it: the TUI
+# it supported was deleted with the rest of the portfolio-era surface. The only remaining
+# importer was `tools/screenshots.py`, which also imported `desk.book` and `desk.tui.app` and
+# so could not run at all; it was deleted with the dependency.
+dependencies = []
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
