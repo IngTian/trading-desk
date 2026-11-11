@@ -198,6 +198,65 @@ def test_a_healthy_log_returns_zero(con):
     assert result == 0, "A healthy log should return 0"
 
 
+def test_a_corrected_check_after_entry_is_clean(con):
+    """A check corrected after entry does not fire event_before_trade_started.
+
+    Log: checked(1), entered(2), checked(3, corrects=1). The entry at event 2
+    came after the original check at 1, so the ordering is fine. The fact that
+    check 1 was later corrected doesn't change when the trade began.
+    """
+    _trade(con, invented.TEST_TRADE_ID)
+    check_id = _checked(con, invented.TEST_TRADE_ID)
+    _enter(con, invented.TEST_TRADE_ID)
+    # Append a corrected check
+    store.append(
+        con,
+        kind="checked",
+        actor="ing",
+        source="chat",
+        trade_id=invented.TEST_TRADE_ID,
+        corrects=check_id,
+        payload={},
+    )
+
+    result = integrity.run(con)
+    assert result == 0, "A corrected check after entry should be clean"
+
+
+def test_entry_corrected_after_exit_still_fires(con):
+    """Entry correction after an exit must still fire exit_without_entry.
+
+    Regression guard for round 1: checked(1), entered(2), exited(3),
+    entered(4, corrects=2). The exit at 3 came after the original entry,
+    but the correction orphans it. Must still fire.
+    """
+    _trade(con, invented.TEST_TRADE_ID)
+    _checked(con, invented.TEST_TRADE_ID)
+    entry_id = _enter(con, invented.TEST_TRADE_ID, size=100)
+    _exit(con, invented.TEST_TRADE_ID, size=10)
+    # Correct the entry
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="chat",
+        trade_id=invented.TEST_TRADE_ID,
+        corrects=entry_id,
+        payload={
+            "entry": invented.PRICES["ACME"],
+            "stop": 95.0,
+            "target": 110.0,
+            "size": 80,
+            "horizon": "2w",
+            "setup": "test-setup",
+            "thesis": "test thesis",
+        },
+    )
+
+    fired = [n for n, f in integrity.INVARIANTS.items() if f(con)]
+    assert "exit_without_entry" in fired, "Should still detect orphaned exit"
+
+
 def test_sql_invariants_exclude_superseded_events(con):
     """SQL invariants must skip events named by a later corrects.
 

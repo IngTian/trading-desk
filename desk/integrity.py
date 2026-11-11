@@ -49,6 +49,10 @@ def _event_before_trade_started(con: sqlite3.Connection) -> list[str]:
 
     Every trade begins with a checked or imported event. Any other event for that
     trade with a lower event id is ordering-violating.
+
+    The CTE finds the earliest check/import without excluding superseded ones: a
+    corrected check still marks when the trade began. But we do exclude superseded
+    offending events from being reported, since a corrected violation is no longer live.
     """
     failures = []
     rows = con.execute(
@@ -57,7 +61,6 @@ def _event_before_trade_started(con: sqlite3.Connection) -> list[str]:
             SELECT trade_id, MIN(id) AS first_start_id
             FROM events
             WHERE kind IN ('checked', 'imported')
-              AND id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
             GROUP BY trade_id
         )
         SELECT e.trade_id, e.id, e.kind
@@ -124,22 +127,21 @@ def _trade_with_no_start(con: sqlite3.Connection) -> list[str]:
 
     A trade is created by a checked or imported event. Any trade in the trades
     table with events but no checked/imported is malformed.
+
+    Does not exclude superseded events: the question is whether the trade was ever
+    checked, and a corrected check still means it was checked. The correction revises
+    what the check said, not whether it happened.
     """
     failures = []
     rows = con.execute(
         """
         SELECT t.id
         FROM trades t
-        WHERE EXISTS (
-            SELECT 1 FROM events
-            WHERE trade_id = t.id
-              AND id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
-          )
+        WHERE EXISTS (SELECT 1 FROM events WHERE trade_id = t.id)
           AND NOT EXISTS (
               SELECT 1 FROM events
               WHERE trade_id = t.id
                 AND kind IN ('checked', 'imported')
-                AND id NOT IN (SELECT corrects FROM events WHERE corrects IS NOT NULL)
           )
         ORDER BY t.id
         """
