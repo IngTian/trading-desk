@@ -23,7 +23,10 @@ class Rules:
     hash: str                         # file hash (first 12 chars of sha256)
     path: Path                        # source file
     sections_used: tuple[str, ...]    # composition order
-    unchecked: tuple[str, ...]        # rule names with no code check
+    # Rules with no code check, name -> value. The VALUE is kept, not just the name: the desk
+    # reports these as "your rules say `feels_right: strongly` -- no automatic check for this
+    # one; I'll ask you each time", and it cannot say that from a name alone.
+    unchecked: dict[str, str]
 
 
 class RulesFile:
@@ -143,7 +146,9 @@ class RulesFile:
         Args:
             account: "real", "paper", or "replay"
             run_id: Optional run identifier like "run-2" for paper runs
-            known: Set of rule names that have code checks
+            known: Set of rule names that have code checks (checks.CHECK_NAMES). A name
+                outside it lands in `unchecked` WITH its value, so the desk can quote the
+                rule back while saying it will ask about it.
         """
         # Normalize account name to match section headers
         account_title = account.capitalize()
@@ -184,15 +189,15 @@ class RulesFile:
                     date, text = item.split(":", 1)
                     changes_list.append(Change(date.strip(), text.strip()))
 
-        # Separate checked vs unchecked rules
+        # Separate checked vs unchecked rules, both keeping the value as written
         checked: dict[str, str] = {}
-        unchecked_list: list[str] = []
+        unchecked_rules: dict[str, str] = {}
 
         for name, value in merged_rules.items():
             if name in known:
                 checked[name] = value
             else:
-                unchecked_list.append(name)
+                unchecked_rules[name] = value
 
         return Rules(
             numbers=checked,
@@ -202,7 +207,7 @@ class RulesFile:
             hash=self.hash,
             path=self.path,
             sections_used=tuple(sections_found),
-            unchecked=tuple(unchecked_list),
+            unchecked=unchecked_rules,
         )
 
 

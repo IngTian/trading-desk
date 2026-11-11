@@ -25,8 +25,10 @@ zero for an unknown daily total, and no figure at all derived from a negative si
 `Context.session_started` is the session's start time rather than a `Session` object: no
 Session type or store accessor exists yet, and the only thing a check needs from a session is
 when it began. `Context.stopped_closes` maps ticker -> the close time of the most recent trade
-on that ticker that exited at or beyond its stop; `None` means it was not supplied (so the
-cooldown withholds) and `{}` means the record was read and holds no stop (so it passes).
+on that ticker that exited at or beyond its stop, and is built by `model.stopped_closes(con)`
+rather than here, because deciding what counts as a stop is a fold over the log. `None` means
+it was not supplied (so the cooldown withholds) and `{}` means the log was read and holds no
+stop (so it passes).
 """
 from __future__ import annotations
 
@@ -547,10 +549,12 @@ def run_checks(plan: Plan, rules: Rules, ctx: Context) -> list[Result]:
         for name, fn in _CHECKS.items()
         if name in rules.numbers
     ]
-    # A name in the file that this module does not implement is asked, never dropped silently.
+    # A name in the file that this module does not implement is asked, never dropped silently,
+    # and its Result carries the value as written so the desk can quote the rule back.
     # rules.unchecked already holds them when for_scope was given CHECK_NAMES; the second half
     # catches a caller that passed a wider `known` set.
-    asked = [*rules.unchecked, *(n for n in rules.numbers if n not in _CHECKS)]
-    results.extend(Result(name, None, None, rules.numbers.get(name, ""), ASKED, None)
-                   for name in asked)
+    asked = {**rules.unchecked,
+             **{n: v for n, v in rules.numbers.items() if n not in _CHECKS}}
+    results.extend(Result(name, None, None, value, ASKED, None)
+                   for name, value in asked.items())
     return results

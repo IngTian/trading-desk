@@ -1,10 +1,49 @@
 """Tests for deriving current state from the event log."""
 from __future__ import annotations
 
+import datetime as dt
+
 import invented
 import pytest
 
 from desk import model, store
+
+STOPPED_AT = dt.datetime(2026, 5, 4, 14, 0, tzinfo=dt.UTC)
+
+
+def _trade(con, trade_id, *, side="long", stop=95.0, ticker=None):
+    store.add_trade(
+        con,
+        trade_id=trade_id,
+        account="paper",
+        run_id=None,
+        ticker=ticker or invented.TICKERS[0],
+        instrument="stock",
+        point_value=1.0,
+        currency="USD",
+        side=side,
+    )
+    store.append(
+        con,
+        kind="entered",
+        actor="ing",
+        source="chat",
+        trade_id=trade_id,
+        payload={
+            "entry": 100.0,
+            "stop": stop,
+            "target": 110.0 if side == "long" else 90.0,
+            "size": 10,
+            "horizon": "2w",
+            "setup": "test-setup",
+            "thesis": "test thesis",
+        },
+    )
+
+
+def _exit(con, trade_id, price, at, *, size=10):
+    store.append(con, kind="exited", actor="ing", source="chat", trade_id=trade_id,
+                 payload={"price": price, "size": size}, at=at.isoformat())
 
 
 @pytest.fixture
@@ -361,3 +400,45 @@ def test_realised_r_respects_side_for_short_positions(con):
     # (100 - 90) / abs(100 - 105) * 10 = 10 / 5 * 10 = 20.0 R
     assert state.realised_r == pytest.approx(20.0), \
         "A profitable short should have positive R"
+
+
+def test_a_stop_fill_dates_the_cooldown_from_the_trades_close(con):
+    """A long filling at or below its stop is a stop, and the cooldown runs from the close."""
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 95.0, STOPPED_AT)
+    closed_at = STOPPED_AT + dt.timedelta(minutes=10)
+    store.append(con, kind="closed", actor="ing", source="chat", trade_id="trade-a",
+                 payload={}, at=closed_at.isoformat())
+
+    assert model.stopped_closes(con) == {invented.TICKERS[0]: closed_at}
+
+
+def test_a_trade_that_hit_its_target_is_not_a_stop(con):
+    """Nothing to cool down from, and an empty dict is an answer rather than a missing one."""
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 105.0, STOPPED_AT)
+    store.append(con, kind="closed", actor="ing", source="chat", trade_id="trade-a", payload={})
+
+    assert model.stopped_closes(con) == {}
+
+
+def test_a_short_stops_out_above_its_stop_not_below(con):
+    """The side decides which way a stop is breached, so _signed does it here too."""
+    _trade(con, "trade-a", side="short", stop=105.0)
+    _exit(con, "trade-a", 106.0, STOPPED_AT)
+    # No `closed` event: the stopping fill's own time stands in, so the stop is not invisible.
+    assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}
+
+    # The same fill on a long would be a profit, not a stop.
+    _trade(con, "trade-b", ticker=invented.TICKERS[1])
+    _exit(con, "trade-b", 106.0, STOPPED_AT)
+    assert invented.TICKERS[1] not in model.stopped_closes(con)
+
+
+def test_the_most_recent_stop_on_a_ticker_is_the_one_that_counts(con):
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 94.0, STOPPED_AT - dt.timedelta(days=2))
+    _trade(con, "trade-b")
+    _exit(con, "trade-b", 95.0, STOPPED_AT)
+
+    assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}

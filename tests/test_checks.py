@@ -32,7 +32,7 @@ def named(results: list[checks.Result], name: str) -> checks.Result:
     return found
 
 
-def rules_with(groups=None, unchecked=(), **numbers) -> rules.Rules:
+def rules_with(groups=None, unchecked=None, **numbers) -> rules.Rules:
     """A Rules object for one scope, built from invented values only."""
     return rules.Rules(
         numbers={k: str(v) for k, v in numbers.items()},
@@ -42,7 +42,7 @@ def rules_with(groups=None, unchecked=(), **numbers) -> rules.Rules:
         hash="0123456789ab",
         path=FIXTURE,
         sections_used=("All",),
-        unchecked=tuple(unchecked),
+        unchecked=dict(unchecked or {}),
     )
 
 
@@ -414,7 +414,7 @@ def test_stop_headroom_and_volatility_are_uncomputable_without_bars():
 # ------------------------------------------------------- the whole output ---
 ALL_RULES = rules_with(
     groups={"tech": (TICKER, OTHER)},
-    unchecked=("feels_right",),
+    unchecked={"feels_right": "strongly"},
     min_reward_risk="2",
     max_risk_per_trade="100 USD",
     size="computed",
@@ -442,9 +442,10 @@ FULL_CTX = checks.Context(
 
 
 def test_an_unchecked_rule_is_asked_never_estimated():
-    r = one(checks.run_checks(PLAN, rules_with(unchecked=("feels_right",)), CTX))
+    r = one(checks.run_checks(PLAN, rules_with(unchecked={"feels_right": "strongly"}), CTX))
     assert r.name == "feels_right" and r.ok is None and r.figure is None
     assert r.says == "no automatic check for this one; I'll ask you each time"
+    assert r.limit == "strongly", "the value is carried so the desk can quote the rule back"
 
 
 def test_every_rule_in_the_file_gets_a_result_in_the_tables_order():

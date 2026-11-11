@@ -29,6 +29,12 @@ def test_a_rule_name_with_no_code_check_is_reported_not_dropped():
     assert "feels_right" not in r.numbers, "an unchecked name must not reach run_checks"
 
 
+def test_an_unchecked_rule_keeps_the_value_as_written():
+    """The desk quotes the rule back while saying it will ask, so the name alone is not enough."""
+    r = rules.load(FIXTURE).for_scope("paper", None, INVENTED_CHECKS)
+    assert r.unchecked["feels_right"] == "yes"
+
+
 def test_the_ask_me_list_is_kept_in_file_order_and_verbatim():
     r = rules.load(FIXTURE).for_scope("real", None, INVENTED_CHECKS)
     assert len(r.ask) >= 2

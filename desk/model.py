@@ -21,6 +21,7 @@ opposite twice: a total summed over an empty list reported zero and read as a fa
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -68,7 +69,10 @@ class Plan:
 class TradeState:
     """The derived current state of a trade."""
     trade_id: str
-    ticker: str  # from the trade's identity row: no_open_trade_in_group needs it
+    # From the trade's identity row, because deriving anything directional or per-ticker from
+    # a fold needs them: no_open_trade_in_group needs the ticker, stopped_closes the side.
+    ticker: str
+    side: str  # long | short
     status: str  # planned | open | closed | passed
     entry: float | None
     stop: float | None
@@ -190,6 +194,7 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
     return TradeState(
         trade_id=trade_id,
         ticker=trade_row["ticker"],
+        side=side,
         status=status,
         entry=entry,
         stop=stop,
@@ -205,6 +210,49 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
         closed_at=closed_at,
         taken_against=tuple(violations),
     )
+
+
+def _moment(at: str) -> dt.datetime:
+    """An event's time. One written without an offset is read as UTC, which is what we write."""
+    moment = dt.datetime.fromisoformat(at)
+    return moment if moment.tzinfo else moment.replace(tzinfo=dt.UTC)
+
+
+def stopped_closes(con: sqlite3.Connection) -> dict[str, dt.datetime]:
+    """Ticker -> when the most recent trade stopped out on that ticker closed.
+
+    Derived state, so it folds the log here rather than in a consumer: it feeds
+    `checks.Context.stopped_closes`, which `cooldown_after_stop` measures against.
+
+    WHAT COUNTS AS STOPPED: a fill at or beyond the trade's stop on the losing side of it,
+    `_signed(side, price, stop) >= 0` -- a long filling at or below its stop, a short at or
+    above it. The stop is the one the fold ends with, which is the stop as it stood when the
+    trade finished.
+
+    WHICH TIME: the `closed` event's, since a cooldown runs from the trade's close; and when
+    there is no `closed` event yet, the stopping fill's own time, so a stop nobody has written
+    up still starts the clock instead of being invisible.
+
+    An empty dict means the log was read and holds no stop. That is a different answer from
+    "not supplied", which the caller says by passing None, and the two must not be confused:
+    one lets a trade through, the other withholds the figure.
+    """
+    latest: dict[str, dt.datetime] = {}
+    for trade_id in store.trade_ids(con):
+        state = state_of(con, trade_id)
+        if state.stop is None or not state.fills:
+            continue
+        stopped = [f for f in state.fills if _signed(state.side, f.price, state.stop) >= 0]
+        if not stopped:
+            continue
+        times = {e["id"]: e["at"] for e in store.events(con, trade_id=trade_id)}
+        at = times.get(state.closed_at) or times.get(stopped[-1].event_id)
+        if at is None:
+            continue
+        moment = _moment(at)
+        if state.ticker not in latest or moment > latest[state.ticker]:
+            latest[state.ticker] = moment
+    return latest
 
 
 def open_trades(con: sqlite3.Connection) -> list[TradeState]:
