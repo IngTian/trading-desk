@@ -28,14 +28,24 @@ def test_check_prints_every_rule_result_and_appends_one_checked_event(desk_home)
     # Create the database first
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD"])
     assert rc == 0
     con = store.open()
     (ev,) = [e for e in store.events(con) if e["kind"] == "checked"]
     payload = json.loads(ev["payload"])
-    # The fixture has min_reward_risk in All and Real sections
-    assert "min_reward_risk" in {r["name"] for r in payload["results"]}
+    # Assert exact set equality: Real scope gets min_reward_risk from Real (overriding All's 1),
+    # plus two unchecked rules
+    assert {r["name"] for r in payload["results"]} == {
+        "min_reward_risk",      # Real's 3 overrides All's 1
+        "max_trades_per_day",   # from All; no code check, so reported unchecked
+        "max_position_pct",     # from Real; no code check, so reported unchecked
+    }
+    # Assert unchecked rules carry the verbatim sentence
+    unchecked = {r["name"]: r["says"] for r in payload["results"] if r["ok"] is None}
+    assert unchecked == {
+        "max_trades_per_day": "no automatic check for this one; I'll ask you each time",
+        "max_position_pct": "no automatic check for this one; I'll ask you each time",
+    }
     assert ev["rules_hash"] == rules.load(config.rules_path()).hash
 
 
@@ -45,8 +55,8 @@ def test_check_records_the_rules_hash_so_an_edit_mid_session_is_visible(desk_hom
     # First check
     cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
               "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-              "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-              "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+              "--currency", "USD",
+             ])
 
     # Edit the rules file
     rules_file = config.rules_path()
@@ -55,8 +65,8 @@ def test_check_records_the_rules_hash_so_an_edit_mid_session_is_visible(desk_hom
     # Second check
     cli.main(["check", "--ticker", "WXYZ", "--side", "short", "--entry", "50",
               "--stop", "52", "--target", "45", "--size", "50", "--account", "real",
-              "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-              "--horizon", "2d", "--setup", "test2", "--thesis", "invented2"])
+              "--currency", "USD",
+             ])
 
     con = store.open()
     checked_events = [e for e in store.events(con) if e["kind"] == "checked"]
@@ -70,8 +80,8 @@ def test_check_reports_a_breach_as_a_fact_and_still_exits_zero(desk_home):
     # Create a plan that breaches min_reward_risk (R < 2)
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "10.5", "--size", "100", "--account", "real",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD",
+                  ])
     assert rc == 0
 
 
@@ -82,8 +92,8 @@ def test_check_with_no_rules_file_says_which_path_it_wanted(desk_home):
 
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD",
+                  ])
     assert rc == 1
 
 
@@ -91,8 +101,8 @@ def test_check_json_output_is_valid_json_and_refuses_nan(desk_home):
     """json.dumps defaults to allow_nan=True and emits Infinity, which is not JSON."""
     cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
               "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-              "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-              "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+              "--currency", "USD",
+             ])
 
     con = store.open()
     (ev,) = [e for e in store.events(con) if e["kind"] == "checked"]
@@ -110,8 +120,8 @@ def test_a_misspelled_side_is_refused_rather_than_treated_as_a_short(desk_home):
     with pytest.raises(SystemExit) as exc:
         cli.main(["check", "--ticker", "ACME", "--side", "lng", "--entry", "10",
                   "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-                  "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                  "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                  "--currency", "USD",
+                 ])
     assert exc.value.code != 0
 
 
@@ -132,8 +142,8 @@ min_reward_risk: 2
     # Check with account=real should complain
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD",
+                  ])
     assert rc != 0
 
 
@@ -141,8 +151,8 @@ def test_the_first_run_creates_the_book_and_names_the_path_it_created(desk_home,
     """When the database doesn't exist, create it and print where it was created."""
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD",
+                  ])
     assert rc == 0
     captured = capsys.readouterr()
     assert "created" in captured.out.lower()
@@ -153,8 +163,8 @@ def test_check_creates_the_trade_row_with_the_checked_event(desk_home):
     """The trade row and the checked event are written together."""
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD",
+                  ])
     assert rc == 0
     con = store.open()
 
@@ -175,20 +185,20 @@ def test_check_generates_collision_suffixes_for_same_ticker_same_day(desk_home):
     # First check
     cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
               "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-              "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-              "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+              "--currency", "USD",
+             ])
 
     # Second check same ticker same day
     cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "11",
               "--stop", "10", "--target", "13", "--size", "50", "--account", "real",
-              "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-              "--horizon", "1w", "--setup", "test2", "--thesis", "invented2"])
+              "--currency", "USD",
+             ])
 
     # Third check same ticker same day
     cli.main(["check", "--ticker", "ACME", "--side", "short", "--entry", "12",
               "--stop", "13", "--target", "10", "--size", "75", "--account", "real",
-              "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-              "--horizon", "2d", "--setup", "test3", "--thesis", "invented3"])
+              "--currency", "USD",
+             ])
 
     con = store.open()
     trade_ids = store.trade_ids(con)
@@ -206,8 +216,8 @@ def test_run_arg_creates_runs_row_if_absent(desk_home):
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "12", "--size", "100", "--account", "paper",
                    "--run", "run-5",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD",
+                  ])
     assert rc == 0
 
     con = store.open()
@@ -221,8 +231,8 @@ def test_run_arg_with_real_account_is_refused(desk_home):
     rc = cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
                    "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
                    "--run", "run-1",
-                   "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-                   "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+                   "--currency", "USD",
+                  ])
     assert rc != 0
 
 
@@ -231,8 +241,8 @@ def test_integrity_subcommand_runs_all_checks(desk_home):
     # Create a database with some events
     cli.main(["check", "--ticker", "ACME", "--side", "long", "--entry", "10",
               "--stop", "9", "--target", "12", "--size", "100", "--account", "real",
-              "--instrument", "stock", "--point-value", "1", "--currency", "USD",
-              "--horizon", "1w", "--setup", "test", "--thesis", "invented"])
+              "--currency", "USD",
+             ])
 
     rc = cli.main(["integrity"])
     assert rc == 0  # Should pass with a clean log

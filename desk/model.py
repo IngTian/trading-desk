@@ -58,9 +58,9 @@ class Plan:
     stop: float | None
     target: float | None
     size: int | None
-    horizon: str
-    setup: str
-    thesis: str
+    horizon: str | None
+    setup: str | None
+    thesis: str | None
     account: str
     run_id: str | None
 

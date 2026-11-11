@@ -59,6 +59,20 @@ def cmd_check(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
+    # Require --point-value when --instrument future
+    if args.instrument == "future" and args.point_value is None:
+        print(
+            "--point-value is required when --instrument future: risk is size × stop distance × "
+            "point value, so a futures contract at 100 per point makes a 1.5-point stop a 150 risk "
+            "rather than 1.5. Defaulting to 1.0 would under-report risk by 100×.",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Apply defaults
+    instrument = args.instrument or "stock"
+    point_value = args.point_value if args.point_value is not None else 1.0
+
     # Scope the rules
     scoped_rules = rules_file.for_scope(args.account, args.run, checks.CHECK_NAMES)
 
@@ -73,8 +87,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     plan = model.Plan(
         ticker=args.ticker,
         side=args.side,
-        instrument=args.instrument,
-        point_value=args.point_value,
+        instrument=instrument,
+        point_value=point_value,
         currency=args.currency,
         entry=args.entry,
         stop=args.stop,
@@ -131,8 +145,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         account=args.account,
         run_id=args.run,
         ticker=args.ticker,
-        instrument=args.instrument,
-        point_value=args.point_value,
+        instrument=instrument,
+        point_value=point_value,
         currency=args.currency,
         side=args.side,
     )
@@ -216,15 +230,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     check_parser.add_argument(
         "--instrument",
-        required=True,
         choices=("stock", "etf", "future"),
-        help="Instrument type",
+        default=None,
+        help="Instrument type (default: stock)",
     )
     check_parser.add_argument(
         "--point-value",
         type=float,
-        required=True,
-        help="Point value (1.0 for stocks/ETFs, contract multiplier for futures)",
+        default=None,
+        help="Point value (default: 1.0 for stock/etf; required for future)",
     )
     check_parser.add_argument(
         "--currency",
@@ -254,17 +268,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     check_parser.add_argument(
         "--horizon",
-        required=True,
         help="Time horizon (e.g., 1d, 2w)",
     )
     check_parser.add_argument(
         "--setup",
-        required=True,
         help="Setup name/description",
     )
     check_parser.add_argument(
         "--thesis",
-        required=True,
         help="Trade thesis",
     )
     check_parser.add_argument(

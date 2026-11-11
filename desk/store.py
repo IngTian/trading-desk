@@ -67,7 +67,7 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
         if not db.exists():
             raise FileNotFoundError(
                 f"{db} does not exist; the book has not been created yet. "
-                f"Run `store.create()` or use the CLI to create it."
+                f"Run `trading-desk check` to create it."
             )
         con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
@@ -103,6 +103,8 @@ def append(
         (at, actor, source, kind, trade_id, session_id, corrects, rules_hash, json.dumps(payload)),
     )
     con.commit()
+    if cur.lastrowid is None:
+        raise RuntimeError("INSERT succeeded but lastrowid is None")
     return cur.lastrowid
 
 
