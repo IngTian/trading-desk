@@ -179,3 +179,15 @@ def test_trade_ids_returns_all_ids_ordered(tmp_path):
 
         ids = store.trade_ids(conn)
         assert ids == ["trade-1", "trade-2", "trade-3"]
+
+
+def test_open_raises_on_missing_database_when_not_read_only(tmp_path):
+    """store.open raises FileNotFoundError when the database doesn't exist and read_only=False.
+    This prevents creating an empty file that then blocks store.create()."""
+    missing = tmp_path / "nonexistent.db"
+    with pytest.raises(FileNotFoundError) as exc:
+        store.open(missing, read_only=False)
+    assert "not been created" in str(exc.value)
+    assert str(missing) in str(exc.value)
+    # The guard must not leave a stray file
+    assert not missing.exists()

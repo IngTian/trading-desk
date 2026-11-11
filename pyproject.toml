@@ -37,6 +37,9 @@ Homepage = "https://github.com/IngTian/trading-desk"
 Repository = "https://github.com/IngTian/trading-desk"
 Issues = "https://github.com/IngTian/trading-desk/issues"
 
+[project.scripts]
+trading-desk = "desk.cli:main"
+
 # [dependency-groups] AND NOT [project.optional-dependencies], which is where this
 # diverges from daylogs deliberately. `uv sync` installs dependency groups BY DEFAULT
 # and extras only with --extra, so declaring the dev tools as an extra meant a plain

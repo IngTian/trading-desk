@@ -55,12 +55,20 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
 
     read_only=True opens with mode=ro. Uses as_uri() because a path containing '?'
     silently discards the mode and opens a new writable file.
+
+    Raises FileNotFoundError when read_only=False and the database does not exist.
     """
     db = path or config.db_path()
     if read_only:
         uri = f"{db.as_uri()}?mode=ro"
         con = sqlite3.connect(uri, uri=True)
     else:
+        # Guard against creating an empty file that blocks store.create()
+        if not db.exists():
+            raise FileNotFoundError(
+                f"{db} does not exist; the book has not been created yet. "
+                f"Run `store.create()` or use the CLI to create it."
+            )
         con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
