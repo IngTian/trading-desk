@@ -173,6 +173,15 @@ def test_every_decision_needs_a_reason(con, decide, reason):
 
 
 @pytest.mark.parametrize("decide", DECISIONS)
+@pytest.mark.parametrize("reason", [5, ["x"]])
+def test_a_reason_that_is_not_text_is_refused(con, decide, reason):
+    t = enter(con)
+    with pytest.raises(api.Refused, match="reason must be text"):
+        decide(con, t.id, reason=reason)
+    assert kinds(con, t.id) == ["entered"]
+
+
+@pytest.mark.parametrize("decide", DECISIONS)
 def test_an_unknown_trade_is_refused(con, decide):
     with pytest.raises(api.Refused, match="no trade"):
         decide(con, "nope-20260302")
@@ -273,10 +282,36 @@ def test_a_correction_may_change_each_entry_field(con):
     assert events(con, t.id)[-1][3]["fields"]["at"] == T2.isoformat()
 
 
-def test_a_correction_may_remove_the_stop_or_target(con):
+def test_a_none_field_is_read_as_not_given(con):
+    """Ruling R14: None means "not given" everywhere. An agent filling the keys it did not mean
+    to touch with null used to erase the trade's stop and target."""
     t = enter(con)
-    e = correct(con, t.id, fields={"stop": None, "target": None}).decisions.entry
-    assert (e.stop, e.target) == (None, None)
+    e = correct(con, t.id, fields={"entry": 101, "stop": None, "target": None}).decisions.entry
+    assert (e.price, e.stop, e.target) == (101.0, 98.5, 103.0)
+    assert events(con, t.id)[-1][3]["fields"] == {"entry": 101.0}
+
+
+def test_a_none_move_is_read_as_not_given(con):
+    t = enter(con)
+    assert correct(con, t.id, fields={"move": None, "stop": 97.0}).decisions.entry.stop == 97.0
+
+
+@pytest.mark.parametrize("fields", [{"stop": None}, {"target": None},
+                                    {"stop": None, "target": None}, {"move": 0, "stop": None}])
+def test_a_stop_or_target_cannot_be_removed_by_a_correction(con, fields):
+    t = enter(con)
+    api.move_order(con, t.id, stop=99.0, reason="x", at=T2, now=LATER)
+    with pytest.raises(api.Refused, match="(?s)nothing to correct.*void the trade"):
+        correct(con, t.id, fields=fields)
+    assert kinds(con, t.id) == ["entered", "order_moved"]
+
+
+@pytest.mark.parametrize("fields", [None, "stop", [("stop", 97.0)], 5])
+def test_fields_that_are_not_a_mapping_are_refused(con, fields):
+    t = enter(con)
+    with pytest.raises(api.Refused, match="fields must be a mapping"):
+        correct(con, t.id, fields=fields)
+    assert kinds(con, t.id) == ["entered"]
 
 
 @pytest.mark.parametrize("fields", [

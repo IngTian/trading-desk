@@ -133,3 +133,15 @@ def test_a_naive_now_is_refused_on_save(con):
     with pytest.raises(api.Refused, match="timezone"):
         api.save_strategy(con, "dip-buyer", make(), now=datetime(2026, 3, 2))
     assert api.list_strategies(con) == []
+
+
+@pytest.mark.parametrize(("kw", "name"), [
+    (dict(markdown=5), "markdown"), (dict(markdown=None), "markdown"),
+    (dict(tracker_script=5), "tracker_script"),
+    (dict(tracker_script="x", tracker_limit=40), "tracker_limit"), (dict(id=5), "id")])
+def test_text_arguments_that_are_not_text_are_refused(con, kw, name):
+    """Review item 5: a non-string reached .strip() or a regex and raised a TypeError or an
+    AttributeError instead of a refusal."""
+    with pytest.raises(api.Refused, match=f"{name} must be text"):
+        api.save_strategy(con, **{"id": "dip-buyer", "markdown": make(), "now": NOW, **kw})
+    assert api.list_strategies(con) == []

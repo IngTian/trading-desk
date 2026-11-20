@@ -42,6 +42,23 @@ def _at(now: datetime | None) -> str:
     return _aware(now).astimezone(UTC).isoformat()
 
 
+# Plan 5 passes the agent's JSON straight in, so a parameter can arrive as any JSON type.
+def _text(name: str, value) -> str:
+    if not isinstance(value, str):
+        raise Refused(f"{name} must be text, a string; got {value!r}.")
+    return value
+
+
+def _strings(name: str, value) -> tuple[str, ...]:
+    """A list of strings; None is none. A bare string is refused, not read letter by letter."""
+    if value is None:
+        return ()
+    if not isinstance(value, list | tuple) or not all(isinstance(v, str) for v in value):
+        raise Refused(f'{name} must be a list of strings, e.g. ["a", "b"], or left out; '
+                      f"got {value!r}.")
+    return tuple(value)
+
+
 @dataclass(frozen=True)
 class StrategyView:
     id: str
@@ -97,12 +114,14 @@ def save_strategy(con: sqlite3.Connection, id: str, markdown: str, *,
     last read). Text that differs after whitespace is normalised makes a new version; a changed
     tracker script or limit makes a new tracker row and no new version. A tracker argument left
     out keeps what is saved."""
-    if not _SLUG.fullmatch(id):
+    if not _SLUG.fullmatch(_text("id", id)):
         raise Refused(f"Strategy id {id!r} must be lowercase letters, digits and hyphens, "
                       "like 'dip-buyer'.")
-    parsed = strategy.parse(markdown)
+    parsed = strategy.parse(_text("markdown", markdown))
+    if tracker_script is not None:
+        _text("tracker_script", tracker_script)
     if tracker_limit is not None:
-        _check_limit(tracker_limit)
+        _check_limit(_text("tracker_limit", tracker_limit))
     at = _at(now)
     with store.transaction(con):  # read, compare and write under one write lock
         rows = store.versions(con, id)
@@ -188,6 +207,7 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
               now: datetime | None = None) -> RunView:
     """Deploy a strategy version as run `<strategy>-r<N>`. Tags are kept verbatim (deduplicated,
     order kept) and never interpreted."""
+    tags = _strings("tags", tags)
     if mode not in ("live", "replay"):
         raise Refused(f"mode {mode!r} is not known; use 'live' (real time) or 'replay' "
                       "(re-running past history).")
@@ -291,9 +311,8 @@ def _currency(v) -> None:
         raise Refused(f"currency {v!r} is not known; use one of {', '.join(config.CURRENCIES)}.")
 
 
-def _screenshot(item) -> tuple[dict, bytes | None, str | None]:
+def _screenshot(text: str) -> tuple[dict, bytes | None, str | None]:
     """(payload entry, file bytes, stored name) for one screenshot, or Refused. Writes nothing."""
-    text = str(item)
     if text.startswith("https://"):
         return {"link": text}, None, None
     path = Path(text).expanduser()
@@ -322,7 +341,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     if entry_type not in ("market", "limit"):
         raise Refused(f"entry_type {entry_type!r} is not known; use 'market' (fill at once at the "
                       "going price) or 'limit' (fill only at your price or better).")
-    symbol, implied = model.canonical_ticker(ticker)
+    symbol, implied = model.canonical_ticker(_text("ticker", ticker))
     if not symbol:
         raise Refused("ticker is empty; give the symbol, e.g. 'ACME' or 'GC1!'.")
     if instrument not in (None, "stock", "etf", "future"):
@@ -336,6 +355,10 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
             raise Refused("A future needs point_value: the cash a one-point move is worth on one "
                           "contract, e.g. 100.")
         _price("point_value", point_value)
+    elif point_value is not None:  # Ruling R15: dropping it would understate the risk for good
+        raise Refused(f"point_value is only for a future and {ticker!r} reads as "
+                      f"{'an' if kind == 'etf' else 'a'} {kind}; pass instrument='future' (or a "
+                      f"continuous ticker such as '{symbol}1!'), or leave point_value out.")
     else:
         point_value = 1.0
     _price("entry", entry)
@@ -346,9 +369,9 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                       "no reward-to-risk can be measured; put the stop away from the entry.")
     _size(size)
     _currency(currency)
-    if not reasons.strip():
+    if not _text("reasons", reasons).strip():
         raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
-    shots = [_screenshot(s) for s in screenshots]
+    shots = [_screenshot(s) for s in _strings("screenshots", screenshots)]
     with store.transaction(con):  # the run's state and the id's collisions are read under the lock
         _within_run(_run_view(con, row), when)
         for _, data, stored in shots:  # after every refusal; content-addressed, so a repeat skips
@@ -376,7 +399,7 @@ def _trade_row(con, trade: str) -> sqlite3.Row:
 
 def _decision(con, trade: str, reason) -> sqlite3.Row:
     """The trade's identity row, once the decision's reason is given and the trade exists."""
-    if not isinstance(reason, str) or not reason.strip():
+    if not _text("reason", reason).strip():
         raise Refused("reason is empty; say why, in your own words.")
     return _trade_row(con, trade)
 
@@ -458,15 +481,22 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                   now: datetime | None = None) -> TradeView:
     """Correct the entry, or with `move: <index>` (its place in get_trade's moves) one move.
     Appended as a `corrected` event naming that `entered` or `order_moved` event, read in its
-    place; only the fields named change. A wrong run, ticker or side is not corrected: void
-    the trade and enter it again."""
+    place; only the fields named change. A field given as None is not given (Ruling R14), so a
+    stop or target is never removed by a correction. A wrong run, ticker or side is not
+    corrected either: void the trade and enter it again."""
     now = _aware(now)
     row = _decision(con, trade, reason)
-    fields = dict(fields)
+    if not isinstance(fields, dict):
+        raise Refused("fields must be a mapping of the fields to correct to their corrected "
+                      f"values, e.g. {{'stop': 97.5}}; got {fields!r}.")
+    asked, fields = fields, {k: v for k, v in fields.items() if v is not None}
     index = fields.pop("move", None)
     names = _ENTRY_FIELDS if index is None else _MOVE_FIELDS
     if not fields:
-        raise Refused(f"fields names nothing to correct; give one or more of {', '.join(names)}.")
+        removal = (" A stop or target is not removed by a correction: void the trade and enter "
+                   "it again without it." if {"stop", "target"} & asked.keys() else "")
+        raise Refused("fields names nothing to correct (a field given as None is read as not "
+                      f"given); give one or more of {', '.join(names)}.{removal}")
     if unknown := [k for k in fields if k not in names]:
         raise Refused(f"{', '.join(unknown)} cannot be corrected on "
                       f"{'an entry' if index is None else 'a move'}; correct only "
@@ -483,8 +513,6 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
     if "point_value" in fields and row["instrument"] != "future":
         raise Refused(f"Trade {trade!r} is a {row['instrument']}, whose point value is 1; only a "
                       "future's point value can be corrected.")
-    if "at" in fields and fields["at"] is None:  # _aware would read None as the wall clock
-        raise Refused("`at` cannot be removed; give the corrected time, with a timezone.")
     when = _aware(fields["at"], "at") if "at" in fields else None
     with store.transaction(con):  # the decisions the correction is checked against, under the lock
         d, entered, move_ids = _not_void(con, trade)
@@ -509,10 +537,6 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                     or not 0 <= index < len(d.moves)):
                 raise Refused(f"Trade {trade!r} has no move {index!r}; `move` is a move's place "
                               f"in get_trade's moves, from 0, and it has {len(d.moves)}.")
-            m = d.moves[index]
-            if fields.get("stop", m.stop) is None and fields.get("target", m.target) is None:
-                raise Refused("A move names a new stop, a new target, or both; this correction "
-                              "would leave it naming neither.")
             if when is not None:
                 _after_entry(trade, d, when)
                 _before_close(trade, d, when)

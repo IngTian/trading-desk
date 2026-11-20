@@ -94,3 +94,15 @@ def test_a_naive_datetime_is_refused_for_start_and_stop(con):
     api.start_run(con, "dip-buyer", mode="live", now=NOW)
     with pytest.raises(api.Refused, match="timezone"):
         api.stop_run(con, "dip-buyer-r1", at=naive, now=LATER)
+
+
+@pytest.mark.parametrize("tags", ["paper", [1, None], ["paper", 5], 7])
+def test_tags_that_are_not_a_list_of_strings_are_refused(con, tags):
+    """Review item 5: tags="paper" was stored as ('p', 'a', 'p', 'e', 'r'), for good."""
+    with pytest.raises(api.Refused, match="tags must be a list of strings"):
+        api.start_run(con, "dip-buyer", mode="live", tags=tags, now=NOW)
+    assert store.runs(con) == []
+
+
+def test_no_tags_may_be_given_as_none(con):
+    assert api.start_run(con, "dip-buyer", mode="live", tags=None, now=NOW).tags == ()

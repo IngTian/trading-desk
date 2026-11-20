@@ -180,3 +180,41 @@ def test_a_trade_refused_for_the_run_stop_stores_no_screenshot(con, tmp_path):
     assert not config.attachments_dir().exists()
     enter(con, "dip-buyer-r2", at=stop - timedelta(minutes=1), screenshots=[str(f)])
     assert config.attachments_dir().exists()  # so the assertion above is not vacuous
+
+
+@pytest.mark.parametrize("kw", [dict(ticker="GC"), dict(ticker="GC", instrument="stock"),
+                                dict(ticker="SPY", instrument="etf"), dict(point_value=1.0)])
+def test_a_point_value_on_a_trade_that_is_not_a_future_is_refused(con, kw):
+    """Review item 1, Ruling R15: a bare root typed with a point value was recorded as a stock
+    worth 1 a point, silently dropping the 100, and could not be corrected afterwards."""
+    with pytest.raises(api.Refused, match="point_value is only for a future"):
+        enter(con, **{"point_value": 100.0, **kw})
+    assert store.trades(con) == []
+
+
+def test_the_point_value_refusal_names_the_continuous_ticker_and_a_bare_root_may_be_a_future(con):
+    with pytest.raises(api.Refused, match=r"'GC' reads as a stock.*'GC1!'"):
+        enter(con, ticker="GC", point_value=100.0)
+    t = enter(con, ticker="GC", instrument="future", point_value=100.0)
+    assert (t.ticker, t.instrument, t.point_value) == ("GC", "future", 100.0)
+
+
+def test_no_screenshots_may_be_given_as_none(con):
+    assert enter(con, screenshots=None).decisions.screenshots == ()
+
+
+@pytest.mark.parametrize("shots", ["x.png", [5], ["https://example.com/c.png", None], 7])
+def test_screenshots_that_are_not_a_list_of_strings_are_refused(con, shots):
+    """Review item 5: "x.png" was read letter by letter and refused as screenshot 'x'."""
+    with pytest.raises(api.Refused, match="screenshots must be a list of strings"):
+        enter(con, screenshots=shots)
+    assert store.trades(con) == []
+
+
+@pytest.mark.parametrize(("kw", "name"), [
+    (dict(reasons=5), "reasons"), (dict(reasons=None), "reasons"), (dict(reasons=["x"]), "reasons"),
+    (dict(ticker=5), "ticker")])
+def test_text_arguments_that_are_not_text_are_refused(con, kw, name):
+    with pytest.raises(api.Refused, match=f"{name} must be text"):
+        enter(con, **kw)
+    assert store.trades(con) == []
