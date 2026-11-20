@@ -100,6 +100,34 @@ def test_versions_trackers_and_runs_read_back(con):
     assert store.trades(con, "other") == [] and len(store.trades(con)) == 1
 
 
+def test_a_refused_second_write_rolls_back_the_group(tmp_path):
+    db = tmp_path / "t.db"
+    store.create(db)
+    con = store.open(db)
+    with pytest.raises(sqlite3.IntegrityError):
+        with store.transaction(con):
+            store.add_strategy(con, "beta", AT)
+            store.add_version(con, "beta", 0, "t", "h", {}, [], AT)  # version >= 1
+    assert con.execute("SELECT count(*) FROM strategies").fetchone()[0] == 0
+
+
+def test_a_successful_group_commits_both_rows(tmp_path):
+    db = tmp_path / "t.db"
+    store.create(db)
+    con = store.open(db)
+    with store.transaction(con):
+        store.add_strategy(con, "beta", AT)
+        store.add_version(con, "beta", 1, "t", "h", {}, [], AT)
+    other = store.open(db, read_only=True)
+    assert len(store.versions(other, "beta")) == 1
+
+
+def test_a_lone_append_is_durable(con, tmp_path):
+    _append(con)
+    other = store.open(tmp_path / "test.db", read_only=True)
+    assert len(store.events(other)) == 1
+
+
 def test_read_only_open_cannot_write(tmp_path):
     db = tmp_path / "test.db"
     store.create(db)

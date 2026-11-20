@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from desk import config
@@ -98,13 +100,29 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
     return con
 
 
+@contextmanager
+def transaction(con: sqlite3.Connection) -> Iterator[None]:
+    """Group several writes: commit on a clean exit, roll all back on any exception."""
+    con.execute("BEGIN")
+    try:
+        yield
+    except BaseException:
+        con.rollback()
+        raise
+    con.commit()
+
+
 def _insert(con: sqlite3.Connection, sql: str, params: tuple) -> int:
-    """Run one INSERT and commit it; roll back and re-raise if it is refused."""
+    """Run one INSERT. Inside `transaction` it is left for the group to commit; alone it commits
+    at once (and rolls back if refused)."""
+    alone = not con.in_transaction
     try:
         cur = con.execute(sql, params)
-        con.commit()
+        if alone:
+            con.commit()
     except Exception:
-        con.rollback()
+        if alone:
+            con.rollback()
         raise
     assert cur.lastrowid is not None
     return cur.lastrowid
