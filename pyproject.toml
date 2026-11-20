@@ -8,13 +8,13 @@ build-backend = "setuptools.build_meta"
 # nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
-version = "0.4.0"
-description = "Check a trade against your own written rules before you click, and record what you actually did: an append-only log in SQLite"
+version = "0.5.0"
+description = "Record your trades under versioned strategies: reasons, screenshots and every later decision, in an append-only SQLite log"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["trading", "rules", "risk", "sqlite", "event-sourcing", "cli", "mcp"]
+keywords = ["trading", "strategy", "trade-journal", "replay", "sqlite", "event-sourcing"]
 # No runtime dependencies, and that is a property worth keeping. Every import under `desk/`
 # is standard library — `sqlite3`, `argparse`, `tomllib`, `dataclasses`, `datetime`, `json`,
 # `hashlib`, `math`, `re` — so `pip install trading-desk` pulls nothing else in.
@@ -25,9 +25,9 @@ keywords = ["trading", "rules", "risk", "sqlite", "event-sourcing", "cli", "mcp"
 # so could not run at all; it was deleted with the dependency.
 dependencies = []
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
-    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.11",
@@ -54,7 +54,7 @@ trading-desk = "desk.cli:main"
 # first time this project was made installable. CI therefore uses `uv sync` rather than
 # daylogs' `pip install -e '.[dev]'`; one declaration that cannot drift from a second.
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "mcp>=2,<3"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 
 [tool.setuptools.packages.find]
@@ -70,7 +70,6 @@ include = ["desk*"]
 "desk" = ["schema.sql", "strategy.example.md"]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]

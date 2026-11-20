@@ -205,7 +205,7 @@ def _shown(figure: float, limit: float, at_least: bool, places: int = 2,
     else:
         places = 6
     if signed:
-        # fmt._flat's rule: a figure that prints as zero carries no sign.
+        # A figure that prints as zero carries no sign.
         figure = 0.0 if abs(figure) < 0.5 * 10 ** -places else figure
         return f"{figure:+.{places}f}"
     return f"{figure:,.{places}f}" if money else f"{figure:.{places}f}"
@@ -302,8 +302,7 @@ def _units(n: int, plural: str) -> str:
 
 # ------------------------------------------------------------- the checks ---
 # One function per rule name in the spec's §5 table, each (plan, value, ctx, rules) -> Result.
-# `rules` is passed because two of them read it: `size` needs the risk budget and
-# `no_open_trade_in_group` needs the file's groups.
+# `rules` is passed because `size` reads it: it needs the risk budget.
 def min_reward_risk(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     limit = _ratio(value)
     if limit is None:
@@ -621,7 +620,8 @@ def run_checks(plan: Plan, rules: Rules, ctx: Context) -> list[Result]:
 
 # Rule names the 1.0 desk checks, besides `timeframes`, which only names the candle sizes.
 RULE_NAMES: frozenset[str] = CHECK_NAMES | {"timeframes"}
-# Names plan 1 checked and 1.0 does not: told apart from a typo so the refusal can say so.
+# Names an earlier draft checked and this version does not: told apart from a typo so the
+# refusal can say so.
 RETIRED: frozenset[str] = frozenset(
     {"no_open_trade_in_group", "max_session_length", "max_volatility_ratio"})
 

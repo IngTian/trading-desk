@@ -9,10 +9,9 @@ lives under one data root:
 
     ~/Documents/trading-desk/
         config.toml   optional; every key has a default
-        desk.db       the v1 store: the owner's decisions, an append-only log
+        desk.db       the store: the owner's decisions, an append-only log
         attachments/  screenshots attached to trades, named by content hash
-        bars/, reports/, imports/
-        hub.db        the v0 book: frozen, opened read-only by name, never written
+        (later releases add price bars, chart imports and tracker data here)
 
 The ROOT is $TRADING_DESK_HOME, else ~/Documents/trading-desk. Configuration belongs WITH
 the data, never in the repo: a file about where the data is, living in the tool, is how a
@@ -28,9 +27,10 @@ desk.db resolves most explicit first:
 (2) deliberately beats (3) so a one-off `TRADING_DESK_DB=/tmp/scratch.db trading-desk
 integrity` reads there rather than to the configured store.
 
-ISOLATING A RUN: set $TRADING_DESK_HOME (which moves config.toml too), or
-$TRADING_DESK_DB. NOT $TRADING_DESK_BOOK: in v1 that names only the frozen legacy hub.db,
-and a scratch run that sets just it still writes to the real desk.db. The test suite
+ISOLATING A RUN: set $TRADING_DESK_HOME (which moves config.toml and attachments/ too).
+$TRADING_DESK_DB moves desk.db alone, so screenshots still go to the real root. NOT
+$TRADING_DESK_BOOK: 0.5 does not use it (in 0.4 it named hub.db), so a scratch run that
+sets just it still writes to the real desk.db. The test suite
 clears both overrides and points the root at a temp dir before every test (conftest.py).
 
 NOTE ON SYNCED FOLDERS. The default root is under ~/Documents, which iCloud syncs on many
@@ -105,7 +105,7 @@ def config() -> dict:
 
 
 def book_path(explicit: str | os.PathLike | None = None) -> Path:
-    """The frozen v0 book, hub.db. Read-only by design; v1 never writes to it.
+    """0.4's book path, hub.db. Nothing in 0.5 calls this; the old setting still resolves.
 
     Explicit path, then $TRADING_DESK_BOOK, then `book =` in config.toml, then <root>/hub.db.
     """
@@ -124,12 +124,12 @@ def book_path(explicit: str | os.PathLike | None = None) -> Path:
 
 
 def data_dir() -> Path:
-    """The v1 data root. Everything v1 uses lives here."""
+    """The data root; the same as home()."""
     return home()
 
 
 def db_path(explicit: str | os.PathLike | None = None) -> Path:
-    """The v1 event store. Precedence: explicit → env var → config.toml → default."""
+    """The store, desk.db. Precedence: explicit → env var → config.toml → default."""
     if explicit:
         return Path(explicit).expanduser().resolve()
     from_env = os.environ.get(ENV_DB)
@@ -172,17 +172,16 @@ def vault_path() -> Path | None:
 
 
 def legacy_book() -> Path:
-    """The v0 book, for migration. Same path resolution as book_path()."""
+    """0.4's book; nothing in 0.5 calls this. Same path resolution as book_path()."""
     return book_path()
 
 
-# The currencies the book can translate between. Two, because there are exactly two
-# recorded FX pairs in play and a third would need a rate nobody fetches.
+# The currencies a trade may be in.
 CURRENCIES = ("CAD", "USD")
 
 
 def schema_sql() -> Path:
-    """The v1 event-store schema. Package-relative.
+    """The store's schema. Package-relative.
 
     PACKAGE-RELATIVE, NOT REPO-RELATIVE, and that was a real defect rather than a tidy-up.
     It returned `REPO / "book" / "schema.sql"` where REPO is this file's grandparent -- which

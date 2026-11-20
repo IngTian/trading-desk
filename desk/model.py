@@ -2,8 +2,8 @@
 
 `decisions_of` reads a trade's `entered` event, its moves, its hand close and its void, with
 every correction read in place of the event it names. What the decisions led to -- fills,
-exits, R and cash -- is derived from them and the bars by plan 3's judge, which takes
-`Decisions` as its input.
+exits, R and cash -- will be derived from them and the bars by the judge (a later release),
+which takes `Decisions` as its input.
 
 ## Payload-key contract (what each trade event carries)
 
@@ -60,7 +60,7 @@ def _signed(side: str, a: float, b: float) -> float:
 @dataclass(frozen=True)
 class Plan:
     """The input to every check: one planned trade, as the checks read it. Nothing in the package
-    builds one yet; plan 4 builds it from a trade's entry when it wires the checks into trade()."""
+    builds one yet; the release that wires the checks into trade() builds it from an entry."""
     ticker: str
     side: str
     instrument: str
@@ -107,7 +107,7 @@ class Decisions:
     voided: bool
     reasons: str
     screenshots: tuple[dict, ...]
-    # From the trade's identity row unless a correction changed them (Ruling R9).
+    # From the trade's identity row unless a correction changed them.
     point_value: float
     currency: str
 

@@ -4,11 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly, because this suite can go red with nothing pushed. Its fixture is dated and
-  # several tests read a window anchored on today, so the calendar alone can move a row out
-  # of view -- daylogs hit exactly that six times, and once had eight tests failing on main
-  # while the last CI run, two weeks old, was green. Push-triggered CI cannot see a failure
-  # that the passage of time caused.
+  # Nightly, so a change in the runners, Python or uv that breaks the build shows up with
+  # nothing pushed.
   schedule:
     - cron: "23 6 * * *"
   # So a red nightly can be re-checked after a fix without an empty commit.
@@ -60,9 +57,9 @@ jobs:
           python-version: "3.11"
 
       - run: uv build --wheel --out-dir dist_check
-      - name: the wheel has the shape v1 needs
+      - name: the wheel has the shape the package needs
         run: python tools/check_wheel.py dist_check
-      - name: the installed wheel records a checked trade and passes its own integrity check
+      - name: the installed wheel records a trade and passes its own integrity check
         run: bash tools/smoke_wheel.sh dist_check
 
   # The repo is published, so a real figure from the author's own book is a leak rather than

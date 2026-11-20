@@ -16,7 +16,8 @@ Enter when price turns up from the pullback. Take profit at the previous high.
 
 ## Rules
 
-The desk checks every planned trade against this block. `min_reward_risk` is the reward divided
+The desk reads this block when the strategy is saved, and a later release checks every trade
+against it. `min_reward_risk` is the reward divided
 by the risk: 2 means the target is twice as far from the entry as the stop is.
 
 ```rules

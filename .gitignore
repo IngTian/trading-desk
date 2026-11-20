@@ -32,7 +32,7 @@ docs/
 tmpwork/
 scratch/
 .probe/
-# shots.py renders the REAL book -- every tab, with the real profile name -- as SVG, which is
+# shots.py (since deleted) rendered the REAL book -- every tab, with the real profile name -- as SVG, which is
 # greppable plaintext. It was not ignored, so one run plus `git add -A` would have committed a
 # picture of the positions into a repo that is about to be published.
 shots/
@@ -46,15 +46,15 @@ probe*.db
 #
 # The book is the owner's positions and balances. It was tracked until 2026-09-07 and the
 # history is still in git, so nothing is lost -- but going forward the repo carries
-# the TOOL and the SCHEMA (book/schema.sql), never the record. Point the tool at a
-# book with $TRADING_DESK_BOOK; create one with `python3 book/migrate.py --new`.
+# the TOOL and the SCHEMA (desk/schema.sql), never the record, which lives under the
+# data root (see desk/config.py).
 #
 # This also fixes a coupling that had already bitten: the tests read the live book
 # as a fixture, so recording a real trade turned three of them red.
 # BY EXTENSION, NOT BY PATH. `book/hub.db` only ignored the book at ITS path -- a book
 # created anywhere else in the tree, or under any other name, was committable. Nothing here
-# is a database that belongs in git: the schema is `book/schema.sql`, and every test and
-# screenshot builds its own in a temp directory. The author, 2026-09-25: "just make sure we dont
+# is a database that belongs in git: the schema is `desk/schema.sql`, and every test builds
+# its own in a temp directory. The author, 2026-09-25: "just make sure we dont
 # record it later on."
 *.db
 *.db-journal

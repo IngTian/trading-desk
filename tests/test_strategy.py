@@ -79,7 +79,7 @@ def test_a_retired_rule_is_refused_as_retired_not_as_a_typo():
 
 
 def test_an_unknown_rule_is_refused_as_not_checkable():
-    with pytest.raises(Refused, match="not a rule the desk can check"):
+    with pytest.raises(Refused, match="not a rule the desk knows"):
         strategy.parse(make("timeframes: 1h\nfeels_right: strongly"))
 
 

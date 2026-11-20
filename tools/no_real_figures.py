@@ -62,7 +62,7 @@ CLAIMS_REAL = re.compile(
     # because it names the leg rather than the book.
     #
     # THE FIXTURE'S TICKERS ARE EXCLUDED BY NAME, and that exclusion is the whole difficulty:
-    # tests/seed.py is full of trade ids like 2026-05-04-usdco sitting next to prices, all of
+    # the 0.4 fixture was full of trade ids like 2026-05-04-usdco sitting next to prices, all of
     # them invented. A first attempt without this fired on eight such lines, which is the
     # crying-wolf failure this file's own docstring warns about -- a check that flags the
     # fixture gets switched off within a week and then catches nothing.

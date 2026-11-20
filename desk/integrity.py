@@ -63,7 +63,7 @@ def _run_started_stopped(con: sqlite3.Connection) -> list[str]:
 def _decision_dates(con: sqlite3.Connection) -> list[str]:
     """By effective time: an entry is not before its run's start, nor (unless the trade is void)
     at or after its run's stop; a move is not before the entry and is strictly before the hand
-    close (R11); a close is strictly after the entry (R12).
+    close; a close is strictly after the entry.
 
     A trade is skipped when another invariant already reports why it cannot be folded (not one
     `entered`, a correction naming nothing in the trade, an unreadable event time). A fold that

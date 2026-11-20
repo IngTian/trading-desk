@@ -1,4 +1,4 @@
-"""The desk's one outward face: what the MCP server (plan 5) wraps, function for function.
+"""The desk's one outward face: what the MCP server (a later release) wraps, function for function.
 
 Every function takes an open connection and `now` (default: the wall clock, in UTC) so tests
 control time. Every refusal is a `Refused` whose message says what to change.
@@ -43,7 +43,7 @@ def _at(now: datetime | None) -> str:
     return _aware(now).astimezone(UTC).isoformat()
 
 
-# Plan 5 passes the agent's JSON straight in, so a parameter can arrive as any JSON type.
+# The MCP server will pass the agent's JSON straight in, so a parameter can arrive as any JSON type.
 def _text(name: str, value) -> str:
     if not isinstance(value, str):
         raise Refused(f"{name} must be text, a string; got {value!r}.")
@@ -360,7 +360,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
             raise Refused("A future needs point_value: the cash a one-point move is worth on one "
                           "contract, e.g. 100.")
         _price("point_value", point_value)
-    elif point_value is not None:  # Ruling R15: dropping it would understate the risk for good
+    elif point_value is not None:  # dropping it would understate the risk for good
         raise Refused(f"point_value is only for a future and {ticker!r} reads as "
                       f"{'an' if kind == 'etf' else 'a'} {kind}; pass instrument='future' (or a "
                       f"continuous ticker such as '{symbol}1!'), or leave point_value out.")
@@ -435,7 +435,7 @@ def _after_entry(trade: str, d: model.Decisions, when: datetime) -> None:
 
 
 def _before_close(trade: str, d: model.Decisions, when: datetime) -> None:
-    """A move is strictly before the hand close (Ruling R11): one at the close's `at` would
+    """A move is strictly before the hand close: one at the close's `at` would
     take effect only from the bar after the exit."""
     if d.close_at is not None and when >= d.close_at:
         raise Refused(f"Trade {trade!r} was closed by hand at {d.close_at.isoformat()}; a move "
@@ -476,7 +476,7 @@ def close_trade(con: sqlite3.Connection, trade: str, *, reason: str, at: datetim
                           f"{d.close_reason!r}. A trade is closed once; if that close was a "
                           "mistake, void the trade and enter it again.")
         _after_entry(trade, d, when)
-        if when == d.entry.at:  # Ruling R12: a close is strictly after the entry
+        if when == d.entry.at:  # a close is strictly after the entry
             raise Refused(f"Trade {trade!r} was entered at {d.entry.at.isoformat()}; a close at "
                           "that same moment leaves it no time open, so give a later `at`.")
         if d.moves and when <= d.moves[-1].at:  # moves are in `at` order: the last is latest
@@ -496,7 +496,7 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                   now: datetime | None = None) -> TradeView:
     """Correct the entry, or with `move: <index>` (its place in get_trade's moves) one move.
     Appended as a `corrected` event naming that `entered` or `order_moved` event, read in its
-    place; only the fields named change. A field given as None is not given (Ruling R14), so a
+    place; only the fields named change. A field given as None is not given, so a
     stop or target is never removed by a correction. A wrong run, ticker or side is not
     corrected either: void the trade and enter it again."""
     now = _aware(now)
@@ -538,7 +538,7 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
             if when is not None:
                 _within_run(_run_view(con, store.run(con, row["run_id"])), when)
                 later = [m.at for m in d.moves]
-                if d.close_at is not None and when >= d.close_at:  # Ruling R12
+                if d.close_at is not None and when >= d.close_at:  # an entry is before the close
                     raise Refused(f"Trade {trade!r} was closed by hand at "
                                   f"{d.close_at.isoformat()}; its entry must be before that, so "
                                   "give an earlier `at`.")
@@ -568,7 +568,7 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
 
 def void_trade(con: sqlite3.Connection, trade: str, *, reason: str,
                now: datetime | None = None) -> TradeView:
-    """Take the trade out of every stat and every other trade's checks; it stays in the log."""
+    """Void a trade: it stays in the log; later releases' statistics and checks leave it out."""
     now = _aware(now)
     row = _decision(con, trade, reason)
     with store.transaction(con):

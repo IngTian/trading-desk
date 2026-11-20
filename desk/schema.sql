@@ -38,7 +38,7 @@ CREATE TABLE runs (
 ) STRICT;
 
 CREATE TABLE trades (
-    id          TEXT PRIMARY KEY,                        -- plan 1's "<ticker>-<YYYYMMDD>[-N]"
+    id          TEXT PRIMARY KEY,                        -- "<ticker>-<YYYYMMDD>[-N]"
     run_id      TEXT NOT NULL REFERENCES runs(id),
     ticker      TEXT NOT NULL,
     side        TEXT NOT NULL CHECK (side IN ('long','short')),

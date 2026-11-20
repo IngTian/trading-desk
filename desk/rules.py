@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from desk.errors import Refused
 
 # A fence opens with 3+ backticks or tildes. The info string must follow it directly: "``` rules"
-# (with a space) is a typo to refuse, as plan 1 ruled.
+# (with a space) is a typo to refuse.
 _FENCE = re.compile(r"^(`{3,}|~{3,})(.*)$")
 
 

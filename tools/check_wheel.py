@@ -1,4 +1,4 @@
-"""Assert a built wheel has the shape v1 needs. Run by CI and by the release, before publishing.
+"""Assert a built wheel has the shape the package needs. Run by CI and the release, pre-publish.
 
     python tools/check_wheel.py <dir holding the .whl>
 
@@ -39,7 +39,7 @@ def main(folder: str) -> int:
     if unexpected:
         return _fail(f"unexpected top-level packages in {wheel}: {sorted(unexpected)}")
 
-    # The v0 commands (desk, desk-migrate, desk-check, desk-mcp) are gone; a wheel that still
+    # 0.4's commands (desk, desk-migrate, desk-check, desk-mcp) are gone; a wheel that still
     # declared one would install a command that imports a deleted module.
     (entry_points,) = [n for n in names if n.endswith(".dist-info/entry_points.txt")]
     parsed = configparser.ConfigParser()

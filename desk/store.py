@@ -62,8 +62,8 @@ def _probe(db: Path) -> None:
     if version != SCHEMA_VERSION or not {"recorded_at", "kind", "payload"} <= columns:
         raise NotADeskDatabase(
             f"{db} is not a v2 desk.db (schema version {version}, expected {SCHEMA_VERSION}); "
-            f"it was left untouched. If it is the old book, it is read-only by design: point "
-            f"TRADING_DESK_DB or config.toml's `db` at desk.db instead.")
+            f"it was left untouched. This version does not read the 0.4 book (hub.db): point "
+            f"TRADING_DESK_DB or config.toml's `db` at a desk.db instead.")
 
 
 def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connection:
@@ -85,8 +85,7 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
     if not db.exists():
         # Guard against creating an empty file that blocks store.create()
         raise FileNotFoundError(
-            f"{db} does not exist; the book has not been created yet. "
-            f"Create it with store.create()."
+            f"{db} does not exist; it has not been created yet. Create it with store.create()."
         )
     _probe(db)
     if read_only:

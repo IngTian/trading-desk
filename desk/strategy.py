@@ -53,7 +53,7 @@ def parse(text: str) -> ParsedStrategy:
                 f"strategy: {rule!r} is not a rule in this version of the desk; delete the line")
         if rule not in checks.RULE_NAMES:
             raise Refused(
-                f"strategy: {rule!r} is not a rule the desk can check; the rules are "
+                f"strategy: {rule!r} is not a rule the desk knows; the rules are "
                 f"{', '.join(sorted(checks.RULE_NAMES))}")
         if rule != "timeframes" and (why := checks.read_value(rule, value)):
             raise Refused(f"strategy: {rule}: {why}")
