@@ -265,6 +265,69 @@ def test_a_trade_id_is_matched_whatever_its_case(home, capsys):
     assert kinds(tid) == ["checked", "entered"]
 
 
+# ---------------------------------------------------------------- the check's output ---
+
+
+def test_every_result_line_is_marked_with_its_state(home, capsys):
+    """A breach printed exactly like a pass, so mid-session every line had to be read
+    against its limit by eye. The exit code stays 0: a result is a fact, never a block."""
+    rc, out, _ = run(capsys, "check", *GC, "--side", "long", "--entry", "2000",
+                     "--stop", "1997", "--target", "2004", "--size", "1", "--account", "replay")
+    assert rc == 0
+    lines = out.splitlines()
+    assert any(ln.startswith("BREACH") and "reward to risk 1.33" in ln for ln in lines)
+    assert any(ln.startswith("BREACH") and "risk 300.00 USD" in ln for ln in lines)
+    assert any(ln.startswith("pass") and "the stop 1997" in ln for ln in lines)
+
+
+def test_a_withheld_figure_is_marked_unknown_and_an_unchecked_rule_ask(home, capsys):
+    (home / "rules.md").write_text(
+        RULES + "\n## Paper — run 1\n\n```rules\nfeels_right: yes\n```\n")
+    rc, out, _ = run(capsys, "check", "--ticker", "ACME", "--currency", "USD", "--side", "long",
+                     "--entry", "10", "--target", "13", "--account", "paper", "--run", "1")
+    assert rc == 0
+    lines = out.splitlines()
+    assert any(ln.startswith("unknown") and "no stop" in ln for ln in lines)
+    assert any(ln.startswith("ask") and "feels_right: yes" in ln for ln in lines)
+
+
+def test_a_missing_account_section_is_said_in_prose_json_and_the_record(home, capsys):
+    """With no '## Replay', a replay trade got All's rules alone and nothing said so."""
+    (home / "rules.md").write_text(RULES.split("## Replay")[0])
+    rc, out, _ = run(capsys, "check", *GC, "--side", "long", "--entry", "2000",
+                     "--stop", "1998.5", "--target", "2003", "--size", "1", "--account", "replay")
+    assert rc == 0
+    assert "no '## Replay' section" in out
+
+    rc, out, err = run(capsys, "check", "--json", *GC, "--side", "long", "--entry", "2000",
+                       "--stop", "1998.5", "--target", "2003", "--size", "1",
+                       "--account", "replay")
+    (warning,) = json.loads(out)["warnings"]
+    assert "no '## Replay' section" in warning
+    tid = re.search(r"recorded as (\S+)", err).group(1)
+    (checked_event,) = store.events(store.open(), trade_id=tid)
+    assert json.loads(checked_event["payload"])["warnings"] == [warning]
+
+
+def test_an_unrecognised_section_is_in_the_json_too(home, capsys):
+    (home / "rules.md").write_text(
+        RULES + "\n## Real — run 9\n\n```rules\nmin_reward_risk: 1\n```\n")
+    rc, out, _ = run(capsys, "check", "--json", "--ticker", "ACME", "--currency", "USD",
+                     "--side", "long", "--entry", "10", "--stop", "9", "--target", "13",
+                     "--size", "10", "--account", "paper")
+    assert rc == 0
+    assert any("Real — run 9" in w for w in json.loads(out)["warnings"])
+
+
+def test_a_run_that_names_no_single_run_is_refused_cleanly(home, capsys):
+    rc, _, err = run(capsys, "check", "--ticker", "ACME", "--currency", "USD", "--side", "long",
+                     "--entry", "10", "--stop", "9", "--target", "13", "--account", "paper",
+                     "--run", "3b")
+    assert rc == 1
+    assert "does not name a run" in err
+    assert "Traceback" not in err
+
+
 # ------------------------------------------------------------------- daily loss ---
 
 

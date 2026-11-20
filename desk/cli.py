@@ -96,6 +96,35 @@ def _generate_trade_id(ticker: str, local_date: str, existing_ids: list[str]) ->
 
 
 
+def _mark(result: checks.Result) -> str:
+    """pass / BREACH / unknown / ask: the result's state, for the start of its line."""
+    if result.ok is True:
+        return "pass"
+    if result.ok is False:
+        return "BREACH"
+    return "ask" if result.says.endswith(checks.ASKED) else "unknown"
+
+
+def _scope_warnings(rules_file: rules.RulesFile, scoped: rules.Rules, account: str) -> list[str]:
+    """What prose and JSON must both say about the rules that did NOT apply.
+
+    A section no scope can reach, and an account section the scope looked for and did not
+    find. Neither is refused -- an All-only scope may be meant -- but neither is silent: with
+    no "## Replay", a replay trade gets All's rules alone, with no risk limit at all.
+    """
+    warnings = [
+        f"unrecognised section '{name}': it matches no account or run, so none of its rules "
+        f"will ever apply"
+        for name in rules_file.unrecognised_sections()
+    ]
+    warnings += [
+        f"no '## {name}' section in {rules_file.path.name}, so this {account} trade is checked "
+        f"against {', '.join(scoped.sections_used) or 'no section'} only"
+        for name in scoped.sections_missing
+    ]
+    return warnings
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Run checks on a planned trade and record the event."""
     # Two clocks: local date for the trade id (because "today" means the trader's day),
@@ -109,7 +138,11 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     # Normalize run_id early
     if args.run:
-        args.run = rules.normalize_run_id(args.run)
+        try:
+            args.run = rules.normalize_run_id(args.run)
+        except ValueError as e:
+            print(f"--run {e}", file=sys.stderr)
+            return 1
 
     # Normalize the ticker at the boundary, so the way it was typed cannot turn a rule off:
     # upper case (--ticker acme once passed a group rule it was in), and a continuous futures
@@ -247,17 +280,20 @@ def cmd_check(args: argparse.Namespace) -> int:
     # Run the checks
     results = checks.run_checks(plan, scoped_rules, ctx)
 
+    warnings = _scope_warnings(rules_file, scoped_rules, args.account)
+
     # Print results (prose or JSON)
     if args.json:
-        # JSON output: plan, results, ask items, sections_used, and rules hash
         # allow_nan=False is belt-and-braces: checks already withhold rather than dividing by
-        # zero, but this ensures an Infinity can never escape as invalid JSON.
+        # zero, but this ensures an Infinity can never escape as invalid JSON. The warnings are
+        # here too: a JSON reader (the MCP server, Claude) must not see less than prose does.
         output = {
             "plan": asdict(plan),
             "results": [asdict(r) for r in results],
             "ask": list(scoped_rules.ask),
             "sections_used": list(scoped_rules.sections_used),
             "rules_hash": rules_file.hash,
+            "warnings": warnings,
         }
         print(json.dumps(output, allow_nan=False))
     else:
@@ -265,35 +301,15 @@ def cmd_check(args: argparse.Namespace) -> int:
         rule_names = sorted({r.name for r in results if r.ok is not None})
         section_names = ", ".join(scoped_rules.sections_used)
         print(f"checked {', '.join(rule_names)} — from {section_names}")
-
-        # Report any sections that match no recognized shape (typos, wrong case)
-        # Recognized: All, Real/Paper/Replay, "<Account> — run <anything>", Groups, Changes
-        def _is_recognized(section_name: str) -> bool:
-            """True if the section name matches a recognized shape."""
-            if section_name in ("All", "Groups", "Changes"):
-                return True
-            if section_name in ("Real", "Paper", "Replay"):
-                return True
-            # Match "<Account> — run <anything>"
-            if " — run " in section_name:
-                account_part = section_name.split(" — run ")[0]
-                if account_part in ("Real", "Paper", "Replay"):
-                    return True
-            return False
-
-        unrecognised = sorted([
-            s for s in rules_file._sections.keys()
-            if not _is_recognized(s)
-        ])
-        for section_name in unrecognised:
-            print(
-                f"unrecognised section '{section_name}': it matches no account or run, "
-                f"so none of its rules will ever apply"
-            )
-
-        # Then one line per result
+        for warning in warnings:
+            print(warning)
+        # One line per result, marked with its state so a breach never reads like a pass:
+        # mid-session, comparing every figure with its limit by eye is the arithmetic this
+        # tool exists to do. The mark is a fact about the figure, never a grade.
+        # No count or summary line: "0 of 3 breached" reads as a score, which the spec's
+        # anti-goals rule out.
         for result in results:
-            print(result.says)
+            print(f"{_mark(result):<7} {result.says}")
         # The owner's ### Ask me questions, verbatim
         for question in scoped_rules.ask:
             print(f"Ask me: {question}")
@@ -309,6 +325,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         "ask": list(scoped_rules.ask),
         "sections_used": list(scoped_rules.sections_used),
         "rules_hash": rules_file.hash,
+        "warnings": warnings,
     }
 
     # Write trade row and checked event atomically
