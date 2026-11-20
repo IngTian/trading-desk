@@ -39,7 +39,7 @@ def _checked(con, trade_id):
     return store.append(
         con,
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=trade_id,
         payload={},
@@ -51,7 +51,7 @@ def _enter(con, trade_id, *, size=100, entry=None, stop=None, target=None):
     return store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=trade_id,
         payload={
@@ -71,7 +71,7 @@ def _exit(con, trade_id, *, size=10, price=None):
     return store.append(
         con,
         kind="exited",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=trade_id,
         payload={"price": price or 105.0, "size": size},
@@ -83,7 +83,7 @@ def _close(con, trade_id):
     return store.append(
         con,
         kind="closed",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=trade_id,
         payload={},
@@ -121,7 +121,7 @@ def _build_dangling_correction(db_path):
     bad_conn.execute(
         """
         INSERT INTO events (id, at, actor, source, kind, trade_id, corrects, payload)
-        VALUES (10, '2026-11-10T12:00:00Z', 'ing', 'chat', 'corrected', ?, 5, '{}')
+        VALUES (10, '2026-11-10T12:00:00Z', 'owner', 'chat', 'corrected', ?, 5, '{}')
         """,
         (invented.TEST_TRADE_ID,),
     )
@@ -212,7 +212,7 @@ def test_a_corrected_check_after_entry_is_clean(con):
     store.append(
         con,
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         corrects=check_id,
@@ -238,7 +238,7 @@ def test_entry_corrected_after_exit_still_fires(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         corrects=entry_id,
@@ -273,7 +273,7 @@ def test_sql_invariants_exclude_superseded_events(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         corrects=entry_id,

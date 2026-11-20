@@ -787,7 +787,7 @@ def test_entered_refuses_duplicate_entry(fresh_desk_home, capsys):
         currency="USD",
         side="long",
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="cli",
         payload={"plan": {}},
         rules_hash="test-hash",
@@ -796,7 +796,7 @@ def test_entered_refuses_duplicate_entry(fresh_desk_home, capsys):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id="test-trade",
         payload={
@@ -845,7 +845,7 @@ def test_exited_refuses_exit_without_entry(fresh_desk_home, capsys):
         currency="USD",
         side="long",
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="cli",
         payload={"plan": {}},
         rules_hash="test-hash",
@@ -875,7 +875,7 @@ def test_exited_refuses_over_exit(fresh_desk_home, capsys):
         currency="USD",
         side="long",
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="cli",
         payload={"plan": {}},
         rules_hash="test-hash",
@@ -884,7 +884,7 @@ def test_exited_refuses_over_exit(fresh_desk_home, capsys):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id="test-trade",
         payload={
@@ -923,7 +923,7 @@ def test_stop_moved_refuses_without_entry(fresh_desk_home, capsys):
         currency="USD",
         side="long",
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="cli",
         payload={"plan": {}},
         rules_hash="test-hash",
@@ -953,7 +953,7 @@ def test_closed_refuses_when_still_holding_size(fresh_desk_home, capsys):
         currency="USD",
         side="long",
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="cli",
         payload={"plan": {}},
         rules_hash="test-hash",
@@ -962,7 +962,7 @@ def test_closed_refuses_when_still_holding_size(fresh_desk_home, capsys):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id="test-trade",
         payload={

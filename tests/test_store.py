@@ -35,7 +35,7 @@ def test_an_event_round_trips_with_its_payload(con):
     eid = store.append(
         con,
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=T,
         payload={"entry": 10.0, "stop": 9.0},
@@ -46,7 +46,7 @@ def test_an_event_round_trips_with_its_payload(con):
 
 def test_the_log_refuses_an_update_and_a_delete(con):
     eid = store.append(
-        con, kind="note", actor="ing", source="chat", trade_id=T, payload={"text": "x"}
+        con, kind="note", actor="owner", source="chat", trade_id=T, payload={"text": "x"}
     )
     with pytest.raises(sqlite3.IntegrityError):
         con.execute("UPDATE events SET payload='{}' WHERE id=?", (eid,))
@@ -59,7 +59,7 @@ def test_a_correction_must_name_an_earlier_event(con):
         store.append(
             con,
             kind="corrected",
-            actor="ing",
+            actor="owner",
             source="chat",
             trade_id=T,
             corrects=9999,
@@ -68,10 +68,12 @@ def test_a_correction_must_name_an_earlier_event(con):
 
 
 def test_a_payload_that_is_not_json_is_refused(con):
-    with pytest.raises(sqlite3.IntegrityError):
+    # match= because every other column must be valid for this to test the JSON check: with
+    # an unknown actor the row was refused by the actor CHECK and the test passed regardless.
+    with pytest.raises(sqlite3.IntegrityError, match="json_valid"):
         con.execute(
             "INSERT INTO events (at, actor, source, kind, payload) VALUES (?, ?, ?, ?, ?)",
-            ("2026-11-10T10:00:00Z", "ing", "chat", "note", "not-json"),
+            ("2026-11-10T10:00:00Z", "owner", "chat", "note", "not-json"),
         )
 
 
@@ -81,7 +83,7 @@ def test_an_unknown_kind_actor_or_source_is_refused(con):
         store.append(
             con,
             kind="unknown_kind",
-            actor="ing",
+            actor="owner",
             source="chat",
             trade_id=T,
             payload={},
@@ -101,7 +103,7 @@ def test_an_unknown_kind_actor_or_source_is_refused(con):
         store.append(
             con,
             kind="note",
-            actor="ing",
+            actor="owner",
             source="unknown_source",
             trade_id=T,
             payload={},
@@ -116,7 +118,7 @@ def test_read_only_open_cannot_write(tmp_path):
             store.append(
                 conn,
                 kind="note",
-                actor="ing",
+                actor="owner",
                 source="chat",
                 payload={"text": "x"},
             )
@@ -216,7 +218,7 @@ def test_add_trade_with_event_is_atomic(tmp_path):
             currency="USD",
             side="long",
             kind="checked",
-            actor="ing",
+            actor="owner",
             source="chat",
             payload={"bad": NotSerializable()},  # This will fail json.dumps
             rules_hash="abc123",
@@ -239,7 +241,7 @@ def test_cli_is_a_valid_event_source(con):
     eid = store.append(
         con,
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id=T,
         payload={"entry": 10.0},

@@ -13,7 +13,7 @@ from pathlib import Path
 from desk import config
 
 # The tuples the CHECKs use, exported so tests and later tasks do not re-declare them.
-ACTORS = ("ing", "tracker", "import")
+ACTORS = ("owner", "tracker", "import")
 SOURCES = ("chat", "cli", "export", "yahoo")
 KINDS = (
     "checked",

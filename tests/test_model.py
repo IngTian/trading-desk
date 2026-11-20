@@ -26,7 +26,7 @@ def _trade(con, trade_id, *, side="long", stop=95.0, ticker=None):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=trade_id,
         payload={
@@ -42,12 +42,12 @@ def _trade(con, trade_id, *, side="long", stop=95.0, ticker=None):
 
 
 def _exit(con, trade_id, price, at, *, size=10):
-    store.append(con, kind="exited", actor="ing", source="chat", trade_id=trade_id,
+    store.append(con, kind="exited", actor="owner", source="chat", trade_id=trade_id,
                  payload={"price": price, "size": size}, at=at.isoformat())
 
 
 def _close(con, trade_id, at):
-    store.append(con, kind="closed", actor="ing", source="chat", trade_id=trade_id,
+    store.append(con, kind="closed", actor="owner", source="chat", trade_id=trade_id,
                  payload={}, at=at.isoformat())
 
 
@@ -76,7 +76,7 @@ def test_a_stop_move_is_the_latest_one_that_counts(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={
@@ -93,7 +93,7 @@ def test_a_stop_move_is_the_latest_one_that_counts(con):
     store.append(
         con,
         kind="stop_moved",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"stop": 98.0},
@@ -102,7 +102,7 @@ def test_a_stop_move_is_the_latest_one_that_counts(con):
     store.append(
         con,
         kind="stop_moved",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"stop": 99.0},
@@ -129,7 +129,7 @@ def test_partial_exits_reduce_the_open_size_and_realise_r_on_their_share(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={
@@ -146,7 +146,7 @@ def test_partial_exits_reduce_the_open_size_and_realise_r_on_their_share(con):
     store.append(
         con,
         kind="exited",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"price": 105.0, "size": 2},
@@ -155,7 +155,7 @@ def test_partial_exits_reduce_the_open_size_and_realise_r_on_their_share(con):
     store.append(
         con,
         kind="exited",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"price": 108.0, "size": 3},
@@ -189,7 +189,7 @@ def test_a_corrected_event_is_superseded_by_the_one_that_corrects_it(con):
     event_id = store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={
@@ -206,7 +206,7 @@ def test_a_corrected_event_is_superseded_by_the_one_that_corrects_it(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         corrects=event_id,
@@ -245,7 +245,7 @@ def test_an_exit_cannot_exceed_the_open_size(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={
@@ -262,7 +262,7 @@ def test_an_exit_cannot_exceed_the_open_size(con):
     store.append(
         con,
         kind="exited",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"price": 105.0, "size": 7},
@@ -291,7 +291,7 @@ def test_a_passed_trade_never_opens(con):
     store.append(
         con,
         kind="passed",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"setup": "test-setup", "thesis": "test thesis"},
@@ -319,7 +319,7 @@ def test_the_setup_label_records_when_it_was_written_relative_to_the_exit(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={
@@ -336,7 +336,7 @@ def test_the_setup_label_records_when_it_was_written_relative_to_the_exit(con):
     exit_event_id = store.append(
         con,
         kind="exited",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"price": 105.0, "size": 10},
@@ -345,7 +345,7 @@ def test_the_setup_label_records_when_it_was_written_relative_to_the_exit(con):
     store.append(
         con,
         kind="labelled",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"setup": "labelled-after-exit"},
@@ -377,7 +377,7 @@ def test_realised_r_respects_side_for_short_positions(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={
@@ -394,7 +394,7 @@ def test_realised_r_respects_side_for_short_positions(con):
     store.append(
         con,
         kind="exited",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={"price": 90.0, "size": 10},
@@ -435,7 +435,7 @@ def test_a_trade_that_hit_its_target_is_not_a_stop(con):
     """Nothing to cool down from, and an empty dict is an answer rather than a missing one."""
     _trade(con, "trade-a")
     _exit(con, "trade-a", 105.0, STOPPED_AT)
-    store.append(con, kind="closed", actor="ing", source="chat", trade_id="trade-a", payload={})
+    store.append(con, kind="closed", actor="owner", source="chat", trade_id="trade-a", payload={})
 
     assert model.stopped_closes(con) == {}
 
@@ -482,7 +482,7 @@ def test_trade_state_carries_account_and_run_id(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=invented.TEST_TRADE_ID,
         payload={
@@ -518,7 +518,7 @@ def test_open_trades_filters_by_account(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id="real-1",
         payload={
@@ -556,7 +556,7 @@ def test_open_trades_filters_by_account(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id="paper-1",
         payload={
@@ -619,7 +619,7 @@ def test_open_trades_filters_by_run_id(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id="paper-run1",
         payload={
@@ -648,7 +648,7 @@ def test_open_trades_filters_by_run_id(con):
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id="paper-run2",
         payload={

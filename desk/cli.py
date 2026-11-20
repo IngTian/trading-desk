@@ -251,7 +251,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         currency=args.currency,
         side=args.side,
         kind="checked",
-        actor="ing",
+        actor="owner",
         source="cli",
         payload=payload,
         rules_hash=rules_file.hash,
@@ -324,7 +324,7 @@ def cmd_entered(args: argparse.Namespace) -> int:
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id=trade_id,
         payload=payload,
@@ -383,7 +383,7 @@ def cmd_exited(args: argparse.Namespace) -> int:
     store.append(
         con,
         kind="exited",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id=trade_id,
         payload=payload,
@@ -447,7 +447,7 @@ def cmd_stop_moved(args: argparse.Namespace) -> int:
     store.append(
         con,
         kind="stop_moved",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id=trade_id,
         payload=payload,
@@ -493,7 +493,7 @@ def cmd_closed(args: argparse.Namespace) -> int:
     store.append(
         con,
         kind="closed",
-        actor="ing",
+        actor="owner",
         source="cli",
         trade_id=trade_id,
         payload=payload,

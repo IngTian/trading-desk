@@ -98,7 +98,7 @@ def enter(con, trade_id, ticker, *, size=10, side="long", exit_size=None, close=
     store.append(
         con,
         kind="entered",
-        actor="ing",
+        actor="owner",
         source="chat",
         trade_id=trade_id,
         payload={
@@ -115,13 +115,13 @@ def enter(con, trade_id, ticker, *, size=10, side="long", exit_size=None, close=
         store.append(
             con,
             kind="exited",
-            actor="ing",
+            actor="owner",
             source="chat",
             trade_id=trade_id,
             payload={"price": 105.0, "size": exit_size},
         )
     if close:
-        store.append(con, kind="closed", actor="ing", source="chat", trade_id=trade_id, payload={})
+        store.append(con, kind="closed", actor="owner", source="chat", trade_id=trade_id, payload={})
     return trade_id
 
 
