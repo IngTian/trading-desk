@@ -86,7 +86,7 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
         # Guard against creating an empty file that blocks store.create()
         raise FileNotFoundError(
             f"{db} does not exist; the book has not been created yet. "
-            f"Run `trading-desk check` to create it."
+            f"Create it with store.create()."
         )
     _probe(db)
     if read_only:

@@ -9,7 +9,6 @@ lives under one data root:
 
     ~/Documents/trading-desk/
         config.toml   optional; every key has a default
-        rules.md      the owner's rules
         desk.db       the v1 event store -- the only file v1 writes
         bars/, reports/, imports/
         hub.db        the v0 book: frozen, opened read-only by name, never written
@@ -26,9 +25,9 @@ desk.db resolves most explicit first:
     4. <root>/desk.db                  the default
 
 (2) deliberately beats (3) so a one-off `TRADING_DESK_DB=/tmp/scratch.db trading-desk
-check ...` writes there rather than to the configured store.
+integrity` reads there rather than to the configured store.
 
-ISOLATING A RUN: set $TRADING_DESK_HOME (which moves config.toml and rules.md too), or
+ISOLATING A RUN: set $TRADING_DESK_HOME (which moves config.toml too), or
 $TRADING_DESK_DB. NOT $TRADING_DESK_BOOK: in v1 that names only the frozen legacy hub.db,
 and a scratch run that sets just it still writes to the real desk.db. The test suite
 clears both overrides and points the root at a temp dir before every test (conftest.py).
@@ -144,11 +143,6 @@ def db_path(explicit: str | os.PathLike | None = None) -> Path:
     return (home() / "desk.db").resolve()
 
 
-def rules_path() -> Path:
-    """The user's trading rules, in Markdown."""
-    return (home() / "rules.md").resolve()
-
-
 def bars_dir() -> Path:
     """Where fetched OHLC bars are cached."""
     return (home() / "bars").resolve()
@@ -204,21 +198,7 @@ def schema_sql() -> Path:
     return Path(__file__).resolve().parent / "schema.sql"
 
 
-def example_rules() -> Path:
-    """The worked example rules file a new user copies to start their own. Package-relative.
-
-    PACKAGE-RELATIVE, NOT REPO-RELATIVE, for the same reason as schema_sql(). This file
-    lived in docs/ which is deliberately ignored (for Claude-generated design specs), and
-    force-adding it there was wrong -- it is a shipped artifact, not a doc. Moved to desk/
-    and declared in package-data so an installed copy finds it the same way a checkout does.
-
-    A plain path works for both cases because a wheel is unpacked into site-packages, so
-    `desk/rules.example.md` is a real file on disk either way -- no importlib.resources needed.
-    """
-    return Path(__file__).resolve().parent / "rules.example.md"
-
-
 def example_strategy() -> Path:
     """The worked example strategy a new user copies to start their own. Package-relative,
-    like example_rules(): a real file on disk for a checkout and an installed wheel alike."""
+    a real file on disk for a checkout and an installed wheel alike."""
     return Path(__file__).resolve().parent / "strategy.example.md"
