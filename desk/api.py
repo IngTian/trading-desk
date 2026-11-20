@@ -334,15 +334,15 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     if when < started:
         raise Refused(f"Run {run!r} started at {started.isoformat()}; a trade cannot be entered "
                       "before that, so give a later `at`.")
-    for _, data, stored in shots:  # content-addressed, so a repeat is skipped
-        if data is not None and not (config.attachments_dir() / stored).exists():
-            config.attachments_dir().mkdir(parents=True, exist_ok=True)
-            (config.attachments_dir() / stored).write_bytes(data)
     with store.transaction(con):  # the run's state and the id's collisions are read under the lock
         view = _run_view(con, row)
         if view.stopped is not None and when >= view.stopped:
             raise Refused(f"Run {run!r} stopped at {view.stopped.isoformat()}; a trade cannot be "
                           "entered at or after that, so give an earlier `at`.")
+        for _, data, stored in shots:  # after every refusal; content-addressed, so a repeat skips
+            if data is not None and not (config.attachments_dir() / stored).exists():
+                config.attachments_dir().mkdir(parents=True, exist_ok=True)
+                (config.attachments_dir() / stored).write_bytes(data)
         id = _generate_trade_id(symbol, when.astimezone().strftime("%Y%m%d"),
                                 [t["id"] for t in store.trades(con)])
         store.add_trade(con, id, run, symbol, side, kind, float(point_value), currency)

@@ -168,3 +168,15 @@ def test_a_bad_screenshot_is_refused_before_anything_is_written(con, tmp_path, b
         enter(con, screenshots=[str(good), bad])
     assert store.trades(con) == []
     assert not config.attachments_dir().exists()
+
+
+def test_a_trade_refused_for_the_run_stop_stores_no_screenshot(con, tmp_path):
+    f = tmp_path / "chart.png"
+    f.write_bytes(b"pixels")
+    stop = NOW + timedelta(days=3)
+    api.stop_run(con, "dip-buyer-r2", at=stop, now=NOW)
+    with pytest.raises(api.Refused, match="stopped"):
+        enter(con, "dip-buyer-r2", at=stop, screenshots=[str(f)])
+    assert not config.attachments_dir().exists()
+    enter(con, "dip-buyer-r2", at=stop - timedelta(minutes=1), screenshots=[str(f)])
+    assert config.attachments_dir().exists()  # so the assertion above is not vacuous
