@@ -27,7 +27,9 @@ def normalise(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
-def _name(text: str) -> str:
+def name_of(text: str) -> str:
+    """The front matter's `name`, read alone: a stored version is read by this, never re-parsed,
+    so a parser tightened later cannot make an old version unreadable."""
     lines = text.replace("\r\n", "\n").split("\n")
     if lines[0].strip() == "---":
         for ln in lines[1:]:
@@ -43,7 +45,7 @@ def _name(text: str) -> str:
 
 def parse(text: str) -> ParsedStrategy:
     """Read a strategy, or raise Refused naming the line the checks could not apply."""
-    name = _name(text)
+    name = name_of(text)
     found = rules.parse_rules_block(text, "strategy")
     for rule, value in found.items():
         if rule in checks.RETIRED:

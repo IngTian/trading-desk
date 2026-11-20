@@ -122,6 +122,28 @@ def test_a_successful_group_commits_both_rows(tmp_path):
     assert len(store.versions(other, "beta")) == 1
 
 
+def test_a_failed_commit_leaves_the_connection_usable(tmp_path):
+    """Review item 7: a COMMIT refused because a reader held the file left the connection inside
+    its transaction, holding the write lock, so every later write failed with "cannot start a
+    transaction within a transaction" until the process restarted."""
+    db = tmp_path / "t.db"
+    store.create(db)
+    con = store.open(db)
+    con.execute("PRAGMA busy_timeout = 50")
+    reader = sqlite3.connect(db, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM strategies").fetchone()  # SHARED, held until COMMIT
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        with store.transaction(con):
+            store.add_strategy(con, "beta", AT)
+    assert not con.in_transaction
+    reader.execute("COMMIT")
+    with store.transaction(con):
+        store.add_strategy(con, "gamma", AT)
+    assert [r["id"] for r in con.execute("SELECT id FROM strategies")] == ["gamma"]
+    reader.close()
+
+
 def test_a_lone_append_is_durable(con, tmp_path):
     _append(con)
     other = store.open(tmp_path / "test.db", read_only=True)

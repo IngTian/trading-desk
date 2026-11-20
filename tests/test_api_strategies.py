@@ -1,10 +1,11 @@
 """Tests for saving and reading strategies through the api. Every figure is invented."""
+import hashlib
 from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
-from desk import api, store
+from desk import api, store, strategy
 
 NOW = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 
@@ -79,6 +80,31 @@ def test_a_new_id_with_if_current_is_refused_and_a_bad_slug_too(con):
         api.save_strategy(con, "dip-buyer", make(), if_current="abc", now=NOW)
     with pytest.raises(api.Refused, match="Dip_Buyer"):
         api.save_strategy(con, "Dip_Buyer", make(), now=NOW)
+
+
+def test_an_id_over_64_characters_is_refused_as_an_invalid_id(con):
+    """Review item 6: a 65-character id passed the slug check, failed the schema's length CHECK
+    and came back as "changed by another session"."""
+    with pytest.raises(api.Refused, match="1 to 64 lowercase letters"):
+        api.save_strategy(con, "a" * 65, make(), now=NOW)
+    assert api.list_strategies(con) == []
+    assert api.save_strategy(con, "a" * 64, make(), now=NOW).id == "a" * 64
+
+
+def test_a_stored_version_the_parser_would_now_refuse_is_still_readable(con):
+    """Review item 8: reading a strategy re-parsed its stored text, so tightening the parser
+    would make old versions, and list_strategies for every strategy, unreadable."""
+    api.save_strategy(con, "dip-buyer", make(), now=NOW)
+    old = make(rules="timeframes: 1h\nfeels_right: strongly")
+    con.execute("INSERT INTO versions (strategy_id, version, text, text_hash, rules, timeframes,"
+                " saved_at) VALUES ('dip-buyer', 2, ?, ?, '{\"feels_right\": \"strongly\"}',"
+                " '[\"1h\"]', ?)",
+                (old, hashlib.sha256(strategy.normalise(old).encode()).hexdigest(),
+                 NOW.isoformat()))
+    con.commit()
+    v = api.get_strategy(con, "dip-buyer")
+    assert (v.name, v.version, v.rules) == ("Dip buyer", 2, {"feels_right": "strongly"})
+    assert [s.version for s in api.list_strategies(con)] == [2]
 
 
 def test_an_unknown_id_is_refused_naming_it(con):

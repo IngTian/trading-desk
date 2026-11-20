@@ -22,7 +22,7 @@ __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_str
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade", "move_order",
            "close_trade", "correct_trade", "void_trade", "get_trade", "list_trades"]
 
-_SLUG = re.compile(r"[a-z0-9-]+")
+_SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
 _BARS = re.compile(r"(\d+) bars after exit")
 _AFTER = " after exit"
 
@@ -92,7 +92,7 @@ def _view(con, id: str, version: int | None, saved: str) -> StrategyView:
     t = store.latest_tracker(con, id)
     text = row["text"]
     return StrategyView(
-        id=id, name=strategy.parse(text).name, version=row["version"], versions=len(rows),
+        id=id, name=strategy.name_of(text), version=row["version"], versions=len(rows),
         text=text, rules=json.loads(row["rules"]), timeframes=tuple(json.loads(row["timeframes"])),
         tracker_script=t and t["script"], tracker_limit=t and t["tracker_limit"],
         current_hash=_current_hash(rows[-1], t), saved=saved)
@@ -115,8 +115,8 @@ def save_strategy(con: sqlite3.Connection, id: str, markdown: str, *,
     tracker script or limit makes a new tracker row and no new version. A tracker argument left
     out keeps what is saved."""
     if not _SLUG.fullmatch(_text("id", id)):
-        raise Refused(f"Strategy id {id!r} must be lowercase letters, digits and hyphens, "
-                      "like 'dip-buyer'.")
+        raise Refused(f"Strategy id {id!r} must be 1 to 64 lowercase letters, digits and "
+                      "hyphens, like 'dip-buyer'.")
     parsed = strategy.parse(_text("markdown", markdown))
     if tracker_script is not None:
         _text("tracker_script", tracker_script)
@@ -146,17 +146,13 @@ def save_strategy(con: sqlite3.Connection, id: str, markdown: str, *,
         new_text = not rows or rows[-1]["text_hash"] != parsed.text_hash
         new_tracker = (script_hash, limit or None) != ((old and old["script_hash"]) or None,
                                                        (old and old["tracker_limit"]) or None)
-        try:
-            if not rows:
-                store.add_strategy(con, id, at)
-            if new_text:
-                store.add_version(con, id, len(rows) + 1, parsed.text, parsed.text_hash,
-                                  dict(parsed.rules), list(parsed.timeframes), at)
-            if new_tracker:
-                store.add_tracker(con, id, script, script_hash, limit or None, at)
-        except sqlite3.IntegrityError as e:
-            raise Refused(f"Strategy {id!r} was changed by another session; get it again, "
-                          "redo your edit on that, and save.") from e
+        if not rows:
+            store.add_strategy(con, id, at)
+        if new_text:
+            store.add_version(con, id, len(rows) + 1, parsed.text, parsed.text_hash,
+                              dict(parsed.rules), list(parsed.timeframes), at)
+        if new_tracker:
+            store.add_tracker(con, id, script, script_hash, limit or None, at)
     saved = (f"version {len(rows) + 1} created" if new_text
              else "tracker updated" if new_tracker else "unchanged")
     return _view(con, id, None, saved)
