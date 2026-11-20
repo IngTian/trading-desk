@@ -191,8 +191,32 @@ def test_a_decision_before_the_entry_is_refused(con, decide):
     t = enter(con)
     with pytest.raises(api.Refused, match=re.escape(f"entered at {T1.isoformat()}")):
         decide(con, t.id, at=T1 - timedelta(minutes=1))
-    decide(con, t.id, at=T1)  # at the entry's own moment is not before it
+    decide(con, t.id, at=T1 + timedelta(minutes=1))
     assert kinds(con, t.id) == ["entered", "order_moved" if decide is move else "closed"]
+
+
+def test_a_move_at_the_entrys_own_moment_is_accepted(con):
+    t = enter(con)
+    assert move(con, t.id, at=T1).decisions.moves
+
+
+def test_a_hand_close_at_the_entrys_moment_is_refused(con):
+    """Ruling R12: a close needs the entry to have taken effect, so it is strictly after it."""
+    t = enter(con)
+    with pytest.raises(api.Refused, match=re.escape(f"entered at {T1.isoformat()}")):
+        close(con, t.id, at=T1)
+    assert kinds(con, t.id) == ["entered"]
+    close(con, t.id, at=T1 + timedelta(seconds=1))
+
+
+def test_a_correction_moving_the_entry_onto_the_hand_close_is_refused(con):
+    """Ruling R12 from the other side."""
+    t = enter(con)
+    close(con, t.id, at=T2)
+    with pytest.raises(api.Refused, match=re.escape(T2.isoformat())):
+        correct(con, t.id, fields={"at": T2})
+    assert kinds(con, t.id) == ["entered", "closed"]
+    assert correct(con, t.id, fields={"at": T2 - timedelta(seconds=1)}).decisions.entry.at < T2
 
 
 @pytest.mark.parametrize("decide", DATED)
@@ -282,7 +306,7 @@ def test_a_corrected_at_at_or_after_the_run_stop_is_refused(con):
         correct(con, t.id, fields={"at": T3})
 
 
-@pytest.mark.parametrize("decide", DATED)
+@pytest.mark.parametrize("decide", [move])  # a close at the entry's `at` is R12's, tested above
 def test_a_corrected_at_after_a_recorded_decision_is_refused(con, decide):
     t = enter(con)
     decide(con, t.id, at=T2)

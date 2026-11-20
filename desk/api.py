@@ -438,6 +438,9 @@ def close_trade(con: sqlite3.Connection, trade: str, *, reason: str, at: datetim
                           f"{d.close_reason!r}. A trade is closed once; if that close was a "
                           "mistake, void the trade and enter it again.")
         _after_entry(trade, d, when)
+        if when == d.entry.at:  # Ruling R12: a close is strictly after the entry
+            raise Refused(f"Trade {trade!r} was entered at {d.entry.at.isoformat()}; a close at "
+                          "that same moment leaves it no time open, so give a later `at`.")
         if d.moves and when <= d.moves[-1].at:  # moves are in `at` order: the last is latest
             raise Refused(f"Trade {trade!r} has a move at {d.moves[-1].at.isoformat()}; a close "
                           "at or before it would leave that move after the close, so give a "
@@ -491,7 +494,11 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                               "the stop, 1R) is zero; put the stop away from the entry.")
             if when is not None:
                 _within_run(_run_view(con, store.run(con, row["run_id"])), when)
-                later = [m.at for m in d.moves] + [d.close_at] * (d.close_at is not None)
+                later = [m.at for m in d.moves]
+                if d.close_at is not None and when >= d.close_at:  # Ruling R12
+                    raise Refused(f"Trade {trade!r} was closed by hand at "
+                                  f"{d.close_at.isoformat()}; its entry must be before that, so "
+                                  "give an earlier `at`.")
                 if later and when > min(later):
                     raise Refused(f"Trade {trade!r} has a decision at {min(later).isoformat()}; "
                                   "its entry cannot be after that, so give an `at` at or "
