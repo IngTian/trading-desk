@@ -78,6 +78,15 @@ def test_an_unreadable_value_is_refused_with_why():
         strategy.parse(make("timeframes: 1h\nmin_reward_risk: 1:2"))
 
 
+@pytest.mark.parametrize("rule", ["daily_loss_limit: 500 USD", "banned: shorts, crypto",
+                                  "max_open_trades: -1", "max_open_trades: 0",
+                                  "max_open_trades: 2.5"])
+def test_a_value_the_check_would_never_apply_is_refused_at_save(rule):
+    """Review item 2: each of these saved, and its check then misapplied or withheld it."""
+    with pytest.raises(Refused, match=f"strategy: {rule.split(':')[0]}: .*e\\.g\\."):
+        strategy.parse(make(f"timeframes: 1h\n{rule}"))
+
+
 def test_the_shipped_example_strategy_parses():
     s = strategy.parse(config.example_strategy().read_text())
     assert s.timeframes == ("15m", "1h") and "min_reward_risk" in s.rules

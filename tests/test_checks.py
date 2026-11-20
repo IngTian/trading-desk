@@ -354,6 +354,9 @@ def test_a_negative_open_size_is_withheld_rather_than_counted():
     ("stop_required", "yes"), ("target_required", "no"), ("size", "computed"),
     ("cooldown_after_stop", "2h30m"), ("cooldown_after_stop", "1 day, same ticker"),
     ("banned", "shorts, options"),
+    ("min_reward_risk", "2R"), ("min_reward_risk", "1.5 r"), ("daily_loss_limit", "2R"),
+    ("daily_loss_limit", "-2.5 R"), ("max_risk_per_trade", "USD 100"),
+    ("cooldown_after_stop", "same ticker, 90m"), ("banned", "no shorts or futures"),
 ])
 def test_read_value_accepts_what_the_check_reads(name, value):
     assert checks.read_value(name, value) is None
@@ -368,6 +371,39 @@ def test_read_value_accepts_what_the_check_reads(name, value):
 def test_read_value_says_why_a_value_cannot_be_read(name, value):
     why = checks.read_value(name, value)
     assert why and repr(value) in why
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("daily_loss_limit", "500 USD"), ("daily_loss_limit", "2"), ("daily_loss_limit", "2 trades"),
+    ("min_reward_risk", "0"), ("min_reward_risk", "-1"), ("min_reward_risk", "2 USD"),
+    ("min_reward_risk", "2 bananas"), ("max_risk_per_trade", "0 USD"),
+    ("max_risk_per_trade", "-100 USD"), ("max_risk_per_trade", "100 USD per week"),
+    ("max_open_trades", "-1"), ("max_open_trades", "0"), ("max_open_trades", "2.5"),
+    ("max_open_trades", "2 trades"), ("stop_headroom_candles", "0"),
+    ("stop_headroom_candles", "-1"), ("stop_headroom_candles", "1.5 USD"),
+    ("cooldown_after_stop", "0h"), ("cooldown_after_stop", "-1h"),
+    ("cooldown_after_stop", "1 day maybe"), ("banned", "no"), ("banned", "and, or"),
+])
+def test_read_value_refuses_a_value_outside_the_rules_own_units(name, value):
+    """Review item 2, Ruling R16: `daily_loss_limit: 500 USD` saved and a -3R day then read
+    ok=True against it; `max_open_trades: 0` and `2.5` saved. A value that saves is a value
+    that checks, so each rule reads only its own units, with an example of the right form."""
+    why = checks.read_value(name, value)
+    assert why and repr(value) in why and "e.g." in why
+
+
+def test_a_banned_word_the_check_cannot_read_is_refused_by_name():
+    """`banned: shorts, crypto` saved, and was then withheld on every trade."""
+    why = checks.read_value("banned", "shorts, crypto")
+    assert why and "'crypto'" in why and "e.g." in why
+
+
+def test_a_daily_loss_limit_in_a_currency_is_withheld_not_read_as_r():
+    """The check reads with the same reader as the save, so a value saved before the save
+    refused it is withheld, never applied as 500R."""
+    ctx = checks.Context(now=NOW, closed_today_r=-3.0)
+    r = one(checks.run_checks(PLAN, rules_with(daily_loss_limit="500 USD"), ctx))
+    assert r.ok is None and "500 USD" in r.says
 
 
 def test_a_result_never_contains_a_grade_or_a_score():

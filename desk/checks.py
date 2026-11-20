@@ -74,19 +74,19 @@ class Context:
 
 # ------------------------------------------------------------------ parsing ---
 # Rules.numbers values are RAW strings out of the strategy ("100 CAD", "2", "1 day, same ticker"),
-# so every check parses its own. A value that cannot be read is withheld, not guessed at.
-# Every helper below reads a value WHOLE or not at all. Taking the first number found read
-# "1:2" as a floor of 1 and "2,5" as 2, and the first duration read "2h30m" as 2h: three ways
-# a typed rule came out looser than the owner wrote it. A value that does not read as one
-# thing is withheld, with the value quoted so the owner can see what to fix.
-_NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
-# Thousands separators are the one comma a number may carry: "1,000" but not "2,5".
+# so every check parses its own, with one reader per rule (_READERS). read_value refuses at
+# save what a reader cannot read, and the check withholds on it: a value that saves is a value
+# that checks, and a value that would not save is never applied.
+# Every reader takes a value WHOLE, in the rule's own units, or not at all. Taking the first
+# number found read "1:2" as a floor of 1 and "2,5" as 2, the first duration read "2h30m" as 2h,
+# and any word beside a number read `daily_loss_limit: 500 USD` as 500R: ways a typed rule came
+# out other than the owner wrote it. A value that does not read is withheld, quoted back.
+_PLAIN = r"\d+(?:\.\d+)?"
+# Thousands separators are the one comma an amount may carry: "1,000" but not "2,5".
 _THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
-# Words a number may stand beside: its unit, or a currency. Anything else beside a number
-# (":", "-", "or", a second number) makes the value ambiguous.
-_UNIT_WORDS = re.compile(r"^[\sA-Za-z]*$")
 _CURRENCIES = frozenset({"AUD", "CAD", "CHF", "EUR", "GBP", "HKD", "JPY", "USD"})
-_DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)")
+_AMOUNT = re.compile(rf"({_PLAIN})\s*([A-Za-z]{{3}})|([A-Za-z]{{3}})\s*({_PLAIN})")
+_DURATION = re.compile(rf"({_PLAIN})\s*([A-Za-z]+)")
 _HOURS = {
     "m": 1 / 60, "min": 1 / 60, "mins": 1 / 60, "minute": 1 / 60, "minutes": 1 / 60,
     "h": 1.0, "hr": 1.0, "hrs": 1.0, "hour": 1.0, "hours": 1.0,
@@ -100,58 +100,65 @@ _YES = {"yes", "y", "true", "1", "required", "on"}
 _NO = {"no", "n", "false", "0", "off", "optional"}
 
 
-def _number(value: str) -> float | None:
-    """The one number in a rule value: "2" -> 2.0, "1,000 CAD" -> 1000.0, "-2R" -> -2.0.
+def _ratio(value: str) -> float | None:
+    """min_reward_risk: a number above zero, alone or in R: "2", "2R"."""
+    m = re.fullmatch(rf"({_PLAIN})\s*R?", value.strip(), re.IGNORECASE)
+    return float(m[1]) if m and float(m[1]) > 0 else None
 
-    None unless there is exactly one number and only unit words beside it: "1:2", "2,5",
-    "2 or 3", "2-3" and "about 2" are all withheld rather than read as their first number.
-    """
-    plain = _THOUSANDS.sub("", value)
-    found = _NUMBER.findall(plain)
-    if len(found) != 1:
+
+def _loss_r(value: str) -> float | None:
+    """daily_loss_limit: a number of R, signed or not: "-2R", "2R". A bare number or a currency
+    is not R, so it is not read: `500 USD` used to be applied as a limit of 500R."""
+    m = re.fullmatch(rf"(-?{_PLAIN})\s*R", value.strip(), re.IGNORECASE)
+    return float(m[1]) if m else None
+
+
+def _candles(value: str) -> float | None:
+    """stop_headroom_candles: a number above zero: "1.5"."""
+    m = re.fullmatch(_PLAIN, value.strip())
+    return float(m[0]) if m and float(m[0]) > 0 else None
+
+
+def _count(value: str) -> int | None:
+    """max_open_trades: a whole number above zero: "2"."""
+    m = re.fullmatch(r"\d+", value.strip())
+    return int(m[0]) if m and int(m[0]) > 0 else None
+
+
+def _budget(value: str) -> tuple[float, str] | None:
+    """max_risk_per_trade: (amount, currency) from an amount above zero and one known code,
+    either way round: "100 USD", "1,000 usd", "USD 100". Only known codes count, so a
+    three-letter word such as "per" is never taken for a currency."""
+    m = _AMOUNT.fullmatch(_THOUSANDS.sub("", value.strip()))
+    if not m:
         return None
-    rest = _NUMBER.sub(" ", plain, count=1)
-    words = rest.split()
-    if not _UNIT_WORDS.match(rest) or (words and words[0].lower() in {"about", "around", "or"}):
-        return None
-    return float(found[0])
-
-
-def _currency(value: str) -> str | None:
-    """The one currency code in a rule value: "100 CAD" -> "CAD", "100 usd" -> "USD".
-
-    None if it names none or more than one. Only known codes count, so a three-letter word
-    such as "per" is never taken for a currency.
-    """
-    named = {w.upper() for w in re.findall(r"(?<![A-Za-z])[A-Za-z]{3}(?![A-Za-z])", value)}
-    named &= _CURRENCIES
-    return named.pop() if len(named) == 1 else None
+    amount, code = float(m[1] or m[4]), (m[2] or m[3]).upper()
+    return (amount, code) if amount > 0 and code in _CURRENCIES else None
 
 
 def _hours(value: str) -> float | None:
-    """A duration in hours, every part of it: "2h" -> 2.0, "2h30m" -> 2.5, "1 day, same
-    ticker" -> 24.0. None if a part's unit is unknown or a number stands without a unit."""
+    """A duration in hours, every part of it: "2h" -> 2.0, "2h30m" -> 2.5, "1 day," -> 24.0.
+    None if a part's unit is unknown or anything but commas and spaces stands between the
+    parts: a number without a unit, a sign, a stray word."""
     parts = _DURATION.findall(value)
-    if not parts or len(_NUMBER.findall(value)) != len(parts):
+    if not parts or not re.fullmatch(r"[\s,]*", _DURATION.sub("", value)):
         return None
     if any(unit.lower() not in _HOURS for _, unit in parts):
         return None
     return sum(float(n) * _HOURS[unit.lower()] for n, unit in parts)
 
 
-def _unreadable(name: str, value: str, wanted: str, unit: str | None = None) -> Result:
-    """A rule value that does not read as one thing, withheld with the value quoted."""
-    return _withheld(
-        name, value,
-        f"I could not read {value!r} as {wanted}; write it as one, e.g. {_EXAMPLES[wanted]}",
-        unit)
+def _cooldown(value: str) -> tuple[float, bool] | None:
+    """cooldown_after_stop: (hours above zero, scoped to the same ticker). "same ticker" is
+    taken out before the duration is read, so its words are not units."""
+    hours = _hours(re.sub(r"same[\s_]ticker", "", value, flags=re.IGNORECASE))
+    return (hours, "same ticker" in value.lower().replace("_", " ")) if hours else None
 
 
-_EXAMPLES = {
-    "a number": "2",
-    "an amount and a currency": "100 USD",
-    "a duration": "2h or 1 day",
-}
+def _unreadable(name: str, value: str, unit: str | None = None) -> Result:
+    """A rule value its reader could not read, withheld with the value quoted and the form."""
+    return _withheld(name, value, f"I could not read {value!r}; write it as {_READERS[name][1]}",
+                     unit)
 
 
 def _yes(value: str) -> bool | None:
@@ -271,11 +278,6 @@ def _risk_in(plan: Plan, size: int, currency: str, ctx: Context) -> tuple[float 
     return converted, ""
 
 
-def _budget(value: str) -> tuple[float | None, str | None]:
-    """A max_risk_per_trade value read whole: (amount, currency), either None if unreadable."""
-    return _number(value), _currency(value)
-
-
 def _open_sizes(ctx: Context) -> tuple[list[OpenPosition], str]:
     """The open trades that still hold something, or ([], why they cannot be counted).
 
@@ -303,9 +305,9 @@ def _units(n: int, plural: str) -> str:
 # `rules` is passed because two of them read it: `size` needs the risk budget and
 # `no_open_trade_in_group` needs the file's groups.
 def min_reward_risk(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    limit = _number(value)
+    limit = _ratio(value)
     if limit is None:
-        return _unreadable("min_reward_risk", value, "a number", "R")
+        return _unreadable("min_reward_risk", value, "R")
     if plan.target is None:
         return _withheld(
             "min_reward_risk", value,
@@ -328,14 +330,10 @@ def min_reward_risk(plan: Plan, value: str, ctx: Context, rules: Rules) -> Resul
 
 
 def max_risk_per_trade(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    limit, currency = _budget(value)
-    if limit is None:
-        return _unreadable("max_risk_per_trade", value, "an amount and a currency")
-    if currency is None:
-        return _withheld(
-            "max_risk_per_trade", value,
-            f"the limit {value!r} names no single currency, so I cannot compare it to a risk "
-            f"in {plan.currency}")
+    budget = _budget(value)
+    if budget is None:
+        return _unreadable("max_risk_per_trade", value)
+    limit, currency = budget
     if plan.size is None:
         return _withheld("max_risk_per_trade", value,
                          "the plan has no size, so the risk cannot be computed", currency)
@@ -358,10 +356,11 @@ def _suggest(rules: Rules, plan: Plan, ctx: Context) -> tuple[int | None, str]:
     budget_rule = rules.numbers.get("max_risk_per_trade")
     if budget_rule is None:
         return None, "there is no max_risk_per_trade rule, so there is no budget to size against"
-    budget, currency = _budget(budget_rule)
-    if budget is None or currency is None:
+    read = _budget(budget_rule)
+    if read is None:
         return None, (f"I could not read one amount and one currency in the max_risk_per_trade "
                       f"rule {budget_rule!r}")
+    budget, currency = read
     each, why = _risk_in(plan, 1, currency, ctx)
     if each is None:
         return None, why.replace("the risk cannot be computed", "I cannot suggest a size")
@@ -442,9 +441,9 @@ def target_required(plan: Plan, value: str, ctx: Context, rules: Rules) -> Resul
 
 
 def stop_headroom_candles(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    limit = _number(value)
+    limit = _candles(value)
     if limit is None:
-        return _unreadable("stop_headroom_candles", value, "a number", "candles")
+        return _unreadable("stop_headroom_candles", value, "candles")
     # The plan's half first, because it is the half the owner can do something about.
     distance, why = _stop_distance(plan, "the stop's headroom")
     if distance is None:
@@ -467,9 +466,9 @@ def stop_headroom_candles(plan: Plan, value: str, ctx: Context, rules: Rules) ->
 
 
 def max_open_trades(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    limit = _number(value)
+    limit = _count(value)
     if limit is None:
-        return _unreadable("max_open_trades", value, "a number", "trades")
+        return _unreadable("max_open_trades", value, "trades")
     holding, why = _open_sizes(ctx)
     if why:
         return _withheld("max_open_trades", value, why, "trades")
@@ -488,11 +487,10 @@ def _ticker(typed: str) -> str:
 
 
 def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    # "same ticker" is taken out before the duration is read, so its words are not units.
-    same_ticker = "same ticker" in value.lower().replace("_", " ")
-    hours = _hours(re.sub(r"same[\s_]ticker", "", value, flags=re.IGNORECASE))
-    if hours is None:
-        return _unreadable("cooldown_after_stop", value, "a duration", "h")
+    read = _cooldown(value)
+    if read is None:
+        return _unreadable("cooldown_after_stop", value, "h")
+    hours, same_ticker = read
     if ctx.stopped_closes is None:
         return _withheld(
             "cooldown_after_stop", value,
@@ -526,9 +524,9 @@ def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> R
 
 
 def daily_loss_limit(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    limit = _number(value)
+    limit = _loss_r(value)
     if limit is None:
-        return _unreadable("daily_loss_limit", value, "a number", "R")
+        return _unreadable("daily_loss_limit", value, "R")
     # The limit is a loss floor however it is written: "-2R" and "2R" both mean 2R down.
     floor = -abs(limit)
     if ctx.closed_today_r is None:
@@ -558,16 +556,20 @@ _BAN_TERMS = {
 _BAN_FILLER = {"no", "and", "or", "nor", "selling", "sales", "trading", "trades", "any", "all"}
 
 
+def _bans(value: str) -> tuple[set[str], list[str]]:
+    """(what a banned list bans, the words in it that are neither a term nor filler).
+
+    Read word by word, not as exact comma-separated entries: "no shorts", "short selling" and
+    "shorts and futures" each let a short through when only "short" or "shorts" between
+    commas counted.
+    """
+    words = re.findall(r"[a-z]+", value.lower())
+    return ({_BAN_TERMS[w] for w in words if w in _BAN_TERMS},
+            [w for w in words if w not in _BAN_TERMS and w not in _BAN_FILLER])
+
+
 def banned(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    # Read word by word, not as exact comma-separated entries: "no shorts", "short selling" and
-    # "shorts and futures" each let a short through when only "short" or "shorts" between
-    # commas counted.
-    terms, unread = set(), []
-    for word in re.findall(r"[a-z]+", value.lower()):
-        if word in _BAN_TERMS:
-            terms.add(_BAN_TERMS[word])
-        elif word not in _BAN_FILLER:
-            unread.append(word)
+    terms, unread = _bans(value)
     hits = [w for w in (plan.side, plan.instrument) if w in terms]
     if hits:
         # A ban it can see is a breach whatever else the list says.
@@ -624,27 +626,38 @@ RETIRED: frozenset[str] = frozenset(
     {"no_open_trade_in_group", "max_session_length", "max_volatility_ratio"})
 
 
+# Each rule's reader (None: not read) and the form it reads, quoted in every refusal. `size` is
+# not a limit, only `computed`; `banned` names the words it cannot read, so it is read apart.
+_READERS: dict[str, tuple[Callable[[str], object], str]] = {
+    "min_reward_risk": (_ratio, "a number above zero, alone or in R, e.g. 2 or 2R"),
+    "max_risk_per_trade": (_budget, "an amount above zero and one currency, e.g. 100 USD"),
+    "size": (lambda v: True if v.strip().lower() == "computed" else None,
+             "computed, the only value it takes, e.g. size: computed"),
+    "stop_required": (_yes, "yes or no, e.g. yes"),
+    "target_required": (_yes, "yes or no, e.g. yes"),
+    "stop_headroom_candles": (_candles, "a number of candles above zero, e.g. 1.5"),
+    "max_open_trades": (_count, "a whole number above zero, e.g. 2"),
+    "cooldown_after_stop": (_cooldown, "a duration above zero, optionally for the same ticker, "
+                                       "e.g. 90m or 1 day, same ticker"),
+    "daily_loss_limit": (_loss_r, "a number of R with no currency, e.g. -2R"),
+}
+
+
 def read_value(name: str, value: str) -> str | None:
-    """None if the rule's value reads the way its check needs; else why it does not.
+    """None if the rule's value reads the way its check needs; else why it does not, with the
+    form it should take.
 
     The same readers the checks use, so a value that saves is a value that checks.
     """
-    if name == "size":
-        ok = value.strip().lower() == "computed"
-        wanted = "computed"
-    elif name == "stop_required" or name == "target_required":
-        ok = _yes(value) is not None
-        wanted = "yes or no"
-    elif name == "max_risk_per_trade":
-        ok = _number(value) is not None and _currency(value) is not None
-        wanted = _EXAMPLES["an amount and a currency"]
-    elif name == "cooldown_after_stop":
-        ok = _hours(re.sub(r"same[\s_]ticker", "", value, flags=re.IGNORECASE)) is not None
-        wanted = "a duration such as 1 day, same ticker"
-    elif name == "banned":
-        ok = bool(value.strip())
-        wanted = "a list such as shorts, options"
-    else:
-        ok = _number(value) is not None
-        wanted = _EXAMPLES["a number"]
-    return None if ok else f"I could not read {value!r}; write it as {wanted}"
+    if name == "banned":
+        terms, unread = _bans(value)
+        wanted = "the sides and instruments it bans, e.g. shorts, options"
+        if unread:
+            return (f"I could not read {', '.join(map(repr, unread))} in {value!r}: a banned "
+                    f"list names only {', '.join(sorted(set(_BAN_TERMS.values())))}; write it "
+                    f"as {wanted}")
+        return None if terms else f"{value!r} bans nothing; write it as {wanted}"
+    reader, wanted = _READERS[name]
+    if reader(value) is None:
+        return f"I could not read {value!r}; write it as {wanted}"
+    return None
