@@ -35,6 +35,15 @@ KINDS = (
 )
 
 
+# PRAGMA user_version of a v1 desk.db. Stamped at create and required at open, so a file that
+# is not one -- the frozen legacy book above all -- is recognised before anything touches it.
+SCHEMA_VERSION = 1
+
+
+class NotADeskDatabase(ValueError):
+    """The file exists but is not a v1 desk.db, so the store refuses to open it."""
+
+
 def create(path: Path | None = None) -> None:
     """Execute schema.sql into a new file. Refuses to overwrite an existing one."""
     db = path or config.db_path()
@@ -45,35 +54,67 @@ def create(path: Path | None = None) -> None:
     try:
         schema = config.schema_sql().read_text()
         con.executescript(schema)
+        con.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         con.commit()
     finally:
         con.close()
 
 
+def _probe(db: Path) -> None:
+    """Refuse a file that is not a v1 desk.db, without writing to it.
+
+    Opened `immutable=1` as well as read-only: a plain read-only open of a WAL-mode file needs
+    its -shm, and SQLite may create one. Immutable takes no locks and writes nothing, which is
+    the point -- the likeliest wrong file is the frozen legacy book, and opening it for
+    writing used to flip it to WAL before the first query failed.
+    """
+    try:
+        con = sqlite3.connect(f"{db.as_uri()}?mode=ro&immutable=1", uri=True)
+        try:
+            version = con.execute("PRAGMA user_version").fetchone()[0]
+            columns = {row[1] for row in con.execute("PRAGMA table_info(events)")}
+        finally:
+            con.close()
+    except sqlite3.DatabaseError as e:
+        raise NotADeskDatabase(f"{db} is not a desk.db: SQLite cannot read it ({e})") from None
+    if version != SCHEMA_VERSION or not {"actor", "kind", "payload"} <= columns:
+        raise NotADeskDatabase(
+            f"{db} is not a v1 desk.db (schema version {version}, expected {SCHEMA_VERSION}); "
+            f"it was left untouched. If it is the old book, it is read-only by design: point "
+            f"TRADING_DESK_DB or config.toml's `db` at desk.db instead.")
+
+
 def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connection:
-    """Open the store. Sets row_factory, PRAGMA foreign_keys = ON, and journal_mode = WAL.
+    """Open the store. Sets row_factory, PRAGMA foreign_keys = ON, and journal_mode = DELETE.
+
+    The file is probed first (see _probe), so a file that is not a v1 desk.db is refused
+    unchanged, read-only or not.
+
+    DELETE, not WAL: the default folder is under ~/Documents, which iCloud syncs, and a
+    database synced separately from its -wal file is the corruption a sync folder causes.
 
     read_only=True opens with mode=ro. Uses as_uri() because a path containing '?'
     silently discards the mode and opens a new writable file.
 
-    Raises FileNotFoundError when read_only=False and the database does not exist.
+    Raises FileNotFoundError when the database does not exist, and NotADeskDatabase when it
+    is not one.
     """
     db = path or config.db_path()
-    if read_only:
-        uri = f"{db.as_uri()}?mode=ro"
-        con = sqlite3.connect(uri, uri=True)
-    else:
+    if not db.exists():
         # Guard against creating an empty file that blocks store.create()
-        if not db.exists():
-            raise FileNotFoundError(
-                f"{db} does not exist; the book has not been created yet. "
-                f"Run `trading-desk check` to create it."
-            )
+        raise FileNotFoundError(
+            f"{db} does not exist; the book has not been created yet. "
+            f"Run `trading-desk check` to create it."
+        )
+    _probe(db)
+    if read_only:
+        con = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+    else:
         con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys = ON")
     if not read_only:
-        con.execute("PRAGMA journal_mode = WAL")
+        con.execute("PRAGMA journal_mode = DELETE")
     return con
 
 
@@ -294,8 +335,12 @@ def ensure_run(
     started: str,
     rules_section: str,
 ) -> bool:
-    """Create a run row if it doesn't exist. Returns True if created, False if already exists."""
-    existing = con.execute("SELECT id FROM runs WHERE id = ?", (run_id,)).fetchone()
+    """Create a run row if it doesn't exist. Returns True if created, False if already exists.
+
+    A run is identified by its kind and id together: paper run 3 and replay run 3 are two.
+    """
+    existing = con.execute(
+        "SELECT id FROM runs WHERE kind = ? AND id = ?", (kind, run_id)).fetchone()
     if existing:
         return False
     con.execute(

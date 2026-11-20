@@ -31,22 +31,27 @@ CREATE TABLE trades (
     id           TEXT PRIMARY KEY,
     account      TEXT NOT NULL CHECK (account IN ('real','paper','replay')),
     account_name TEXT,
-    run_id       TEXT REFERENCES runs(id),
+    run_id       TEXT,
     ticker       TEXT NOT NULL,
     instrument   TEXT NOT NULL CHECK (instrument IN ('stock','etf','future')),
     point_value  REAL NOT NULL CHECK (point_value > 0),
     currency     TEXT NOT NULL,
     side         TEXT NOT NULL CHECK (side IN ('long','short')),
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    -- A run belongs to one account kind, so a replay trade can only name a replay run.
+    FOREIGN KEY (account, run_id) REFERENCES runs(kind, id)
 ) STRICT;
 
+-- Keyed by kind AND id: paper run 3 and replay run 3 are two runs with two rules sections.
+-- Keyed by id alone they were one row, and a replay trade's run named the Paper section.
 CREATE TABLE runs (
-    id            TEXT PRIMARY KEY,
-    kind          TEXT CHECK (kind IN ('paper','replay')),
+    id            TEXT NOT NULL,
+    kind          TEXT NOT NULL CHECK (kind IN ('paper','replay')),
     vault_folder  TEXT,
     started       TEXT NOT NULL,
     reset_on      TEXT,
-    rules_section TEXT NOT NULL
+    rules_section TEXT NOT NULL,
+    PRIMARY KEY (kind, id)
 ) STRICT;
 
 CREATE TABLE sessions (

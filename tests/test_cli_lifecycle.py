@@ -378,6 +378,53 @@ def test_a_fill_that_could_not_be_checked_says_so_and_is_recorded_as_unknown(hom
     assert _state(tid).taken_against is None
 
 
+# ------------------------------------------------------------- the wrong database ---
+
+
+@pytest.mark.parametrize("argv", [
+    ["check", "--ticker", "ACME", "--currency", "USD", "--side", "long", "--entry", "10",
+     "--stop", "9", "--target", "13", "--size", "10", "--account", "paper"],
+    ["integrity"],
+    ["entered", "acme-20260101", "--entry", "10", "--stop", "9", "--target", "13", "--size", "1"],
+])
+def test_pointed_at_a_file_that_is_not_a_desk_db_every_command_refuses_and_writes_nothing(
+        home, capsys, monkeypatch, argv):
+    import hashlib
+    import sqlite3
+    book = home / "hub.db"
+    con = sqlite3.connect(book)
+    con.execute("CREATE TABLE trades (id TEXT PRIMARY KEY, symbol TEXT)")
+    con.execute("PRAGMA user_version = 17")
+    con.commit()
+    con.close()
+    before = hashlib.md5(book.read_bytes()).hexdigest()
+    monkeypatch.setenv("TRADING_DESK_DB", str(book))
+
+    rc, out, err = run(capsys, *argv)
+
+    assert rc == 1
+    assert "not a v1 desk.db" in err and "Traceback" not in err
+    assert out == "", "no results printed for a check that cannot be recorded"
+    assert hashlib.md5(book.read_bytes()).hexdigest() == before
+
+
+def test_paper_run_3_and_replay_run_3_are_recorded_as_two_runs(home, capsys):
+    (home / "rules.md").write_text(
+        RULES + "\n## Paper — run 3\n\n```rules\nmax_open_trades: 1\n```\n"
+                "\n## Replay — run 3\n\n```rules\nmax_open_trades: 2\n```\n")
+    checked(capsys, "--ticker", "ACME", "--currency", "USD", "--side", "long", "--entry", "10",
+            "--stop", "9", "--target", "13", "--size", "10", "--account", "paper", "--run", "3")
+    tid = checked(capsys, *GC, "--side", "long", "--entry", "2000", "--stop", "1998.5",
+                  "--target", "2003", "--size", "1", "--account", "replay", "--run", "3")
+    con = store.open()
+    runs = sorted(tuple(r) for r in con.execute("SELECT kind, id, rules_section FROM runs"))
+    assert runs == [("paper", "run-3", "Paper — run 3"), ("replay", "run-3", "Replay — run 3")]
+    (section,) = con.execute(
+        "SELECT r.rules_section FROM trades t JOIN runs r ON r.kind = t.account AND r.id = t.run_id"
+        " WHERE t.id = ?", (tid,)).fetchone()
+    assert section == "Replay — run 3"
+
+
 # ------------------------------------------------------------------- daily loss ---
 
 

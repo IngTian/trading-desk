@@ -814,18 +814,20 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "trade_id", None):
         args.trade_id = args.trade_id.strip().lower()
 
-    if args.command == "check":
-        return cmd_check(args)
-    elif args.command == "integrity":
-        return cmd_integrity(args)
-    elif args.command == "entered":
-        return cmd_entered(args)
-    elif args.command == "exited":
-        return cmd_exited(args)
-    elif args.command == "stop-moved":
-        return cmd_stop_moved(args)
-    elif args.command == "closed":
-        return cmd_closed(args)
-    else:
+    commands = {
+        "check": cmd_check,
+        "integrity": cmd_integrity,
+        "entered": cmd_entered,
+        "exited": cmd_exited,
+        "stop-moved": cmd_stop_moved,
+        "closed": cmd_closed,
+    }
+    if args.command not in commands:
         parser.print_help()
+        return 1
+    try:
+        return commands[args.command](args)
+    except store.NotADeskDatabase as e:
+        # The store refused before writing a byte; say why, without a traceback.
+        print(str(e), file=sys.stderr)
         return 1

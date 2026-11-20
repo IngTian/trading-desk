@@ -248,3 +248,108 @@ def test_cli_is_a_valid_event_source(con):
     )
     row = con.execute("SELECT * FROM events WHERE id = ?", (eid,)).fetchone()
     assert row["source"] == "cli"
+
+
+# ---------------------------------------------------------------------------------------------
+# Opening a file is not allowed to change one that is not a desk.db. Pointing the store at the
+# frozen legacy book by mistake (db = "hub.db" in config.toml, or TRADING_DESK_DB) used to flip
+# it to WAL -- a write -- before crashing with a traceback.
+
+
+def _md5(path):
+    import hashlib
+    return hashlib.md5(path.read_bytes()).hexdigest()
+
+
+def _foreign_book(path, *, journal="delete"):
+    """A sqlite file that is not a v1 desk.db: tables of the same names, other columns."""
+    con = sqlite3.connect(path)
+    con.execute(f"PRAGMA journal_mode = {journal}")
+    con.execute("CREATE TABLE trades (id TEXT PRIMARY KEY, symbol TEXT)")
+    con.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, note TEXT)")
+    con.execute("PRAGMA user_version = 17")
+    con.commit()
+    con.close()
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+def test_opening_a_file_that_is_not_a_desk_db_refuses_and_changes_nothing(tmp_path, read_only):
+    book = tmp_path / "hub.db"
+    _foreign_book(book)
+    before = _md5(book)
+
+    with pytest.raises(store.NotADeskDatabase) as refused:
+        store.open(book, read_only=read_only)
+
+    assert str(book) in str(refused.value)
+    assert _md5(book) == before, "the file must be byte-identical"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["hub.db"], "and no -wal or -shm"
+
+
+def test_a_wal_mode_file_that_is_not_a_desk_db_is_refused_without_a_write(tmp_path):
+    book = tmp_path / "hub.db"
+    _foreign_book(book, journal="wal")
+    before = _md5(book)
+
+    with pytest.raises(store.NotADeskDatabase):
+        store.open(book)
+
+    assert _md5(book) == before
+
+
+def test_a_file_that_is_not_sqlite_at_all_is_refused(tmp_path):
+    junk = tmp_path / "desk.db"
+    junk.write_text("not a database")
+    with pytest.raises(store.NotADeskDatabase):
+        store.open(junk)
+    assert junk.read_text() == "not a database"
+
+
+def test_a_new_store_is_stamped_with_its_schema_version(tmp_path):
+    db = tmp_path / "desk.db"
+    store.create(db)
+    assert sqlite3.connect(db).execute("PRAGMA user_version").fetchone()[0] == store.SCHEMA_VERSION
+
+
+def test_the_store_uses_a_rollback_journal_not_wal(tmp_path):
+    """The default folder is under ~/Documents, which iCloud syncs: a db and its -wal synced
+    separately is the corruption the docs warn about. And a read leaves no sidecar files."""
+    db = tmp_path / "desk.db"
+    store.create(db)
+    with store.open(db) as con:
+        assert con.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    store.open(db, read_only=True).execute("SELECT count(*) FROM events").fetchone()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["desk.db"]
+
+
+def test_a_paper_run_and_a_replay_run_with_the_same_number_are_two_runs(tmp_path):
+    """They shared one row, so a replay trade's run named the Paper rules section."""
+    db = tmp_path / "desk.db"
+    store.create(db)
+    con = store.open(db)
+    for kind in ("paper", "replay"):
+        assert store.ensure_run(con, run_id="run-3", kind=kind, started="2026-01-01T00:00:00Z",
+                                rules_section=f"{kind.capitalize()} — run 3")
+    assert not store.ensure_run(con, run_id="run-3", kind="replay",
+                                started="2026-01-02T00:00:00Z", rules_section="Replay — run 3")
+    rows = con.execute("SELECT kind, id, rules_section FROM runs ORDER BY kind").fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("paper", "run-3", "Paper — run 3"), ("replay", "run-3", "Replay — run 3")]
+
+    store.add_trade(con, trade_id="t-replay", account="replay", run_id="run-3", ticker="ACME",
+                    instrument="stock", point_value=1.0, currency="USD", side="long")
+    (section,) = con.execute(
+        "SELECT r.rules_section FROM trades t JOIN runs r ON r.kind = t.account AND r.id = t.run_id"
+        " WHERE t.id = 't-replay'").fetchone()
+    assert section == "Replay — run 3"
+
+
+def test_a_trade_cannot_name_a_run_of_another_account_kind(tmp_path):
+    db = tmp_path / "desk.db"
+    store.create(db)
+    con = store.open(db)
+    store.ensure_run(con, run_id="run-3", kind="paper", started="2026-01-01T00:00:00Z",
+                     rules_section="Paper — run 3")
+    with pytest.raises(sqlite3.IntegrityError):
+        store.add_trade(con, trade_id="t", account="replay", run_id="run-3", ticker="ACME",
+                        instrument="stock", point_value=1.0, currency="USD", side="long")
