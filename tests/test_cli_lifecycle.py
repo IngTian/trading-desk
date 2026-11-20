@@ -179,6 +179,92 @@ def test_the_stop_of_a_flat_trade_cannot_be_moved(home, capsys):
     assert "stop_moved" not in kinds(tid)
 
 
+# ------------------------------------------------- futures tickers and trade ids ---
+
+
+def _trade_row(trade_id):
+    return store.trade(store.open(), trade_id)
+
+
+@pytest.mark.parametrize("typed", ["GC1!", "gc1!", "GC=F", "COMEX:GC1!", "GC2!"])
+def test_a_futures_ticker_in_any_common_form_is_a_future_on_its_root(home, capsys, typed):
+    tid = checked(capsys, "--ticker", typed, "--point-value", "100", "--currency", "USD",
+                  "--side", "long", "--entry", "2000", "--stop", "1998.5", "--target", "2003",
+                  "--size", "1", "--account", "replay")
+    row = _trade_row(tid)
+    assert (row["ticker"], row["instrument"], row["point_value"]) == ("GC", "future", 100.0)
+
+
+@pytest.mark.parametrize(("typed", "root"), [
+    ("6E1!", "6E"), ("MNQ1!", "MNQ"), ("ZN=F", "ZN"), ("acme", "ACME"), ("BRK.B", "BRK.B"),
+])
+def test_canonical_ticker(typed, root):
+    ticker, implied = cli.canonical_ticker(typed)
+    assert ticker == root
+    assert implied == (None if root in ("ACME", "BRK.B") else "future")
+
+
+def test_a_futures_ticker_without_a_point_value_is_refused(home, capsys):
+    """Forgetting --instrument future used to make GC a stock worth 1 per point: 100x too
+    little risk, and a pass."""
+    rc, _, err = run(capsys, "check", "--ticker", "GC1!", "--currency", "USD", "--side", "long",
+                     "--entry", "2000", "--stop", "1998.5", "--target", "2003", "--size", "1",
+                     "--account", "replay")
+    assert rc == 1
+    assert "--point-value" in err
+    assert not (home / "desk.db").exists()
+
+
+def test_a_futures_ticker_cannot_be_checked_as_a_stock(home, capsys):
+    rc, _, err = run(capsys, "check", "--ticker", "GC1!", "--instrument", "stock",
+                     "--currency", "USD", "--side", "long", "--entry", "2000", "--stop", "1998.5",
+                     "--target", "2003", "--size", "1", "--account", "replay")
+    assert rc == 1
+    assert "future" in err
+
+
+def test_a_futures_ban_applies_without_the_instrument_flag(home, capsys):
+    rc, out, _ = run(capsys, "check", "--json", "--ticker", "GC1!", "--point-value", "100",
+                     "--currency", "USD", "--side", "long", "--entry", "2000",
+                     "--stop", "1998.5", "--target", "2003", "--size", "1", "--account", "real")
+    assert rc == 0
+    (ban,) = [r for r in json.loads(out)["results"] if r["name"] == "banned"]
+    assert ban["ok"] is False
+
+
+def test_a_trade_id_is_safe_to_type_unquoted(home, capsys):
+    """'gc1!-20261111' needed quoting in zsh, where ! is history expansion."""
+    tid = checked(capsys, "--ticker", "GC1!", "--point-value", "100", "--currency", "USD",
+                  "--side", "long", "--entry", "2000", "--stop", "1998.5", "--target", "2003",
+                  "--size", "1", "--account", "replay")
+    assert re.fullmatch(r"[a-z0-9]+-\d{8}", tid), tid
+
+
+def test_a_stop_out_on_the_root_cools_down_the_continuous_ticker(home, capsys):
+    """Typing GC once and GC1! the next time split the cooldown in two."""
+    tid = checked(capsys, *GC, "--side", "long", "--entry", "2000", "--stop", "1998.5",
+                  "--target", "2003", "--size", "1", "--account", "paper")
+    run(capsys, "entered", tid, "--entry", "2000", "--stop", "1998.5", "--target", "2003",
+        "--size", "1")
+    run(capsys, "exited", tid, "--price", "1998.5", "--size", "1")
+
+    rc, out, _ = run(capsys, "check", "--json", "--ticker", "GC1!", "--point-value", "100",
+                     "--currency", "USD", "--side", "long", "--entry", "2000",
+                     "--stop", "1998.5", "--target", "2003", "--size", "1", "--account", "paper")
+    (cooldown,) = [r for r in json.loads(out)["results"] if r["name"] == "cooldown_after_stop"]
+    assert cooldown["ok"] is False
+
+
+def test_a_trade_id_is_matched_whatever_its_case(home, capsys):
+    tid = checked(capsys, "--ticker", "ACME", "--currency", "USD", "--side", "long",
+                  "--entry", "10", "--stop", "9", "--target", "13", "--size", "10",
+                  "--account", "paper")
+    rc, _, err = run(capsys, "entered", tid.upper(), "--entry", "10", "--stop", "9",
+                     "--target", "13", "--size", "10")
+    assert rc == 0, err
+    assert kinds(tid) == ["checked", "entered"]
+
+
 # ------------------------------------------------------------------- daily loss ---
 
 

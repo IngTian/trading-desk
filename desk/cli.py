@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -48,6 +49,30 @@ def _size(value: str) -> int:
     return number
 
 
+# A continuous futures contract as TradingView writes it ("GC1!", "MNQ2!") and as Yahoo does
+# ("GC=F"), optionally behind an exchange prefix ("COMEX:GC1!").
+# A root may start with a digit (6E is a currency future), so the root is any run of letters
+# and digits, matched lazily so the contract number is left for the suffix.
+_CONTINUOUS = re.compile(r"^(?:[A-Z0-9_]+:)?([A-Z0-9]+?)(?:\d+!|=F)$")
+
+
+def canonical_ticker(typed: str) -> tuple[str, str | None]:
+    """(ticker, instrument it implies): "GC1!" -> ("GC", "future"), "acme" -> ("ACME", None).
+
+    One trade, one ticker. Typing GC once and GC1! the next time made them two tickers, so a
+    stop-out on one never cooled the other down, and an id built from "GC1!" carried a "!"
+    that zsh expands. And the form itself says it is a future, which is the fact that a
+    forgotten --instrument flag used to lose: GC1! checked as a stock worth 1 per point
+    reported 100x too little risk and passed a futures ban. A bare root ("GC") says nothing,
+    so it is taken as typed.
+    """
+    upper = typed.strip().upper()
+    continuous = _CONTINUOUS.match(upper)
+    if continuous:
+        return continuous.group(1), "future"
+    return upper, None
+
+
 def _generate_trade_id(ticker: str, local_date: str, existing_ids: list[str]) -> str:
     """Generate a trade ID: ticker-YYYYMMDD, with -2/-3/... suffixes for collisions.
 
@@ -56,8 +81,11 @@ def _generate_trade_id(ticker: str, local_date: str, existing_ids: list[str]) ->
     an id dated 20261110, even if UTC has already rolled over to the 11th. Plan 3 fills in
     closed_today_r and the session clock; if those reach for UTC, a trade lands in the wrong
     day's count.
+
+    Only letters and digits survive from the ticker, so an id can be typed unquoted in any
+    shell: "!" is zsh's history expansion, and "." or "=" would need care too.
     """
-    base = f"{ticker.lower()}-{local_date}"
+    base = f"{re.sub(r'[^a-z0-9]', '', ticker.lower())}-{local_date}"
     if base not in existing_ids:
         return base
     suffix = 2
@@ -83,12 +111,21 @@ def cmd_check(args: argparse.Namespace) -> int:
     if args.run:
         args.run = rules.normalize_run_id(args.run)
 
-    # Normalize ticker to upper-case at the boundary, so case variation in arguments doesn't
-    # turn a rule off. Two of three string comparisons in checks.py already normalize; the
-    # group-membership check does not, which is why --ticker acme silently passes a group rule
-    # that should apply. Trade IDs stay lower-case (they're filename slugs). Currency is
-    # normalized and validated by argparse's type function.
-    args.ticker = args.ticker.upper()
+    # Normalize the ticker at the boundary, so the way it was typed cannot turn a rule off:
+    # upper case (--ticker acme once passed a group rule it was in), and a continuous futures
+    # contract reduced to its root and marked a future (see canonical_ticker). Trade IDs stay
+    # lower-case. Currency is normalized and validated by argparse's type function.
+    args.ticker, implied = canonical_ticker(args.ticker)
+    if implied == "future":
+        if args.instrument not in (None, "future"):
+            print(
+                f"--ticker is a futures contract, so it cannot be checked as --instrument "
+                f"{args.instrument}: a future's risk is multiplied by its point value and a "
+                f"{args.instrument}'s is not.",
+                file=sys.stderr,
+            )
+            return 1
+        args.instrument = "future"
 
     # Load rules
     rules_path = config.rules_path()
@@ -108,10 +145,10 @@ def cmd_check(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 1
 
-    # Require --point-value when --instrument future
+    # Require --point-value for a future, whether --instrument said so or the ticker did
     if args.instrument == "future" and args.point_value is None:
         print(
-            "--point-value is required when --instrument future: risk is size × stop distance × "
+            "--point-value is required for a future: risk is size × stop distance × "
             "point value, so a futures contract at 100 per point makes a 1.5-point stop a 150 risk "
             "rather than 1.5. Defaulting to 1.0 would under-report risk by 100×.",
             file=sys.stderr,
@@ -718,6 +755,9 @@ def main(argv: list[str] | None = None) -> int:
     closed_parser.add_argument("trade_id", help="Trade ID")
 
     args = parser.parse_args(argv)
+    # Ids are generated in lower case, so an id typed in any case names the same trade.
+    if getattr(args, "trade_id", None):
+        args.trade_id = args.trade_id.strip().lower()
 
     if args.command == "check":
         return cmd_check(args)
