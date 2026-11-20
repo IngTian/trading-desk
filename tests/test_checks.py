@@ -141,12 +141,19 @@ def test_reward_to_risk_is_signed_for_a_short():
     assert r.figure == pytest.approx(2.0) and r.ok is True
 
 
-def test_an_inverted_short_fails_rather_than_passing_on_an_absolute_value():
-    """Entry 100, stop 95, target 110 is not a short at all; reward:risk must be negative."""
+def test_an_inverted_short_never_passes_on_an_absolute_value():
+    """Entry 100, stop 95, target 110 is not a short at all: its stop is on the reward side.
+
+    Dividing two absolute values would pass it at 2.0. It used to read -2.0 and breach, but a
+    stop on the wrong side has no risk distance, so there is no 1R to state the reward in:
+    withheld, saying why, and stop_required states the wrong side as a breach.
+    """
     inverted = plan(side="short", entry=100.0, stop=95.0, target=110.0)
     r = one(checks.run_checks(inverted, rules_with(min_reward_risk="2"), CTX))
-    assert r.figure == pytest.approx(-2.0), "dividing two signed figures would cancel the signs"
-    assert r.ok is False
+    assert r.ok is None and r.figure is None
+    assert "not the risk side for a short" in r.says
+    stop = one(checks.run_checks(inverted, rules_with(stop_required="yes"), CTX))
+    assert stop.ok is False
 
 
 def test_ok_never_contradicts_the_digits_the_fact_prints():
@@ -514,3 +521,128 @@ def test_a_result_never_contains_a_grade_or_a_score():
         for r in checks.run_checks(PLAN, ALL_RULES, ctx):
             assert not re.search(r"\b(good|bad|score|grade|well done|poor)\b", r.says, re.I)
             assert r.says and not r.says.endswith(("!", "?")), "a fact, stated plainly"
+
+
+# ---------------------------------------------------------------------------------------------
+# From the 11-11 adversarial hunt: rules that passed when they should not have.
+
+
+def test_a_near_miss_is_a_breach_and_prints_the_digits_that_show_it():
+    """1.996 rounded to 2.00 and passed a floor of 2; only float residue may pass."""
+    near = plan(entry=100.0, stop=95.0, target=109.98)  # 9.98 / 5 = 1.996
+    r = one(checks.run_checks(near, rules_with(min_reward_risk="2"), CTX))
+    assert r.ok is False
+    assert "1.996" in r.says, "a breach must not print as 2.00"
+
+
+def test_a_session_three_minutes_over_its_limit_is_over_it():
+    ctx = checks.Context(now=NOW, session_started=NOW - dt.timedelta(hours=2, minutes=3))
+    r = one(checks.run_checks(PLAN, rules_with(max_session_length="2h"), ctx))
+    assert r.ok is False
+    assert "2.05" in r.says
+
+
+@pytest.mark.parametrize("value", ["1:2", "2,5", "2 or 3", "2-3", "about 2"])
+def test_a_rule_value_that_is_not_one_number_is_withheld_not_read_loosely(value):
+    """'1:2' read as a floor of 1 and '2,5' as 2: both looser than the owner meant."""
+    r = one(checks.run_checks(PLAN, rules_with(min_reward_risk=value), CTX))
+    assert r.ok is None
+    assert value in r.says
+
+
+@pytest.mark.parametrize(("value", "limit"), [("1,000 USD", 1000.0), ("100 usd", 100.0)])
+def test_an_amount_with_a_thousands_separator_or_lower_case_currency_is_read(value, limit):
+    r = one(checks.run_checks(PLAN, rules_with(max_risk_per_trade=value), CTX))
+    assert r.ok is True and r.unit == "USD"
+
+
+def test_a_limit_naming_two_currencies_is_withheld():
+    r = one(checks.run_checks(PLAN, rules_with(max_risk_per_trade="100 USD or CAD"), CTX))
+    assert r.ok is None
+
+
+@pytest.mark.parametrize(("value", "hours"), [("2h30m", 2.5), ("1 day 12 hours", 36.0)])
+def test_a_duration_in_two_parts_is_read_whole(value, hours):
+    """'2h30m' read as 2h: a cooldown 30 minutes shorter than written."""
+    ctx = checks.Context(now=NOW, stopped_closes={TICKER: NOW - dt.timedelta(hours=hours - 0.1)})
+    r = one(checks.run_checks(PLAN, rules_with(cooldown_after_stop=value), ctx))
+    assert r.ok is False, f"{hours - 0.1} h is inside a cooldown of {value}"
+
+
+@pytest.mark.parametrize("stop", [105.0, 100.0])
+def test_a_stop_that_is_not_on_the_risk_side_computes_no_risk_and_no_reward_to_risk(stop):
+    """A long with its stop ABOVE the entry passed min_reward_risk and max_risk_per_trade:
+    the distance was taken as a risk although no loss stops there."""
+    wrong = plan(entry=100.0, stop=stop, target=110.0)
+    rs = rules_with(min_reward_risk="2", max_risk_per_trade="1000 USD", size="computed")
+    for r in checks.run_checks(wrong, rs, CTX):
+        assert r.ok is None, f"{r.name} must withhold, said: {r.says}"
+    assert checks.suggest_size(rs, wrong, CTX) is None
+
+
+def test_a_price_that_is_not_a_number_never_passes_a_rule_that_reads_it():
+    """NaN compares false to everything, so `ratio >= limit` and `risk <= limit` could each
+    be decided by which way round the comparison happened to be written."""
+    nan = float("nan")
+    rs = rules_with(min_reward_risk="2", max_risk_per_trade="1000 USD", size="computed")
+    for bad in (plan(entry=nan), plan(stop=nan)):
+        for r in checks.run_checks(bad, rs, CTX):
+            assert r.ok is None, f"{r.name} on a NaN entry or stop said: {r.says}"
+    # The target is read by reward-to-risk alone; the risk does not depend on it.
+    r = named(checks.run_checks(plan(target=nan), rs, CTX), "min_reward_risk")
+    assert r.ok is None
+
+
+@pytest.mark.parametrize("entry", [10.0, 37.13, 90.0, 251.7, 2000.0])
+@pytest.mark.parametrize("distance", [0.01, 0.04, 0.37, 1.5, 3.0])
+@pytest.mark.parametrize("budget", ["99 USD", "100 USD", "137.5 USD", "200 CAD"])
+@pytest.mark.parametrize("point_value", [1.0, 2.0, 50.0])
+def test_the_suggested_size_is_always_the_largest_size_max_risk_passes(
+        entry, distance, budget, point_value):
+    """size floored a quotient rounded to 2 decimals, so it could allow 5 shares that
+    max_risk_per_trade then called a breach. Now one risk function serves both."""
+    def fx(src, dst):
+        return invented.FX_USD_CAD if (src, dst) == ("USD", "CAD") else None
+    ctx = checks.Context(now=NOW, fx=fx)
+    rs = rules_with(size="computed", max_risk_per_trade=budget)
+    base = plan(entry=entry, stop=round(entry - distance, 2), point_value=point_value)
+    n = checks.suggest_size(rs, base, ctx)
+    assert n is not None
+    risk = rules_with(max_risk_per_trade=budget)
+    if n > 0:
+        at_n = one(checks.run_checks(plan(**{**base.__dict__, "size": n}), risk, ctx))
+        assert at_n.ok is True, f"size allows {n} but max_risk says {at_n.says}"
+    above = one(checks.run_checks(plan(**{**base.__dict__, "size": n + 1}), risk, ctx))
+    assert above.ok is False, f"size allows only {n} but max_risk passes {n + 1}"
+
+
+def test_group_tickers_are_matched_whatever_their_case(con):
+    rs = rules_with(groups={"tech": ("acme", "wxyz")}, no_open_trade_in_group="Tech")
+    enter(con, "trade-a", OTHER)
+    ctx = checks.Context(now=NOW, open_trades=model.open_trades(con))
+    r = one(checks.run_checks(plan(ticker=TICKER), rs, ctx))
+    assert r.ok is False, "a lower-case group used to let its own tickers through"
+
+
+def test_a_group_listing_a_continuous_future_matches_the_futures_root():
+    rs = rules_with(groups={"metals": ("GC1!", "SI=F")}, no_open_trade_in_group="metals")
+    ctx = checks.Context(now=NOW, open_trades=[])
+    r = one(checks.run_checks(plan(ticker="GC", instrument="future", point_value=100.0), rs, ctx))
+    assert r.says == "no open trade in metals, which GC is in", r.says
+
+
+@pytest.mark.parametrize("value", [
+    "shorts", "no shorts", "short selling", "shorts and futures", "Shorting / options",
+])
+def test_banned_reads_the_ways_a_short_ban_is_written(value):
+    r = one(checks.run_checks(SHORT_PLAN, rules_with(banned=value), CTX))
+    assert r.ok is False, f"{value!r} let a short through"
+
+
+def test_a_banned_list_with_a_word_it_cannot_read_never_passes_silently():
+    r = one(checks.run_checks(PLAN, rules_with(banned="shorts, crypto"), CTX))
+    assert r.ok is None
+    assert "crypto" in r.says
+    # ...but a ban it CAN see is still a breach.
+    hit = one(checks.run_checks(SHORT_PLAN, rules_with(banned="shorts, crypto"), CTX))
+    assert hit.ok is False

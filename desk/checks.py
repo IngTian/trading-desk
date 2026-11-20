@@ -38,8 +38,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from desk import fmt
-from desk.model import Plan, TradeState, _signed
+from desk.model import Plan, TradeState, _signed, canonical_ticker
 from desk.rules import Rules
 
 ASKED = "no automatic check for this one; I'll ask you each time"
@@ -82,8 +81,17 @@ class Context:
 # ------------------------------------------------------------------ parsing ---
 # Rules.numbers values are RAW strings out of rules.md ("100 CAD", "2", "1 day, same ticker"),
 # so every check parses its own. A value that cannot be read is withheld, not guessed at.
+# Every helper below reads a value WHOLE or not at all. Taking the first number found read
+# "1:2" as a floor of 1 and "2,5" as 2, and the first duration read "2h30m" as 2h: three ways
+# a typed rule came out looser than the owner wrote it. A value that does not read as one
+# thing is withheld, with the value quoted so the owner can see what to fix.
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
-_CURRENCY = re.compile(r"\b([A-Za-z]{3})\b")
+# Thousands separators are the one comma a number may carry: "1,000" but not "2,5".
+_THOUSANDS = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+# Words a number may stand beside: its unit, or a currency. Anything else beside a number
+# (":", "-", "or", a second number) makes the value ambiguous.
+_UNIT_WORDS = re.compile(r"^[\sA-Za-z]*$")
+_CURRENCIES = frozenset({"AUD", "CAD", "CHF", "EUR", "GBP", "HKD", "JPY", "USD"})
 _DURATION = re.compile(r"(\d+(?:\.\d+)?)\s*([A-Za-z]+)")
 _HOURS = {
     "m": 1 / 60, "min": 1 / 60, "mins": 1 / 60, "minute": 1 / 60, "minutes": 1 / 60,
@@ -99,23 +107,57 @@ _NO = {"no", "n", "false", "0", "off", "optional"}
 
 
 def _number(value: str) -> float | None:
-    """The first number in a rule value: "2" -> 2.0, "100 CAD" -> 100.0, "-2R" -> -2.0."""
-    found = _NUMBER.search(value)
-    return float(found.group()) if found else None
+    """The one number in a rule value: "2" -> 2.0, "1,000 CAD" -> 1000.0, "-2R" -> -2.0.
+
+    None unless there is exactly one number and only unit words beside it: "1:2", "2,5",
+    "2 or 3", "2-3" and "about 2" are all withheld rather than read as their first number.
+    """
+    plain = _THOUSANDS.sub("", value)
+    found = _NUMBER.findall(plain)
+    if len(found) != 1:
+        return None
+    rest = _NUMBER.sub(" ", plain, count=1)
+    words = rest.split()
+    if not _UNIT_WORDS.match(rest) or (words and words[0].lower() in {"about", "around", "or"}):
+        return None
+    return float(found[0])
 
 
 def _currency(value: str) -> str | None:
-    """The three-letter code in a rule value: "100 CAD" -> "CAD". None if it names none."""
-    found = _CURRENCY.search(value)
-    return found.group(1).upper() if found else None
+    """The one currency code in a rule value: "100 CAD" -> "CAD", "100 usd" -> "USD".
+
+    None if it names none or more than one. Only known codes count, so a three-letter word
+    such as "per" is never taken for a currency.
+    """
+    named = {w.upper() for w in re.findall(r"(?<![A-Za-z])[A-Za-z]{3}(?![A-Za-z])", value)}
+    named &= _CURRENCIES
+    return named.pop() if len(named) == 1 else None
 
 
 def _hours(value: str) -> float | None:
-    """A duration in hours: "2h" -> 2.0, "90 min" -> 1.5, "1 day, same ticker" -> 24.0."""
-    found = _DURATION.search(value)
-    if not found or found.group(2).lower() not in _HOURS:
+    """A duration in hours, every part of it: "2h" -> 2.0, "2h30m" -> 2.5, "1 day, same
+    ticker" -> 24.0. None if a part's unit is unknown or a number stands without a unit."""
+    parts = _DURATION.findall(value)
+    if not parts or len(_NUMBER.findall(value)) != len(parts):
         return None
-    return float(found.group(1)) * _HOURS[found.group(2).lower()]
+    if any(unit.lower() not in _HOURS for _, unit in parts):
+        return None
+    return sum(float(n) * _HOURS[unit.lower()] for n, unit in parts)
+
+
+def _unreadable(name: str, value: str, wanted: str, unit: str | None = None) -> Result:
+    """A rule value that does not read as one thing, withheld with the value quoted."""
+    return _withheld(
+        name, value,
+        f"I could not read {value!r} as {wanted}; write it as one, e.g. {_EXAMPLES[wanted]}",
+        unit)
+
+
+_EXAMPLES = {
+    "a number": "2",
+    "an amount and a currency": "100 USD",
+    "a duration": "2h or 1 day",
+}
 
 
 def _yes(value: str) -> bool | None:
@@ -129,20 +171,43 @@ def _withheld(name: str, value: str, says: str, unit: str | None = None) -> Resu
     return Result(name, None, None, value, says, unit)
 
 
-def _at(figure: float, places: int = 2) -> float:
-    """The figure as `says` states it, for the comparison that sets `ok`.
+def _within(figure: float, limit: float, at_least: bool) -> bool:
+    """figure >= limit (at_least) or figure <= limit, forgiving float residue and nothing else.
 
-    `ok` MUST NOT CONTRADICT THE DIGITS BESIDE IT. A plain 2:1 trade on a cent grid --
-    entry 90.00, stop 89.96, target 90.08 -- divides to 1.9999999999996447, so a raw
-    `>= 2` reports a breach under a sentence reading "reward to risk 2.00 against a
-    minimum of 2". The owner would then be recorded as having taken a trade against a rule
-    they did not break. A grid search over 200 entries x 90 stop distances found 4,200 such
-    triples, so this is the common case rather than an exotic one.
+    A plain 2:1 trade on a cent grid -- entry 90.00, stop 89.96, target 90.08 -- divides to
+    1.9999999999996447, and a raw `>= 2` would record the owner as having taken a trade
+    against a rule they did not break; a grid search found 4,200 such triples. That residue
+    is around 1e-13. The tolerance is a relative 1e-9: far above any residue, far below any
+    difference a price can make.
 
-    `Result.figure` keeps full precision; only `ok` is decided at the stated precision. Same
-    argument as fmt._flat, which exists because three callers read one residue three ways.
+    It used to be rounding to the printed precision instead, which forgave far more than
+    residue: a 1.996 reward-to-risk passed a floor of 2, and a session 3 minutes over a
+    2-hour limit passed it.
     """
-    return round(figure, places)
+    slack = 1e-9 * max(1.0, abs(limit))
+    return figure >= limit - slack if at_least else figure <= limit + slack
+
+
+def _shown(figure: float, limit: float, at_least: bool, places: int = 2,
+           money: bool = False, signed: bool = False) -> str:
+    """The figure with as many decimals as it takes for the digits to agree with `ok`.
+
+    `ok` MUST NOT CONTRADICT THE DIGITS BESIDE IT, in either direction: residue must not
+    print as a breach, and a breach must not print as the limit. 1.996 against a floor of 2
+    is shown as 1.996, never 2.00. Two decimals are enough almost always.
+    """
+    ok = _within(figure, limit, at_least)
+    for p in range(places, 7):
+        if _within(round(figure, p), limit, at_least) == ok:
+            places = p
+            break
+    else:
+        places = 6
+    if signed:
+        # fmt._flat's rule: a figure that prints as zero carries no sign.
+        figure = 0.0 if abs(figure) < 0.5 * 10 ** -places else figure
+        return f"{figure:+.{places}f}"
+    return f"{figure:,.{places}f}" if money else f"{figure:.{places}f}"
 
 
 def _hours_since(now: dt.datetime, then: dt.datetime) -> float | None:
@@ -165,23 +230,56 @@ def _side_word(a: float, b: float) -> str:
     return "above" if a > b else "below" if a < b else "at"
 
 
-def _risk(plan: Plan) -> tuple[float | None, str]:
-    """size x stop distance x point value, in the plan's own currency, or (None, why not)."""
+def _finite(*prices: float | None) -> bool:
+    return all(p is None or math.isfinite(p) for p in prices)
+
+
+def _stop_distance(plan: Plan, what: str) -> tuple[float | None, str]:
+    """How far the stop is from the entry ON THE RISK SIDE, or (None, why `what` cannot be had).
+
+    A stop on the wrong side -- above the entry for a long, below for a short -- is not a
+    stop-loss: no loss stops there. Taking abs() of the distance anyway passed
+    min_reward_risk and max_risk_per_trade for a long with its stop 5 above its entry.
+    """
     if plan.entry is None:
-        return None, "the plan has no entry, so the risk cannot be computed"
+        return None, f"the plan has no entry, so {what} cannot be computed"
     if plan.stop is None:
-        return None, "the plan has no stop, so the risk cannot be computed"
-    if plan.size is None:
-        return None, "the plan has no size, so the risk cannot be computed"
-    if plan.size <= 0:
-        # An over-exit is recorded rather than clamped, so a negative size can reach here.
-        return None, f"the planned size is {plan.size}, so the risk cannot be computed"
+        return None, f"the plan has no stop, so {what} cannot be computed"
+    if not _finite(plan.entry, plan.stop):
+        return None, f"the plan's entry or stop is not a number, so {what} cannot be computed"
+    if plan.stop == plan.entry:
+        return None, f"the stop is at the entry, so there is no risk distance and {what} " \
+                     f"cannot be computed"
+    if _signed(plan.side, plan.stop, plan.entry) < 0:
+        return None, (f"the stop {plan.stop:g} is {_side_word(plan.stop, plan.entry)} the entry "
+                      f"{plan.entry:g}, which is not the risk side for a {plan.side}, so {what} "
+                      f"cannot be computed")
+    return abs(plan.entry - plan.stop), ""
+
+
+def _risk_in(plan: Plan, size: int, currency: str, ctx: Context) -> tuple[float | None, str]:
+    """The risk of `size` units of this plan, in `currency`: size x stop distance x point value.
+
+    THE ONE PLACE RISK IS COMPUTED. max_risk_per_trade states it and size searches it, so the
+    size the risk limit allows is by construction the largest one max_risk_per_trade passes.
+    They used to be two formulas, and size could allow 5 shares that max_risk then called a
+    breach.
+    """
+    distance, why = _stop_distance(plan, "the risk")
+    if distance is None:
+        return None, why
     if not plan.point_value or plan.point_value <= 0:
         return None, "the plan has no point value, so the risk cannot be computed"
-    distance = abs(plan.entry - plan.stop)
-    if distance == 0:
-        return None, "the stop is at the entry, so there is no risk distance"
-    return plan.size * distance * plan.point_value, ""
+    converted = _convert(size * distance * plan.point_value, plan.currency, currency, ctx)
+    if converted is None:
+        return None, (f"I have no {plan.currency} to {currency} rate, so the risk cannot be "
+                      f"stated in the limit's currency")
+    return converted, ""
+
+
+def _budget(value: str) -> tuple[float | None, str | None]:
+    """A max_risk_per_trade value read whole: (amount, currency), either None if unreadable."""
+    return _number(value), _currency(value)
 
 
 def _open_sizes(ctx: Context) -> tuple[list[TradeState], str]:
@@ -213,88 +311,76 @@ def _units(n: int, plural: str) -> str:
 def min_reward_risk(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     limit = _number(value)
     if limit is None:
-        return _withheld("min_reward_risk", value, f"I could not read a number in {value!r}", "R")
-    if plan.entry is None:
-        return _withheld(
-            "min_reward_risk", value,
-            "the plan has no entry, so reward to risk cannot be computed", "R")
+        return _unreadable("min_reward_risk", value, "a number", "R")
     if plan.target is None:
         return _withheld(
             "min_reward_risk", value,
             "the plan has no target, so reward to risk cannot be computed", "R")
-    if plan.stop is None:
+    if not _finite(plan.target):
         return _withheld(
             "min_reward_risk", value,
-            "the plan has no stop, so reward to risk cannot be computed", "R")
-    risk = abs(plan.entry - plan.stop)
-    if risk == 0:
-        return _withheld(
-            "min_reward_risk", value,
-            "the stop is at the entry, so there is no risk to divide the reward by", "R")
-    # The reward is signed and the risk is a distance: dividing two signed figures would
-    # cancel the signs and pass an inverted trade. _signed is model's, so the side flips a
-    # figure in exactly one place in this codebase.
+            "the plan's target is not a number, so reward to risk cannot be computed", "R")
+    risk, why = _stop_distance(plan, "reward to risk")
+    if risk is None:
+        return _withheld("min_reward_risk", value, why, "R")
+    # The reward is signed and the risk is a distance on the risk side: dividing two signed
+    # figures would cancel the signs and pass an inverted trade. _signed is model's, so the
+    # side flips a figure in exactly one place in this codebase.
     ratio = _signed(plan.side, plan.entry, plan.target) / risk
     return Result(
-        "min_reward_risk", _at(ratio) >= limit, ratio, value,
-        f"reward to risk {ratio:.2f} against a minimum of {value}", "R")
+        "min_reward_risk", _within(ratio, limit, at_least=True), ratio, value,
+        f"reward to risk {_shown(ratio, limit, at_least=True)} against a minimum of {value}",
+        "R")
 
 
 def max_risk_per_trade(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    limit = _number(value)
-    currency = _currency(value)
+    limit, currency = _budget(value)
     if limit is None:
-        return _withheld("max_risk_per_trade", value, f"I could not read an amount in {value!r}")
+        return _unreadable("max_risk_per_trade", value, "an amount and a currency")
     if currency is None:
         return _withheld(
             "max_risk_per_trade", value,
-            f"the limit {value!r} names no currency, so I cannot compare it to a risk in "
-            f"{plan.currency}")
-    risk, why = _risk(plan)
+            f"the limit {value!r} names no single currency, so I cannot compare it to a risk "
+            f"in {plan.currency}")
+    if plan.size is None:
+        return _withheld("max_risk_per_trade", value,
+                         "the plan has no size, so the risk cannot be computed", currency)
+    if plan.size <= 0:
+        # An over-exit is recorded rather than clamped, so a negative size can reach here.
+        return _withheld("max_risk_per_trade", value,
+                         f"the planned size is {plan.size}, so the risk cannot be computed",
+                         currency)
+    risk, why = _risk_in(plan, plan.size, currency, ctx)
     if risk is None:
         return _withheld("max_risk_per_trade", value, why, currency)
-    converted = _convert(risk, plan.currency, currency, ctx)
-    if converted is None:
-        return _withheld(
-            "max_risk_per_trade", value,
-            f"I have no {plan.currency} to {currency} rate, so the risk cannot be stated in "
-            f"the limit's currency", currency)
     return Result(
-        "max_risk_per_trade", _at(converted) <= limit, converted, value,
-        f"risk {fmt.money(converted)} {currency} against a limit of {value}", currency)
+        "max_risk_per_trade", _within(risk, limit, at_least=False), risk, value,
+        f"risk {_shown(risk, limit, at_least=False, money=True)} {currency} against a limit "
+        f"of {value}", currency)
 
 
 def _suggest(rules: Rules, plan: Plan, ctx: Context) -> tuple[int | None, str]:
-    """max risk / (stop distance x point value), rounded DOWN, or (None, why not)."""
+    """The largest size whose risk max_risk_per_trade passes, or (None, why not)."""
     budget_rule = rules.numbers.get("max_risk_per_trade")
     if budget_rule is None:
         return None, "there is no max_risk_per_trade rule, so there is no budget to size against"
-    budget = _number(budget_rule)
-    currency = _currency(budget_rule)
+    budget, currency = _budget(budget_rule)
     if budget is None or currency is None:
-        return None, (f"I could not read an amount and a currency in the max_risk_per_trade "
+        return None, (f"I could not read one amount and one currency in the max_risk_per_trade "
                       f"rule {budget_rule!r}")
-    if plan.entry is None:
-        return None, "the plan has no entry, so I cannot suggest a size"
-    if plan.stop is None:
-        return None, "the plan has no stop, so I cannot suggest a size"
-    if not plan.point_value or plan.point_value <= 0:
-        return None, "the plan has no point value, so I cannot suggest a size"
-    distance = abs(plan.entry - plan.stop)
-    if distance == 0:
-        return None, "the stop is at the entry, so no size follows from the risk budget"
-    # The risk of ONE unit, converted into the budget's currency rather than the budget into
-    # the plan's: that is the same rate direction max_risk_per_trade needs, so one rate source
-    # serves both and a one-way fx function is enough.
-    each = _convert(distance * plan.point_value, plan.currency, currency, ctx)
+    each, why = _risk_in(plan, 1, currency, ctx)
     if each is None:
-        return None, (f"I have no {plan.currency} to {currency} rate, so the budget cannot be "
-                      f"applied to this trade's prices")
-    # Rounded down, because rounding up would exceed the limit by part of one unit -- but
-    # through _at first, or the floor turns float residue into a false breach: 100 over a
-    # 90.00/89.96 stop divides to 2499.9999999996094, and flooring that raw reports 2499
-    # allowed on a trade whose 2500 shares risk exactly the limit.
-    return math.floor(_at(budget / each)), ""
+        return None, why.replace("the risk cannot be computed", "I cannot suggest a size")
+    # The quotient is only a first guess: float residue can put it a hair either side of a
+    # whole number (100 over a 90.00/89.96 stop is 2499.9999999996094). The answer is then
+    # settled by asking _risk_in -- the function max_risk_per_trade asks -- about the sizes
+    # around the guess, so the two checks cannot disagree.
+    n = max(0, math.floor(budget / each))
+    while _within(_risk_in(plan, n + 1, currency, ctx)[0], budget, at_least=False):
+        n += 1
+    while n > 0 and not _within(_risk_in(plan, n, currency, ctx)[0], budget, at_least=False):
+        n -= 1
+    return n, ""
 
 
 def suggest_size(rules: Rules, plan: Plan, ctx: Context) -> int | None:
@@ -364,14 +450,11 @@ def target_required(plan: Plan, value: str, ctx: Context, rules: Rules) -> Resul
 def stop_headroom_candles(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     limit = _number(value)
     if limit is None:
-        return _withheld(
-            "stop_headroom_candles", value, f"I could not read a number in {value!r}", "candles")
-    if plan.entry is None or plan.stop is None:
-        # Named before the bars, because this is the half the owner can do something about.
-        missing = "entry" if plan.entry is None else "stop"
-        return _withheld(
-            "stop_headroom_candles", value,
-            f"the plan has no {missing}, so the stop's headroom cannot be measured", "candles")
+        return _unreadable("stop_headroom_candles", value, "a number", "candles")
+    # The plan's half first, because it is the half the owner can do something about.
+    distance, why = _stop_distance(plan, "the stop's headroom")
+    if distance is None:
+        return _withheld("stop_headroom_candles", value, why, "candles")
     if ctx.median_candle_range is None:
         return _withheld(
             "stop_headroom_candles", value,
@@ -382,18 +465,17 @@ def stop_headroom_candles(plan: Plan, value: str, ctx: Context, rules: Rules) ->
             "stop_headroom_candles", value,
             "the median candle range is zero, so the stop cannot be measured in candles",
             "candles")
-    candles = abs(plan.entry - plan.stop) / ctx.median_candle_range
+    candles = distance / ctx.median_candle_range
     return Result(
-        "stop_headroom_candles", _at(candles) >= limit, candles, value,
-        f"the stop is {candles:.2f} candles from the entry against a minimum of {value}",
-        "candles")
+        "stop_headroom_candles", _within(candles, limit, at_least=True), candles, value,
+        f"the stop is {_shown(candles, limit, at_least=True)} candles from the entry against a "
+        f"minimum of {value}", "candles")
 
 
 def max_open_trades(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     limit = _number(value)
     if limit is None:
-        return _withheld("max_open_trades", value, f"I could not read a number in {value!r}",
-                         "trades")
+        return _unreadable("max_open_trades", value, "a number", "trades")
     holding, why = _open_sizes(ctx)
     if why:
         return _withheld("max_open_trades", value, why, "trades")
@@ -406,9 +488,19 @@ def max_open_trades(plan: Plan, value: str, ctx: Context, rules: Rules) -> Resul
         f"of {value}", "trades")
 
 
+def _ticker(typed: str) -> str:
+    """A ticker as every comparison here sees it: upper case, a continuous future as its root."""
+    return canonical_ticker(typed)[0]
+
+
 def no_open_trade_in_group(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
+    # Group names and their tickers are compared the way the CLI records a ticker: in any case,
+    # and a future by its root. A lower-case group used to let its own tickers through, and a
+    # group listing GC1! could never match a trade recorded as GC.
+    groups = {name.lower(): (name, {_ticker(t) for t in members if t.strip()})
+              for name, members in rules.groups.items()}
     guarded = [g.strip() for g in value.split(",") if g.strip()]
-    undefined = [g for g in guarded if g not in rules.groups]
+    undefined = [g for g in guarded if g.lower() not in groups]
     if undefined:
         return _withheld(
             "no_open_trade_in_group", value,
@@ -417,13 +509,15 @@ def no_open_trade_in_group(plan: Plan, value: str, ctx: Context, rules: Rules) -
     holding, why = _open_sizes(ctx)
     if why:
         return _withheld("no_open_trade_in_group", value, why, "trades")
-    mine = [g for g in guarded if plan.ticker in rules.groups[g]]
+    me = _ticker(plan.ticker)
+    mine = [groups[g.lower()] for g in guarded if me in groups[g.lower()][1]]
     if not mine:
         return Result(
             "no_open_trade_in_group", True, 0.0, value,
             f"{plan.ticker} is in none of: {value}", "trades")
-    tickers = sorted({t.ticker for t in holding for g in mine if t.ticker in rules.groups[g]})
-    group_names = ", ".join(mine)
+    tickers = sorted({t.ticker for t in holding for _, members in mine
+                      if _ticker(t.ticker) in members})
+    group_names = ", ".join(name for name, _ in mine)
     if not tickers:
         return Result(
             "no_open_trade_in_group", True, 0.0, value,
@@ -435,12 +529,11 @@ def no_open_trade_in_group(plan: Plan, value: str, ctx: Context, rules: Rules) -
 
 
 def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    hours = _hours(value)
-    if hours is None:
-        return _withheld("cooldown_after_stop", value, f"I could not read a duration in {value!r}",
-                         "h")
-    # Read from the whole value, so "same ticker, 1 day" scopes the same as "1 day, same ticker".
+    # "same ticker" is taken out before the duration is read, so its words are not units.
     same_ticker = "same ticker" in value.lower().replace("_", " ")
+    hours = _hours(re.sub(r"same[\s_]ticker", "", value, flags=re.IGNORECASE))
+    if hours is None:
+        return _unreadable("cooldown_after_stop", value, "a duration", "h")
     if ctx.stopped_closes is None:
         return _withheld(
             "cooldown_after_stop", value,
@@ -448,7 +541,8 @@ def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> R
             "measured", "h")
     scope = f" on {plan.ticker}" if same_ticker else ""
     if same_ticker:
-        closes = [t for ticker, t in ctx.stopped_closes.items() if ticker == plan.ticker]
+        closes = [t for ticker, t in ctx.stopped_closes.items()
+                  if _ticker(ticker) == _ticker(plan.ticker)]
     else:
         closes = list(ctx.stopped_closes.values())
     if not closes:
@@ -467,15 +561,15 @@ def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> R
             f"the last stop{scope} closed {abs(elapsed):.1f} h in the future, so the clocks "
             f"disagree and the cooldown cannot be measured", "h")
     return Result(
-        "cooldown_after_stop", _at(elapsed, 1) >= hours, elapsed, value,
-        f"the last stop{scope} closed {elapsed:.1f} h ago against a cooldown of {value}", "h")
+        "cooldown_after_stop", _within(elapsed, hours, at_least=True), elapsed, value,
+        f"the last stop{scope} closed {_shown(elapsed, hours, at_least=True, places=1)} h ago "
+        f"against a cooldown of {value}", "h")
 
 
 def max_session_length(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     hours = _hours(value)
     if hours is None:
-        return _withheld("max_session_length", value, f"I could not read a duration in {value!r}",
-                         "h")
+        return _unreadable("max_session_length", value, "a duration", "h")
     if ctx.session_started is None:
         return _withheld(
             "max_session_length", value,
@@ -494,14 +588,15 @@ def max_session_length(plan: Plan, value: str, ctx: Context, rules: Rules) -> Re
             f"the session's start is {abs(elapsed):.1f} h in the future, so the clocks "
             f"disagree and the session's length cannot be measured", "h")
     return Result(
-        "max_session_length", _at(elapsed, 1) <= hours, elapsed, value,
-        f"the session has run {elapsed:.1f} h against a limit of {value}", "h")
+        "max_session_length", _within(elapsed, hours, at_least=False), elapsed, value,
+        f"the session has run {_shown(elapsed, hours, at_least=False, places=1)} h against a "
+        f"limit of {value}", "h")
 
 
 def daily_loss_limit(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     limit = _number(value)
     if limit is None:
-        return _withheld("daily_loss_limit", value, f"I could not read a number in {value!r}", "R")
+        return _unreadable("daily_loss_limit", value, "a number", "R")
     # The limit is a loss floor however it is written: "-2R" and "2R" both mean 2R down.
     floor = -abs(limit)
     if ctx.closed_today_r is None:
@@ -509,27 +604,52 @@ def daily_loss_limit(plan: Plan, value: str, ctx: Context, rules: Rules) -> Resu
             "daily_loss_limit", value,
             "today's closed R was not supplied, so it cannot be totalled; an unknown total is "
             "not zero", "R")
+    closed = ctx.closed_today_r
     return Result(
-        "daily_loss_limit", _at(ctx.closed_today_r) >= floor, ctx.closed_today_r, value,
-        f"today's closed R is {fmt.signed(ctx.closed_today_r)} R against a daily limit of "
-        f"{value}", "R")
+        "daily_loss_limit", _within(closed, floor, at_least=True), closed, value,
+        f"today's closed R is {_shown(closed, floor, at_least=True, signed=True)} R against a "
+        f"daily limit of {value}", "R")
 
 
-def _singular(word: str) -> str:
-    return word[:-1] if word.endswith("s") else word
+# The words a banned list is written in, each mapped to what it bans. Only the side and the
+# instrument are visible to this check: options and leverage are words it can READ, so their
+# presence never stops a pass, but v1's record has no field for either, so it never claims to
+# have checked them.
+_BAN_TERMS = {
+    "short": "short", "shorts": "short", "shorting": "short",
+    "long": "long", "longs": "long",
+    "stock": "stock", "stocks": "stock", "etf": "etf", "etfs": "etf",
+    "future": "future", "futures": "future",
+    "option": "option", "options": "option",
+    "leverage": "leverage", "leveraged": "leverage", "margin": "leverage",
+}
+_BAN_FILLER = {"no", "and", "or", "nor", "selling", "sales", "trading", "trades", "any", "all"}
 
 
 def banned(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    # Only the side and the instrument are visible to this check: leverage and options are on
-    # the owner's list but v1's record has no field for either, so this never claims to have
-    # checked them.
-    listed = {_singular(t.strip().lower()) for t in value.split(",") if t.strip()}
-    hits = [w for w in (plan.side, plan.instrument) if w and _singular(w.lower()) in listed]
+    # Read word by word, not as exact comma-separated entries: "no shorts", "short selling" and
+    # "shorts and futures" each let a short through when only "short" or "shorts" between
+    # commas counted.
+    terms, unread = set(), []
+    for word in re.findall(r"[a-z]+", value.lower()):
+        if word in _BAN_TERMS:
+            terms.add(_BAN_TERMS[word])
+        elif word not in _BAN_FILLER:
+            unread.append(word)
+    hits = [w for w in (plan.side, plan.instrument) if w in terms]
     if hits:
+        # A ban it can see is a breach whatever else the list says.
         return Result(
             "banned", False, None, value,
             f"this is a {plan.side} {plan.instrument}, and the rules ban "
             f"{' and '.join(hits)}: {value}", None)
+    if unread:
+        # It cannot see everything the list bans, so it cannot say this trade is clear of it.
+        return _withheld(
+            "banned", value,
+            f"I could not read {', '.join(repr(w) for w in unread)} in the banned list "
+            f"{value!r}, so I cannot tell everything it bans; a {plan.side} {plan.instrument} "
+            f"is not among the words I could read")
     return Result(
         "banned", True, None, value,
         f"a {plan.side} {plan.instrument} is not on the banned list: {value}", None)
@@ -538,16 +658,17 @@ def banned(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
 def max_volatility_ratio(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     limit = _number(value)
     if limit is None:
-        return _withheld("max_volatility_ratio", value, f"I could not read a number in {value!r}")
+        return _unreadable("max_volatility_ratio", value, "a number")
     if ctx.volatility_ratio is None:
         return _withheld(
             "max_volatility_ratio", value,
             "price bars are not in the record yet, so 20-day volatility cannot be compared to "
             "its 1-year median")
+    ratio = ctx.volatility_ratio
     return Result(
-        "max_volatility_ratio", _at(ctx.volatility_ratio) <= limit, ctx.volatility_ratio, value,
-        f"20-day volatility is {ctx.volatility_ratio:.2f} times its 1-year median against a "
-        f"limit of {value}", None)
+        "max_volatility_ratio", _within(ratio, limit, at_least=False), ratio, value,
+        f"20-day volatility is {_shown(ratio, limit, at_least=False)} times its 1-year median "
+        f"against a limit of {value}", None)
 
 
 # The registry, in the order of the spec's §5 table: run_checks walks it, and CHECK_NAMES is

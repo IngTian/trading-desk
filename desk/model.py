@@ -32,10 +32,37 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 
 from desk import store
+
+# A continuous futures contract as TradingView writes it ("GC1!", "MNQ2!") and as Yahoo does
+# ("GC=F"), optionally behind an exchange prefix ("COMEX:GC1!"). A root may start with a digit
+# (6E is a currency future), so the root is any run of letters and digits, matched lazily so the
+# contract number is left for the suffix.
+_CONTINUOUS = re.compile(r"^(?:[A-Z0-9_]+:)?([A-Z0-9]+?)(?:\d+!|=F)$")
+
+
+def canonical_ticker(typed: str) -> tuple[str, str | None]:
+    """(ticker, instrument it implies): "GC1!" -> ("GC", "future"), "acme" -> ("ACME", None).
+
+    One trade, one ticker. Typing GC once and GC1! the next time made them two tickers, so a
+    stop-out on one never cooled the other down, and an id built from "GC1!" carried a "!"
+    that zsh expands. And the form itself says it is a future, which is the fact that a
+    forgotten --instrument flag used to lose: GC1! checked as a stock worth 1 per point
+    reported 100x too little risk and passed a futures ban. A bare root ("GC") says nothing,
+    so it is taken as typed.
+
+    Here rather than in the CLI because every comparison of tickers needs it: the CLI on what
+    was typed, and the group check on what rules.md lists.
+    """
+    upper = typed.strip().upper()
+    continuous = _CONTINUOUS.match(upper)
+    if continuous:
+        return continuous.group(1), "future"
+    return upper, None
 
 
 def _signed(side: str, a: float, b: float) -> float:
