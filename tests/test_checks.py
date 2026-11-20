@@ -43,6 +43,7 @@ def rules_with(groups=None, unchecked=None, **numbers) -> rules.Rules:
         path=FIXTURE,
         sections_used=("All",),
         sections_wanted=("All",),
+        sections_missing=(),
         unchecked=dict(unchecked or {}),
     )
 
