@@ -1,113 +1,103 @@
-"""Tests for the v1 append-only event store."""
+"""Tests for the v2 store: strategies, versions, runs, trades and an append-only log."""
 import json
 import sqlite3
 
-import invented
 import pytest
 
 from desk import store
 
-T = invented.TEST_TRADE_ID
+AT = "2026-11-10T10:00:00+00:00"
 
 
 @pytest.fixture
 def con(tmp_path):
-    """A fresh v1 store in a temp directory."""
+    """A fresh v2 store with one strategy, one version, one run and one trade."""
     db = tmp_path / "test.db"
     store.create(db)
     with store.open(db) as conn:
-        # Add a test trade so events can reference it
-        store.add_trade(
-            conn,
-            trade_id=T,
-            account="paper",
-            run_id=None,
-            ticker="ACME",
-            instrument="stock",
-            point_value=1.0,
-            currency="USD",
-            side="long",
-        )
+        store.add_strategy(conn, "alpha", AT)
+        store.add_version(conn, "alpha", 1, "text", "h1", {"size": 1}, ["15m"], AT)
+        store.add_run(conn, "alpha-r1", "alpha", 1, "live", ["paper"])
+        store.add_trade(conn, "ACME-20261110", "alpha-r1", "ACME", "long", "stock", 1.0, "USD")
         yield conn
 
 
+def _append(con, kind="entered", trade_id="ACME-20261110", **kw):
+    return store.append(con, kind=kind, run_id="alpha-r1", at=AT, payload=kw.pop("payload", {}),
+                        trade_id=trade_id, recorded_at=AT, **kw)
+
+
 def test_an_event_round_trips_with_its_payload(con):
-    eid = store.append(
-        con,
-        kind="checked",
-        actor="owner",
-        source="chat",
-        trade_id=T,
-        payload={"entry": 10.0, "stop": 9.0},
-    )
-    (row,) = store.events(con, trade_id=T)
+    eid = _append(con, payload={"entry": 10.0, "stop": 9.0})
+    (row,) = store.events(con, trade_id="ACME-20261110")
     assert row["id"] == eid and json.loads(row["payload"])["stop"] == 9.0
+    assert store.events(con, run_id="alpha-r1") == [row]
+    assert store.events(con, run_id="nope") == []
 
 
 def test_the_log_refuses_an_update_and_a_delete(con):
-    eid = store.append(
-        con, kind="note", actor="owner", source="chat", trade_id=T, payload={"text": "x"}
-    )
+    eid = _append(con)
     with pytest.raises(sqlite3.IntegrityError):
         con.execute("UPDATE events SET payload='{}' WHERE id=?", (eid,))
     with pytest.raises(sqlite3.IntegrityError):
         con.execute("DELETE FROM events WHERE id=?", (eid,))
 
 
+def test_versions_and_trackers_refuse_an_update_and_a_delete(con):
+    store.add_tracker(con, "alpha", "script", "sh", "40 bars after exit", AT)
+    for sql in ("UPDATE versions SET text='x'", "DELETE FROM versions",
+                "UPDATE trackers SET script='x'", "DELETE FROM trackers"):
+        with pytest.raises(sqlite3.IntegrityError):
+            con.execute(sql)
+
+
 def test_a_correction_must_name_an_earlier_event(con):
     with pytest.raises(sqlite3.IntegrityError):
-        store.append(
-            con,
-            kind="corrected",
-            actor="owner",
-            source="chat",
-            trade_id=T,
-            corrects=9999,
-            payload={"why": "typo"},
-        )
+        _append(con, kind="corrected", corrects=9999)
+
+
+def test_a_trade_event_needs_a_trade_and_a_run_event_must_not_have_one(con):
+    with pytest.raises(sqlite3.IntegrityError):
+        _append(con, kind="entered", trade_id=None)
+    with pytest.raises(sqlite3.IntegrityError):
+        _append(con, kind="run_started")  # carries a trade_id
+    assert _append(con, kind="run_started", trade_id=None)
 
 
 def test_a_payload_that_is_not_json_is_refused(con):
-    # match= because every other column must be valid for this to test the JSON check: with
-    # an unknown actor the row was refused by the actor CHECK and the test passed regardless.
     with pytest.raises(sqlite3.IntegrityError, match="json_valid"):
         con.execute(
-            "INSERT INTO events (at, actor, source, kind, payload) VALUES (?, ?, ?, ?, ?)",
-            ("2026-11-10T10:00:00Z", "owner", "chat", "note", "not-json"),
-        )
+            "INSERT INTO events (at, recorded_at, kind, run_id, trade_id, payload)"
+            " VALUES (?, ?, 'entered', 'alpha-r1', 'ACME-20261110', 'not-json')", (AT, AT))
 
 
-def test_an_unknown_kind_actor_or_source_is_refused(con):
-    # Unknown kind
+def test_an_unknown_kind_is_refused(con):
     with pytest.raises(sqlite3.IntegrityError):
-        store.append(
-            con,
-            kind="unknown_kind",
-            actor="owner",
-            source="chat",
-            trade_id=T,
-            payload={},
-        )
-    # Unknown actor
+        _append(con, kind="unknown_kind")
+    assert store.KINDS == ("run_started", "run_stopped", "entered", "order_moved",
+                           "closed", "corrected", "voided")
+
+
+def test_a_run_naming_a_missing_version_is_refused(con):
     with pytest.raises(sqlite3.IntegrityError):
-        store.append(
-            con,
-            kind="note",
-            actor="unknown_actor",
-            source="chat",
-            trade_id=T,
-            payload={},
-        )
-    # Unknown source
-    with pytest.raises(sqlite3.IntegrityError):
-        store.append(
-            con,
-            kind="note",
-            actor="owner",
-            source="unknown_source",
-            trade_id=T,
-            payload={},
-        )
+        store.add_run(con, "alpha-r2", "alpha", 7, "live", [])
+
+
+def test_versions_trackers_and_runs_read_back(con):
+    store.add_version(con, "alpha", 2, "text2", "h2", {}, ["1h"], AT)
+    assert [v["version"] for v in store.versions(con, "alpha")] == [1, 2]
+    assert store.latest_tracker(con, "alpha") is None
+    store.add_tracker(con, "alpha", "a", "ha", None, AT)
+    store.add_tracker(con, "alpha", None, None, None, AT)
+    assert store.latest_tracker(con, "alpha")["script"] is None
+    assert store.run(con, "alpha-r1")["mode"] == "live" and store.run(con, "x") is None
+    assert [r["id"] for r in store.runs(con)] == ["alpha-r1"]
+    assert store.runs(con, "beta") == []
+    assert json.loads(store.run(con, "alpha-r1")["tags"]) == ["paper"]
+    assert store.trade(con, "ACME-20261110")["ticker"] == "ACME"
+    assert store.trade(con, "nonexistent") is None
+    assert [t["id"] for t in store.trades(con, "alpha-r1")] == ["ACME-20261110"]
+    assert store.trades(con, "other") == [] and len(store.trades(con)) == 1
 
 
 def test_read_only_open_cannot_write(tmp_path):
@@ -115,139 +105,28 @@ def test_read_only_open_cannot_write(tmp_path):
     store.create(db)
     with store.open(db, read_only=True) as conn:
         with pytest.raises(sqlite3.OperationalError):
-            store.append(
-                conn,
-                kind="note",
-                actor="owner",
-                source="chat",
-                payload={"text": "x"},
-            )
+            store.add_strategy(conn, "alpha", AT)
 
 
-def test_trade_returns_the_immutable_identity_row(con):
-    """store.trade() returns the full trade row, or None if not found."""
-    row = store.trade(con, T)
-    assert row is not None
-    assert row["id"] == T
-    assert row["ticker"] == "ACME"
-    assert row["side"] == "long"
-    assert row["instrument"] == "stock"
-    assert row["point_value"] == 1.0
-    assert row["currency"] == "USD"
-
-    # Non-existent trade returns None
-    assert store.trade(con, "nonexistent") is None
-
-
-def test_trade_ids_returns_all_ids_ordered(tmp_path):
-    """store.trade_ids() returns all trade IDs ordered by created_at."""
-    db = tmp_path / "test.db"
-    store.create(db)
-    with store.open(db) as conn:
-        # Add three trades
-        store.add_trade(
-            conn,
-            trade_id="trade-1",
-            account="paper",
-            run_id=None,
-            ticker="ACME",
-            instrument="stock",
-            point_value=1.0,
-            currency="USD",
-            side="long",
-        )
-        store.add_trade(
-            conn,
-            trade_id="trade-2",
-            account="paper",
-            run_id=None,
-            ticker="WXYZ",
-            instrument="stock",
-            point_value=1.0,
-            currency="USD",
-            side="short",
-        )
-        store.add_trade(
-            conn,
-            trade_id="trade-3",
-            account="real",
-            run_id=None,
-            ticker="TEST",
-            instrument="etf",
-            point_value=1.0,
-            currency="CAD",
-            side="long",
-        )
-
-        ids = store.trade_ids(conn)
-        assert ids == ["trade-1", "trade-2", "trade-3"]
+def test_a_v1_file_is_refused_as_the_wrong_schema_version(tmp_path):
+    old = tmp_path / "desk.db"
+    c = sqlite3.connect(old)
+    c.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, actor TEXT, kind TEXT, payload TEXT)")
+    c.execute("PRAGMA user_version = 1")
+    c.commit()
+    c.close()
+    before = _md5(old)
+    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 2"):
+        store.open(old)
+    assert _md5(old) == before
 
 
 def test_open_raises_on_missing_database_when_not_read_only(tmp_path):
-    """store.open raises FileNotFoundError when the database doesn't exist and read_only=False.
-    This prevents creating an empty file that then blocks store.create()."""
     missing = tmp_path / "nonexistent.db"
     with pytest.raises(FileNotFoundError) as exc:
         store.open(missing, read_only=False)
     assert "not been created" in str(exc.value)
-    assert str(missing) in str(exc.value)
-    # The guard must not leave a stray file
     assert not missing.exists()
-
-
-def test_add_trade_with_event_is_atomic(tmp_path):
-    """If the event insert fails, no trade row is left behind (atomicity)."""
-    db = tmp_path / "test.db"
-    store.create(db)
-    con = store.open(db)
-
-    # Create a payload that will fail json.dumps
-    # A Python object that's not JSON-serializable will cause the INSERT to fail
-    class NotSerializable:
-        pass
-
-    try:
-        store.add_trade_with_event(
-            con,
-            trade_id="test-trade",
-            account="paper",
-            run_id=None,
-            ticker="ACME",
-            instrument="stock",
-            point_value=1.0,
-            currency="USD",
-            side="long",
-            kind="checked",
-            actor="owner",
-            source="chat",
-            payload={"bad": NotSerializable()},  # This will fail json.dumps
-            rules_hash="abc123",
-            at="2026-11-10T10:00:00Z",
-        )
-        raise AssertionError("Expected TypeError from json.dumps")
-    except TypeError:
-        # Expected: json.dumps cannot serialize the object
-        pass
-
-    # Verify no trade row was created (atomicity: both or neither)
-    trade_ids = store.trade_ids(con)
-    assert trade_ids == [], f"Expected no trades, found {trade_ids}"
-
-
-def test_cli_is_a_valid_event_source(con):
-    """'cli' is in store.SOURCES and accepted by the schema CHECK."""
-    assert "cli" in store.SOURCES
-    # The schema CHECK must accept it
-    eid = store.append(
-        con,
-        kind="checked",
-        actor="owner",
-        source="cli",
-        trade_id=T,
-        payload={"entry": 10.0},
-    )
-    row = con.execute("SELECT * FROM events WHERE id = ?", (eid,)).fetchone()
-    assert row["source"] == "cli"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -262,7 +141,7 @@ def _md5(path):
 
 
 def _foreign_book(path, *, journal="delete"):
-    """A sqlite file that is not a v1 desk.db: tables of the same names, other columns."""
+    """A sqlite file that is not a desk.db: tables of the same names, other columns."""
     con = sqlite3.connect(path)
     con.execute(f"PRAGMA journal_mode = {journal}")
     con.execute("CREATE TABLE trades (id TEXT PRIMARY KEY, symbol TEXT)")
@@ -320,36 +199,3 @@ def test_the_store_uses_a_rollback_journal_not_wal(tmp_path):
         assert con.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
     store.open(db, read_only=True).execute("SELECT count(*) FROM events").fetchone()
     assert sorted(p.name for p in tmp_path.iterdir()) == ["desk.db"]
-
-
-def test_a_paper_run_and_a_replay_run_with_the_same_number_are_two_runs(tmp_path):
-    """They shared one row, so a replay trade's run named the Paper rules section."""
-    db = tmp_path / "desk.db"
-    store.create(db)
-    con = store.open(db)
-    for kind in ("paper", "replay"):
-        assert store.ensure_run(con, run_id="run-3", kind=kind, started="2026-01-01T00:00:00Z",
-                                rules_section=f"{kind.capitalize()} — run 3")
-    assert not store.ensure_run(con, run_id="run-3", kind="replay",
-                                started="2026-01-02T00:00:00Z", rules_section="Replay — run 3")
-    rows = con.execute("SELECT kind, id, rules_section FROM runs ORDER BY kind").fetchall()
-    assert [tuple(r) for r in rows] == [
-        ("paper", "run-3", "Paper — run 3"), ("replay", "run-3", "Replay — run 3")]
-
-    store.add_trade(con, trade_id="t-replay", account="replay", run_id="run-3", ticker="ACME",
-                    instrument="stock", point_value=1.0, currency="USD", side="long")
-    (section,) = con.execute(
-        "SELECT r.rules_section FROM trades t JOIN runs r ON r.kind = t.account AND r.id = t.run_id"
-        " WHERE t.id = 't-replay'").fetchone()
-    assert section == "Replay — run 3"
-
-
-def test_a_trade_cannot_name_a_run_of_another_account_kind(tmp_path):
-    db = tmp_path / "desk.db"
-    store.create(db)
-    con = store.open(db)
-    store.ensure_run(con, run_id="run-3", kind="paper", started="2026-01-01T00:00:00Z",
-                     rules_section="Paper — run 3")
-    with pytest.raises(sqlite3.IntegrityError):
-        store.add_trade(con, trade_id="t", account="replay", run_id="run-3", ticker="ACME",
-                        instrument="stock", point_value=1.0, currency="USD", side="long")

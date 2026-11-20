@@ -1,47 +1,27 @@
-"""The v1 event store: append-only log, derived state.
+"""The v2 store: strategies, versions, runs, trades and an append-only log of decisions.
 
-Every change to a trade becomes an event. Current state is derived by folding events.
+This module is the only one that writes SQL. Current state is derived by folding events.
 No updates, no deletes. A correction is a new event naming the one it corrects.
 """
 from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
 from pathlib import Path
 
 from desk import config
 
-# The tuples the CHECKs use, exported so tests and later tasks do not re-declare them.
-ACTORS = ("owner", "tracker", "import")
-SOURCES = ("chat", "cli", "export", "yahoo")
-KINDS = (
-    "checked",
-    "imported",
-    "passed",
-    "entered",
-    "stop_moved",
-    "target_moved",
-    "exit_proposed",
-    "exited",
-    "note",
-    "closed",
-    "labelled",
-    "corrected",
-    "session_started",
-    "session_ended",
-    "run_started",
-    "run_ended",
-)
+# Exported so tests and later tasks do not re-declare it.
+KINDS = ("run_started", "run_stopped", "entered", "order_moved", "closed", "corrected", "voided")
 
 
-# PRAGMA user_version of a v1 desk.db. Stamped at create and required at open, so a file that
+# PRAGMA user_version of a v2 desk.db. Stamped at create and required at open, so a file that
 # is not one -- the frozen legacy book above all -- is recognised before anything touches it.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class NotADeskDatabase(ValueError):
-    """The file exists but is not a v1 desk.db, so the store refuses to open it."""
+    """The file exists but is not a v2 desk.db, so the store refuses to open it."""
 
 
 def create(path: Path | None = None) -> None:
@@ -61,7 +41,7 @@ def create(path: Path | None = None) -> None:
 
 
 def _probe(db: Path) -> None:
-    """Refuse a file that is not a v1 desk.db, without writing to it.
+    """Refuse a file that is not a v2 desk.db, without writing to it.
 
     Opened `immutable=1` as well as read-only: a plain read-only open of a WAL-mode file needs
     its -shm, and SQLite may create one. Immutable takes no locks and writes nothing, which is
@@ -77,9 +57,9 @@ def _probe(db: Path) -> None:
             con.close()
     except sqlite3.DatabaseError as e:
         raise NotADeskDatabase(f"{db} is not a desk.db: SQLite cannot read it ({e})") from None
-    if version != SCHEMA_VERSION or not {"actor", "kind", "payload"} <= columns:
+    if version != SCHEMA_VERSION or not {"recorded_at", "kind", "payload"} <= columns:
         raise NotADeskDatabase(
-            f"{db} is not a v1 desk.db (schema version {version}, expected {SCHEMA_VERSION}); "
+            f"{db} is not a v2 desk.db (schema version {version}, expected {SCHEMA_VERSION}); "
             f"it was left untouched. If it is the old book, it is read-only by design: point "
             f"TRADING_DESK_DB or config.toml's `db` at desk.db instead.")
 
@@ -87,7 +67,7 @@ def _probe(db: Path) -> None:
 def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connection:
     """Open the store. Sets row_factory, PRAGMA foreign_keys = ON, and journal_mode = DELETE.
 
-    The file is probed first (see _probe), so a file that is not a v1 desk.db is refused
+    The file is probed first (see _probe), so a file that is not a v2 desk.db is refused
     unchanged, read-only or not.
 
     DELETE, not WAL: the default folder is under ~/Documents, which iCloud syncs, and a
@@ -118,237 +98,91 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
     return con
 
 
-def _append_no_commit(
-    con: sqlite3.Connection,
-    *,
-    kind: str,
-    actor: str,
-    source: str,
-    trade_id: str | None = None,
-    session_id: int | None = None,
-    corrects: int | None = None,
-    payload: dict,
-    rules_hash: str | None = None,
-    at: str,
-) -> int:
-    """Internal: append an event without committing. Used by append and add_trade_with_event."""
-    cur = con.execute(
-        """
-        INSERT INTO events (
-            at, actor, source, kind, trade_id, session_id, corrects, rules_hash, payload
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (at, actor, source, kind, trade_id, session_id, corrects, rules_hash,
-         json.dumps(payload, allow_nan=False)),
-    )
-    if cur.lastrowid is None:
-        raise RuntimeError("INSERT succeeded but lastrowid is None")
-    return cur.lastrowid
-
-
-def append(
-    con: sqlite3.Connection,
-    *,
-    kind: str,
-    actor: str,
-    source: str,
-    trade_id: str | None = None,
-    session_id: int | None = None,
-    corrects: int | None = None,
-    payload: dict,
-    rules_hash: str | None = None,
-    at: str | None = None,
-) -> int:
-    """Append an event. Returns the new event id."""
-    if at is None:
-        at = datetime.now(UTC).isoformat()
-    event_id = _append_no_commit(
-        con,
-        kind=kind,
-        actor=actor,
-        source=source,
-        trade_id=trade_id,
-        session_id=session_id,
-        corrects=corrects,
-        payload=payload,
-        rules_hash=rules_hash,
-        at=at,
-    )
-    con.commit()
-    return event_id
-
-
-def events(
-    con: sqlite3.Connection,
-    *,
-    trade_id: str | None = None,
-    session_id: int | None = None,
-) -> list[sqlite3.Row]:
-    """Fetch events, ordered by id. Filters by trade_id or session_id if provided."""
-    if trade_id is not None:
-        rows = con.execute(
-            "SELECT * FROM events WHERE trade_id = ? ORDER BY id",
-            (trade_id,),
-        ).fetchall()
-    elif session_id is not None:
-        rows = con.execute(
-            "SELECT * FROM events WHERE session_id = ? ORDER BY id",
-            (session_id,),
-        ).fetchall()
-    else:
-        rows = con.execute("SELECT * FROM events ORDER BY id").fetchall()
-    return rows
-
-
-def trade(con: sqlite3.Connection, trade_id: str) -> sqlite3.Row | None:
-    """Fetch the immutable identity row for a trade. Returns None if not found."""
-    return con.execute(
-        "SELECT * FROM trades WHERE id = ?",
-        (trade_id,),
-    ).fetchone()
-
-
-def trade_ids(con: sqlite3.Connection) -> list[str]:
-    """Fetch all trade IDs, ordered by created_at."""
-    rows = con.execute("SELECT id FROM trades ORDER BY created_at").fetchall()
-    return [row["id"] for row in rows]
-
-
-def _add_trade_no_commit(
-    con: sqlite3.Connection,
-    *,
-    trade_id: str,
-    account: str,
-    run_id: str | None,
-    ticker: str,
-    instrument: str,
-    point_value: float,
-    currency: str,
-    side: str,
-    created_at: str,
-) -> None:
-    """Internal: add a trade without committing. Used by add_trade and add_trade_with_event."""
-    con.execute(
-        """
-        INSERT INTO trades (
-            id, account, account_name, run_id, ticker, instrument,
-            point_value, currency, side, created_at
-        )
-        VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (trade_id, account, run_id, ticker, instrument, point_value, currency, side, created_at),
-    )
-
-
-def add_trade(
-    con: sqlite3.Connection,
-    *,
-    trade_id: str,
-    account: str,
-    run_id: str | None,
-    ticker: str,
-    instrument: str,
-    point_value: float,
-    currency: str,
-    side: str,
-) -> None:
-    """Add a trade. Only what never changes: the mutable state derives from events."""
-    created_at = datetime.now(UTC).isoformat()
-    _add_trade_no_commit(
-        con,
-        trade_id=trade_id,
-        account=account,
-        run_id=run_id,
-        ticker=ticker,
-        instrument=instrument,
-        point_value=point_value,
-        currency=currency,
-        side=side,
-        created_at=created_at,
-    )
-    con.commit()
-
-
-def add_trade_with_event(
-    con: sqlite3.Connection,
-    *,
-    trade_id: str,
-    account: str,
-    run_id: str | None,
-    ticker: str,
-    instrument: str,
-    point_value: float,
-    currency: str,
-    side: str,
-    kind: str,
-    actor: str,
-    source: str,
-    payload: dict,
-    rules_hash: str,
-    at: str,
-) -> int:
-    """Add a trade and its first event atomically.
-
-    The trade row and its checked/imported event must be written together because
-    integrity._trade_with_no_start requires every trade to have one. Any failure between
-    the two writes would commit the trade and lose the event, leaving a permanent integrity
-    violation in the append-only log.
-
-    Returns the new event id.
-    """
+def _insert(con: sqlite3.Connection, sql: str, params: tuple) -> int:
+    """Run one INSERT and commit it; roll back and re-raise if it is refused."""
     try:
-        _add_trade_no_commit(
-            con,
-            trade_id=trade_id,
-            account=account,
-            run_id=run_id,
-            ticker=ticker,
-            instrument=instrument,
-            point_value=point_value,
-            currency=currency,
-            side=side,
-            created_at=at,
-        )
-        event_id = _append_no_commit(
-            con,
-            kind=kind,
-            actor=actor,
-            source=source,
-            trade_id=trade_id,
-            payload=payload,
-            rules_hash=rules_hash,
-            at=at,
-        )
+        cur = con.execute(sql, params)
         con.commit()
-        return event_id
     except Exception:
         con.rollback()
         raise
+    assert cur.lastrowid is not None
+    return cur.lastrowid
 
 
-def ensure_run(
-    con: sqlite3.Connection,
-    *,
-    run_id: str,
-    kind: str,
-    started: str,
-    rules_section: str,
-) -> bool:
-    """Create a run row if it doesn't exist. Returns True if created, False if already exists.
+def add_strategy(con: sqlite3.Connection, id: str, at: str) -> None:
+    _insert(con, "INSERT INTO strategies (id, created_at) VALUES (?, ?)", (id, at))
 
-    A run is identified by its kind and id together: paper run 3 and replay run 3 are two.
-    """
-    existing = con.execute(
-        "SELECT id FROM runs WHERE kind = ? AND id = ?", (kind, run_id)).fetchone()
-    if existing:
-        return False
-    con.execute(
-        """
-        INSERT INTO runs (id, kind, started, rules_section)
-        VALUES (?, ?, ?, ?)
-        """,
-        (run_id, kind, started, rules_section),
-    )
-    con.commit()
-    return True
+
+def add_version(con, strategy_id: str, version: int, text: str, text_hash: str,
+                rules: dict, timeframes: list, at: str) -> None:
+    _insert(con, "INSERT INTO versions (strategy_id, version, text, text_hash, rules, timeframes,"
+            " saved_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (strategy_id, version, text, text_hash,
+             json.dumps(rules, allow_nan=False), json.dumps(timeframes), at))
+
+
+def add_tracker(con, strategy_id: str, script: str | None, script_hash: str | None,
+                tracker_limit: str | None, at: str) -> None:
+    _insert(con, "INSERT INTO trackers (strategy_id, script, script_hash, tracker_limit,"
+            " saved_at) VALUES (?, ?, ?, ?, ?)",
+            (strategy_id, script, script_hash, tracker_limit, at))
+
+
+def add_run(con, id: str, strategy_id: str, version: int, mode: str, tags: list) -> None:
+    _insert(con, "INSERT INTO runs (id, strategy_id, version, mode, tags) VALUES (?, ?, ?, ?, ?)",
+            (id, strategy_id, version, mode, json.dumps(tags)))
+
+
+def add_trade(con, id: str, run_id: str, ticker: str, side: str, instrument: str,
+              point_value: float, currency: str) -> None:
+    """Add a trade. Only what never changes: the mutable state derives from events."""
+    _insert(con, "INSERT INTO trades (id, run_id, ticker, side, instrument, point_value,"
+            " currency) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (id, run_id, ticker, side, instrument, point_value, currency))
+
+
+def append(con, *, kind: str, run_id: str, at: str, payload: dict,
+           trade_id: str | None = None, corrects: int | None = None, recorded_at: str) -> int:
+    """Append an event. Returns the new event id."""
+    return _insert(con, "INSERT INTO events (at, recorded_at, kind, run_id, trade_id, corrects,"
+                   " payload) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                   (at, recorded_at, kind, run_id, trade_id, corrects,
+                    json.dumps(payload, allow_nan=False)))
+
+
+def versions(con, strategy_id: str) -> list[sqlite3.Row]:
+    return con.execute("SELECT * FROM versions WHERE strategy_id = ? ORDER BY version",
+                       (strategy_id,)).fetchall()
+
+
+def latest_tracker(con, strategy_id: str) -> sqlite3.Row | None:
+    return con.execute("SELECT * FROM trackers WHERE strategy_id = ? ORDER BY id DESC LIMIT 1",
+                       (strategy_id,)).fetchone()
+
+
+def run(con, id: str) -> sqlite3.Row | None:
+    return con.execute("SELECT * FROM runs WHERE id = ?", (id,)).fetchone()
+
+
+def runs(con, strategy_id: str | None = None) -> list[sqlite3.Row]:
+    """Runs in creation order (rowid), all or one strategy's."""
+    where, args = ("WHERE strategy_id = ?", (strategy_id,)) if strategy_id else ("", ())
+    return con.execute(f"SELECT * FROM runs {where} ORDER BY rowid", args).fetchall()
+
+
+def trade(con, id: str) -> sqlite3.Row | None:
+    return con.execute("SELECT * FROM trades WHERE id = ?", (id,)).fetchone()
+
+
+def trades(con, run_id: str | None = None) -> list[sqlite3.Row]:
+    where, args = ("WHERE run_id = ?", (run_id,)) if run_id else ("", ())
+    return con.execute(f"SELECT * FROM trades {where} ORDER BY rowid", args).fetchall()
+
+
+def events(con, *, run_id: str | None = None, trade_id: str | None = None) -> list[sqlite3.Row]:
+    """Events ordered by id, narrowed by run and/or trade when given."""
+    clauses = [c for c, v in (("run_id = ?", run_id), ("trade_id = ?", trade_id)) if v is not None]
+    args = tuple(v for v in (run_id, trade_id) if v is not None)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return con.execute(f"SELECT * FROM events {where} ORDER BY id", args).fetchall()
