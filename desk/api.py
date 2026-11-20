@@ -16,7 +16,8 @@ from desk import store, strategy
 from desk.checks import _hours
 from desk.errors import Refused
 
-__all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies"]
+__all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
+           "RunView", "start_run", "stop_run", "list_runs"]
 
 _SLUG = re.compile(r"[a-z0-9-]+")
 _BARS = re.compile(r"(\d+) bars after exit")
@@ -135,3 +136,80 @@ def get_strategy(con: sqlite3.Connection, id: str, version: int | None = None) -
 def list_strategies(con: sqlite3.Connection) -> list[StrategyView]:
     return [_view(con, r["id"], None, "unchanged")
             for r in con.execute("SELECT id FROM strategies ORDER BY id")]
+
+
+@dataclass(frozen=True)
+class RunView:
+    id: str
+    strategy: str
+    version: int
+    mode: str
+    tags: tuple[str, ...]
+    started: datetime
+    stopped: datetime | None
+
+
+def _run_view(con, row: sqlite3.Row) -> RunView:
+    when = {e["kind"]: datetime.fromisoformat(e["at"])
+            for e in store.events(con, run_id=row["id"]) if e["kind"].startswith("run_")}
+    return RunView(id=row["id"], strategy=row["strategy_id"], version=row["version"],
+                   mode=row["mode"], tags=tuple(json.loads(row["tags"])),
+                   started=when["run_started"], stopped=when.get("run_stopped"))
+
+
+def _decision_time(mode: str, at: datetime | None, now: datetime | None, what: str) -> datetime:
+    """A live decision defaults to `now`; a replay one never defaults, or it would be dated
+    after every bar in the history being replayed."""
+    if at is not None:
+        return at
+    if mode == "replay":
+        raise Refused(f"A replay run needs `at` to {what}: give the moment in the replayed "
+                      "history, not the wall clock.")
+    return now or datetime.now(UTC)
+
+
+def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
+              version: int | None = None, at: datetime | None = None,
+              now: datetime | None = None) -> RunView:
+    """Deploy a strategy version as run `<strategy>-r<N>`. Tags are kept verbatim (deduplicated,
+    order kept) and never interpreted."""
+    if mode not in ("live", "replay"):
+        raise Refused(f"mode {mode!r} is not known; use 'live' (real time) or 'replay' "
+                      "(re-running past history).")
+    start = _decision_time(mode, at, now, "start")
+    with store.transaction(con):  # the run number and version are read under the write lock
+        rows = store.versions(con, strategy)
+        if not rows:
+            raise Refused(f"There is no strategy {strategy!r}; save it first, or list_strategies "
+                          "to see the ones that exist.")
+        v = rows[-1]["version"] if version is None else version
+        if v not in {r["version"] for r in rows}:
+            raise Refused(f"Strategy {strategy!r} has no version {v}; it has versions 1 to "
+                          f"{len(rows)}.")
+        id = f"{strategy}-r{len(store.runs(con, strategy)) + 1}"
+        store.add_run(con, id, strategy, v, mode, list(dict.fromkeys(tags)))
+        store.append(con, kind="run_started", run_id=id, at=_at(start), payload={},
+                     recorded_at=_at(now))
+    return _run_view(con, store.run(con, id))
+
+
+def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
+             now: datetime | None = None) -> RunView:
+    row = store.run(con, run)
+    if row is None:
+        raise Refused(f"There is no run {run!r}; list_runs to see the ones that exist.")
+    stop = _decision_time(row["mode"], at, now, "stop")
+    with store.transaction(con):  # the run's state is checked under the write lock
+        view = _run_view(con, row)
+        if view.stopped is not None:
+            raise Refused(f"Run {run!r} is already stopped; start a new run instead.")
+        if stop < view.started:
+            raise Refused(f"Run {run!r} started at {view.started.isoformat()}; its stop cannot "
+                          "be before that, so give a later `at`.")
+        store.append(con, kind="run_stopped", run_id=run, at=_at(stop), payload={},
+                     recorded_at=_at(now))
+    return _run_view(con, row)
+
+
+def list_runs(con: sqlite3.Connection, strategy: str | None = None) -> list[RunView]:
+    return [_run_view(con, r) for r in store.runs(con, strategy)]
