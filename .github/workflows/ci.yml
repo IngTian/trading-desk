@@ -4,11 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
-  # Nightly, because this suite can go red with nothing pushed. Its fixture is dated and
-  # several tests read a window anchored on today, so the calendar alone can move a row out
-  # of view -- daylogs hit exactly that six times, and once had eight tests failing on main
-  # while the last CI run, two weeks old, was green. Push-triggered CI cannot see a failure
-  # that the passage of time caused.
+  # Nightly, so a change in the runners, Python or uv that breaks the build shows up with
+  # nothing pushed.
   schedule:
     - cron: "23 6 * * *"
   # So a red nightly can be re-checked after a fix without an empty commit.
@@ -44,8 +41,9 @@ jobs:
       # because it seeded a book and then ran `true` -- a step that reports success without
       # asserting anything, which is precisely the tests/schema_attack.sh failure this repo
       # already removed once ("a file that looks like coverage and is not is worse than no
-      # file"). `desk-check` IS exercised end to end, against a book made by the installed
-      # wheel, in the packaging job below. Once is enough and there it means something.
+      # file"). `trading-desk integrity` IS exercised end to end, against a store made by the
+      # installed wheel, in the packaging job below. Once is enough and there it means
+      # something.
 
   # An editable install reads the source tree, so it cannot catch a missing package-data
   # declaration. Build a real wheel, assert its shape, then RUN it from a clean venv.
@@ -59,45 +57,10 @@ jobs:
           python-version: "3.11"
 
       - run: uv build --wheel --out-dir dist_check
-
-      - name: the wheel ships the schema and the stylesheet, and nothing else
-        run: |
-          python - <<'PY'
-          import glob, sys, zipfile
-          wheel = glob.glob("dist_check/*.whl")[0]
-          names = zipfile.ZipFile(wheel).namelist()
-          # THE SCHEMA IS THE TOOL. It lived in book/, which was not a package, so an
-          # installed copy resolved it to site-packages/book/schema.sql -- a path that does
-          # not exist. `pip install` produced something that could not create a book, and
-          # only a built wheel shows that.
-          # THE STYLESHEET is loaded by App.CSS_PATH at runtime, so a wheel without it
-          # installs fine and then starts up unstyled.
-          for want in ("desk/schema.sql", "desk/tui/app.tcss"):
-              if want not in names:
-                  sys.exit(f"{want} missing from {wheel}")
-          # A stale build/ can smuggle a package that no longer exists in the source into
-          # the wheel. CI checks out clean and would not reproduce it, so assert the shape.
-          tops = {n.split("/")[0] for n in names if "/" in n}
-          unexpected = {t for t in tops - {"desk"} if not t.endswith(".dist-info")}
-          if unexpected:
-              sys.exit(f"unexpected top-level packages in {wheel}: {sorted(unexpected)}")
-          print("schema.sql and app.tcss present, and only desk/ ships:", wheel)
-          PY
-
-      # The wheel is inspected above but never run. This is the only step that exercises
-      # [project.scripts], the package-data path resolution, and the absence of any
-      # accidental dependency on the source tree -- and it is the step that would have
-      # caught `pip install` shipping a tool that could not create a book.
-      - name: the installed wheel creates a book and passes its own checker
-        run: |
-          python -m venv /tmp/smoke
-          /tmp/smoke/bin/pip install -q dist_check/*.whl
-          /tmp/smoke/bin/desk --version
-          export TRADING_DESK_HOME=/tmp/freshbook
-          /tmp/smoke/bin/desk-migrate --new
-          /tmp/smoke/bin/desk-migrate --check
-          /tmp/smoke/bin/desk-check --quiet
-          /tmp/smoke/bin/python -c "import desk.tui.app, desk.migrate, desk.check, desk.prices; print('imports clean')"
+      - name: the wheel has the shape the package needs
+        run: python tools/check_wheel.py dist_check
+      - name: the installed wheel records a trade and passes its own integrity check
+        run: bash tools/smoke_wheel.sh dist_check
 
   # The repo is published, so a real figure from the author's own book is a leak rather than
   # a typo. Every amount in the tree is an invented round one; this is the grep that keeps

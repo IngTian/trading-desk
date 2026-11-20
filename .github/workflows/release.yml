@@ -2,14 +2,13 @@ name: Release
 
 # Publishes `trading-desk` to PyPI when a version tag is pushed:
 #
-#     git tag v0.3.0 && git push origin v0.3.0
+#     git tag v0.5.0 && git push origin v0.5.0
 #
 # Authentication is PyPI Trusted Publishing (OIDC), so there is no API token in the
-# repository or in Actions secrets -- nothing to leak and nothing to rotate. It needs a
-# one-time setup on PyPI: Publishing -> add a pending publisher with owner `IngTian`,
-# repository `trading-desk`, workflow `release.yml`, environment `pypi`. Until that exists
-# the publish step fails and the build artifacts are still attached to the GitHub release,
-# so a tag is never wasted.
+# repository or in Actions secrets -- nothing to leak and nothing to rotate. PyPI trusts
+# owner `IngTian`, repository `trading-desk`, workflow `release.yml`, environment `pypi`
+# (set up once, before 0.4.0). If the publish step fails, the build artifacts are still
+# attached to the GitHub release, so a tag is never wasted.
 
 on:
   push:
@@ -56,35 +55,15 @@ jobs:
           uv sync
           uv run pytest -q
 
-      - name: the wheel ships the schema and the stylesheet, and nothing else
-        run: |
-          python - <<'PY'
-          import glob, sys, zipfile
-          wheel = glob.glob("dist/*.whl")[0]
-          names = zipfile.ZipFile(wheel).namelist()
-          for want in ("desk/schema.sql", "desk/tui/app.tcss"):
-              if want not in names:
-                  sys.exit(f"{want} missing from {wheel}")
-          tops = {n.split("/")[0] for n in names if "/" in n}
-          unexpected = {t for t in tops - {"desk"} if not t.endswith(".dist-info")}
-          if unexpected:
-              sys.exit(f"unexpected top-level packages in {wheel}: {sorted(unexpected)}")
-          print("schema.sql and app.tcss present, and only desk/ ships:", wheel)
-          PY
+      # The same two scripts CI runs, so the release cannot check less than a pull request.
+      - name: the wheel has the shape the package needs
+        run: python tools/check_wheel.py dist
 
       # The one step that proves the artifact about to be published is usable at all: a file
-      # uploaded to PyPI cannot be taken back, and the version before this refactor would
-      # have passed every check above while shipping a tool that could not create a book.
-      - name: the installed wheel creates a book and passes its own checker
-        run: |
-          python -m venv /tmp/smoke
-          /tmp/smoke/bin/pip install -q dist/*.whl
-          /tmp/smoke/bin/desk --version
-          export TRADING_DESK_HOME=/tmp/freshbook
-          /tmp/smoke/bin/desk-migrate --new
-          /tmp/smoke/bin/desk-migrate --check
-          /tmp/smoke/bin/desk-check --quiet
-          /tmp/smoke/bin/python -c "import desk.tui.app, desk.migrate, desk.check, desk.prices; print('imports clean')"
+      # uploaded to PyPI cannot be taken back, and a version once passed every shape check
+      # while shipping a tool that could not create its store.
+      - name: the installed wheel records a trade and passes its own integrity check
+        run: bash tools/smoke_wheel.sh dist
 
       # Publishing is what makes a leftover figure a leak, so the guard runs on the tag too.
       - run: python tools/no_real_figures.py

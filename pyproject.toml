@@ -8,19 +8,26 @@ build-backend = "setuptools.build_meta"
 # nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
-version = "0.4.0"
-description = "A trading book in the terminal: SQLite, a Textual TUI, and a checker that will not let the record contradict itself"
+version = "0.5.0"
+description = "Record your trades under versioned strategies: reasons, screenshots and every later decision, in an append-only SQLite log"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["tui", "terminal", "textual", "trading", "portfolio", "bookkeeping",
-            "sqlite", "mcp"]
-dependencies = ["textual>=8.2,<9"]
+keywords = ["trading", "strategy", "trade-journal", "replay", "sqlite", "event-sourcing"]
+# No runtime dependencies, and that is a property worth keeping. Every import under `desk/`
+# is standard library — `sqlite3`, `argparse`, `tomllib`, `dataclasses`, `datetime`, `json`,
+# `hashlib`, `math`, `re` — so `pip install trading-desk` pulls nothing else in.
+#
+# `textual>=8.2,<9` was here until 2026-11-11 and nothing under `desk/` imported it: the TUI
+# it supported was deleted with the rest of the portfolio-era surface. The only remaining
+# importer was `tools/screenshots.py`, which also imported `desk.book` and `desk.tui.app` and
+# so could not run at all; it was deleted with the dependency.
+dependencies = []
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Environment :: Console",
-    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Developers",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3.11",
@@ -31,21 +38,14 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
-# AN EXTRA, SO A PLAIN INSTALL STAYS ONE DEPENDENCY. `textual` is all `pip install
-# trading-desk` pulls in; the MCP server is for one workflow -- handing a model a broker
-# statement and asking it what disagrees with the book -- so it is opt-in:
-#
-#     pip install 'trading-desk[mcp]'
-#
-# `mcp>=2` is not a guess: FastMCP was renamed MCPServer in 2.0, so v1 code does not import
-# and a floor below 2 would install an SDK this module cannot use.
-[project.optional-dependencies]
-mcp = ["mcp>=2,<3"]
 
 [project.urls]
 Homepage = "https://github.com/IngTian/trading-desk"
 Repository = "https://github.com/IngTian/trading-desk"
 Issues = "https://github.com/IngTian/trading-desk/issues"
+
+[project.scripts]
+trading-desk = "desk.cli:main"
 
 # [dependency-groups] AND NOT [project.optional-dependencies], which is where this
 # diverges from daylogs deliberately. `uv sync` installs dependency groups BY DEFAULT
@@ -54,54 +54,22 @@ Issues = "https://github.com/IngTian/trading-desk/issues"
 # first time this project was made installable. CI therefore uses `uv sync` rather than
 # daylogs' `pip install -e '.[dev]'`; one declaration that cannot drift from a second.
 [dependency-groups]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "ruff>=0.6", "mcp>=2,<3"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
-# THE POINT OF INSTALLING THIS: you type `desk`.
-#
-# Without it the only way in was `uv run python -m desk`, and a bare `python -m desk`
-# failed with ModuleNotFoundError for anyone whose `python` is not the project's --
-# which is what happened. Same shape as daylogs' `day`.
-#
-# A PyInstaller build path existed and was deleted on 2026-09-27; the benchmark that
-# argued against it lived in three places with three different sets of numbers, which is
-# one reason to have one owner for a fact.
-#
-# `desk-migrate` AND `desk-check` ship because an installed user needs them and had
-# neither: the book is created by `desk-migrate --new` (or by answering `desk`'s own
-# prompt on a first run), and a schema change since the book was built is reported by
-# `desk-migrate --check`. `prices` needs no entry point -- the desk refreshes marks on
-# its own timer, so a command would be a second surface for something already automatic.
-[project.scripts]
-desk = "desk.__main__:main"
-desk-migrate = "desk.migrate:main"
-desk-check = "desk.check:cli"
-# `desk-mcp` SPEAKS MCP OVER STDIO and is READ-ONLY -- see desk/mcp.py for why that is the
-# whole design rather than a first step. It is listed unconditionally because a console
-# script costs nothing when its extra is absent: running it without `[mcp]` installed fails
-# with a plain ModuleNotFoundError naming `mcp`, which is the right error.
-desk-mcp = "desk.mcp:main"
 
 [tool.setuptools.packages.find]
 include = ["desk*"]
 
-# TWO FILES THE WHEEL WOULD OTHERWISE DROP, and each has bitten a release once.
-#
-# `*.tcss`: Textual loads app.tcss via App.CSS_PATH at runtime, and setuptools ships no
-# non-Python files by default -- so without this a non-editable install starts with no
-# stylesheet at all. Copied from daylogs, which learned it the same way.
-#
 # `schema.sql`: the schema IS the tool, and it used to live in book/ which was not a
 # package. An installed copy resolved it to `site-packages/book/schema.sql`, which does
 # not exist -- so `pip install trading-desk` produced something that could not create a
-# book. Proven by installing the wheel in a clean venv. Both are asserted by CI against
+# book. Proven by installing the wheel in a clean venv. Asserted by CI against
 # a real built wheel, because an editable install reads the source tree and so cannot
 # catch a missing declaration.
 [tool.setuptools.package-data]
-"desk" = ["schema.sql"]
-"desk.tui" = ["*.tcss"]
+"desk" = ["schema.sql", "strategy.example.md"]
 
 [tool.pytest.ini_options]
-asyncio_mode = "auto"
 testpaths = ["tests"]
 
 [tool.ruff]
