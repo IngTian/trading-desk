@@ -26,46 +26,74 @@ def _trade_entered_once(con: sqlite3.Connection) -> list[str]:
                                  " 'entered'", (t["id"],)).fetchone()[0]) != 1]
 
 
+def _aware(text) -> dt.datetime | None:
+    """`text` as an aware time, or None when it is not one (event_times reports those)."""
+    try:
+        t = dt.datetime.fromisoformat(text)
+    except (TypeError, ValueError):
+        return None
+    return t if t.tzinfo is not None else None
+
+
+def _event_times(con: sqlite3.Connection) -> list[str]:
+    """Every event's `at` and `recorded_at` is an aware ISO-8601 time."""
+    return [f"event {e['id']}: {col} {e[col]!r} is not an aware ISO-8601 time"
+            for e in store.events(con) for col in ("at", "recorded_at") if _aware(e[col]) is None]
+
+
 def _run_started_stopped(con: sqlite3.Connection) -> list[str]:
     """Every run has exactly one `run_started` and at most one `run_stopped`, not before it."""
     failures = []
     for r in store.runs(con):
-        at = {k: sorted(e["at"] for e in store.events(con, run_id=r["id"]) if e["kind"] == k)
-              for k in ("run_started", "run_stopped")}
+        evs = store.events(con, run_id=r["id"])
+        at = {k: [e["at"] for e in evs if e["kind"] == k] for k in ("run_started", "run_stopped")}
         if len(at["run_started"]) != 1:
             failures.append(f"run {r['id']}: has {len(at['run_started'])} run_started events, "
                             "expected exactly 1")
         if len(at["run_stopped"]) > 1:
             failures.append(f"run {r['id']}: has {len(at['run_stopped'])} run_stopped events, "
                             "expected at most 1")
-        if at["run_started"] and at["run_stopped"] and (
-                dt.datetime.fromisoformat(at["run_stopped"][0])
-                < dt.datetime.fromisoformat(at["run_started"][0])):
+        start = [t for t in map(_aware, at["run_started"]) if t]
+        stop = [t for t in map(_aware, at["run_stopped"]) if t]
+        if start and stop and min(stop) < min(start):
             failures.append(f"run {r['id']}: stopped before it started")
     return failures
 
 
 def _decision_dates(con: sqlite3.Connection) -> list[str]:
     """By effective time: an entry is not before its run's start; a move is not before the entry
-    and is strictly before the hand close (R11); a close is strictly after the entry (R12)."""
+    and is strictly before the hand close (R11); a close is strictly after the entry (R12).
+
+    A trade is skipped when another invariant already reports why it cannot be folded (not one
+    `entered`, a correction naming nothing in the trade, an unreadable event time). A fold that
+    fails for any other reason, such as a malformed correction payload, is reported here."""
     failures = []
     for t in store.trades(con):
-        started = [dt.datetime.fromisoformat(e["at"]) for e in store.events(con, run_id=t["run_id"])
-                   if e["kind"] == "run_started"]
-        try:
-            d = model.decisions_of(con, t["id"])
-        except (KeyError, IndexError, ValueError, TypeError):
-            continue  # no single entry, or a broken correction: other invariants report those
+        own = store.events(con, trade_id=t["id"])
+        ids = {e["id"] for e in own}
+        if (sum(e["kind"] == "entered" for e in own) != 1
+                or any(e["kind"] == "corrected" and e["corrects"] not in ids for e in own)
+                or any(_aware(e["at"]) is None for e in own)):
+            continue
         who = f"trade {t['id']}"
-        if started and d.entry.at < min(started):
-            failures.append(f"{who}: entered at {d.entry.at.isoformat()}, before its run started")
-        for m in d.moves:
-            if m.at < d.entry.at:
-                failures.append(f"{who}: move at {m.at.isoformat()} is before the entry")
-            if d.close_at is not None and m.at >= d.close_at:
-                failures.append(f"{who}: move at {m.at.isoformat()} is not before the hand close")
-        if d.close_at is not None and d.close_at <= d.entry.at:
-            failures.append(f"{who}: closed at {d.close_at.isoformat()}, not after the entry")
+        try:
+            started = [_aware(e["at"]) for e in store.events(con, run_id=t["run_id"])
+                       if e["kind"] == "run_started"]
+            started = [s for s in started if s]
+            d = model.decisions_of(con, t["id"])
+            if started and d.entry.at < min(started):
+                failures.append(f"{who}: entered at {d.entry.at.isoformat()}, before its run "
+                                "started")
+            for m in d.moves:
+                if m.at < d.entry.at:
+                    failures.append(f"{who}: move at {m.at.isoformat()} is before the entry")
+                if d.close_at is not None and m.at >= d.close_at:
+                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the hand "
+                                    "close")
+            if d.close_at is not None and d.close_at <= d.entry.at:
+                failures.append(f"{who}: closed at {d.close_at.isoformat()}, not after the entry")
+        except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
+            failures.append(f"{who}: fold failed: {type(exc).__name__}: {exc}")
     return failures
 
 
@@ -110,6 +138,7 @@ def _version_text_hash(con: sqlite3.Connection) -> list[str]:
 
 
 INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
+    "event_times": _event_times,
     "trade_entered_once": _trade_entered_once,
     "run_started_stopped": _run_started_stopped,
     "decision_dates": _decision_dates,

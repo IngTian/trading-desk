@@ -42,8 +42,8 @@ def ev(con, kind, at, *, trade=None, corrects=None, payload=None, run=RUN):
     cur = con.execute(                                    # written without it would lack it
         "INSERT INTO events (at, recorded_at, kind, run_id, trade_id, corrects, payload)"
         " VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (at.isoformat(), LATER.isoformat(), kind, run, trade, corrects,
-         json.dumps(payload or {})))
+        (at if isinstance(at, str) else at.isoformat(), LATER.isoformat(), kind, run, trade,
+         corrects, json.dumps(payload or {})))
     con.execute("PRAGMA ignore_check_constraints = OFF")
     con.commit()
     return cur.lastrowid
@@ -228,3 +228,38 @@ def test_a_version_whose_hash_does_not_match_its_text_is_reported(con):
                 " saved_at) VALUES ('dip-buyer', 2, ?, 'bad', '{}', '[\"1h\"]', ?)",
                 (TEXT, NOW.isoformat()))
     assert only(con, "version_text_hash") == 1
+
+
+# --- the checker reports a damaged log, it does not raise on it --------------------------------
+
+def test_a_garbage_at_is_reported(con):
+    ev(con, "order_moved", "tomorrow-ish", trade=tid(con, "ACME"),
+       payload={"stop": 99.0, "reason": "x"})
+    count, lines = found(con)
+    assert count >= 1 and any(ln.startswith("event_times: ") and "tomorrow-ish" in ln
+                              for ln in lines)
+
+
+def test_a_naive_at_is_reported(con):
+    ev(con, "order_moved", "2026-03-02T16:00:00", trade=tid(con, "ACME"),
+       payload={"stop": 99.0, "reason": "x"})
+    assert only(con, "event_times") == 1
+
+
+def test_a_correction_with_a_malformed_payload_is_a_fold_failure(con):
+    entered = store.events(con, trade_id=tid(con, "ACME"))[0]["id"]
+    ev(con, "corrected", LATER, trade=tid(con, "ACME"), corrects=entered,
+       payload={"fields": "not a dict", "reason": "x"})
+    count, lines = found(con)
+    assert count == 1 and "fold failed" in lines[0] and tid(con, "ACME") in lines[0]
+
+
+def test_the_checker_never_raises_on_a_damaged_log(con):
+    ev(con, "order_moved", "garbage", trade=tid(con, "ACME"),
+       payload={"stop": 99.0, "reason": "x"})
+    ev(con, "run_stopped", "2026-03-02T16:00:00")  # a naive stop next to the aware start
+    raw_trade(con, "RAW-1")
+    entered = store.events(con, trade_id="RAW-1")[0]["id"]
+    ev(con, "corrected", LATER, trade="RAW-1", corrects=entered,
+       payload={"fields": "not a dict", "reason": "x"})
+    assert integrity.run(con, emit=lambda _line: None) >= 3
