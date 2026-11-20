@@ -103,7 +103,8 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
 @contextmanager
 def transaction(con: sqlite3.Connection) -> Iterator[None]:
     """Group several writes: commit on a clean exit, roll all back on any exception."""
-    con.execute("BEGIN")
+    # IMMEDIATE: take the write lock now, so what the caller reads inside is still true at write.
+    con.execute("BEGIN IMMEDIATE")
     try:
         yield
     except BaseException:

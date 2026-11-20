@@ -107,3 +107,23 @@ def test_a_failed_save_of_a_new_strategy_leaves_nothing_behind(con):
     with pytest.raises(api.Refused):
         api.save_strategy(con, "dip-buyer", "not a strategy", tracker_script="x", now=NOW)
     assert con.execute("SELECT count(*) FROM strategies").fetchone()[0] == 0
+
+
+def test_the_stale_check_reads_under_the_write_lock(con, monkeypatch):
+    v = api.save_strategy(con, "dip-buyer", make(), now=NOW)
+    seen = []
+    real = store.versions
+    monkeypatch.setattr(store, "versions",
+                        lambda c, i: (seen.append(c.in_transaction), real(c, i))[1])
+    api.save_strategy(con, "dip-buyer", make("Buy dips!"), if_current=v.current_hash, now=NOW)
+    assert seen[0] is True, "reads and the if_current comparison must sit inside the transaction"
+
+
+def test_a_writer_holding_the_lock_blocks_a_save(con, tmp_path):
+    import sqlite3
+    other = sqlite3.connect(tmp_path / "desk.db", isolation_level=None)
+    other.execute("BEGIN IMMEDIATE")
+    con.execute("PRAGMA busy_timeout = 50")
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        api.save_strategy(con, "dip-buyer", make(), now=NOW)
+    other.close()

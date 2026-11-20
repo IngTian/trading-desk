@@ -89,34 +89,40 @@ def save_strategy(con: sqlite3.Connection, id: str, markdown: str, *,
     if tracker_limit is not None:
         _check_limit(tracker_limit)
     at = _at(now)
-    rows = store.versions(con, id)
-    old = store.latest_tracker(con, id) if rows else None
-    if rows:
-        if if_current is None:
-            raise Refused(f"Strategy {id!r} already exists; pass if_current (the current_hash "
-                          "from get_strategy) so a save cannot overwrite someone else's change.")
-        if if_current != _current_hash(rows[-1], old):
-            raise Refused(f"Strategy {id!r} was changed since you read it; get it again, "
-                          "redo your edit on that, and save.")
-    elif if_current is not None:
-        raise Refused(f"Strategy {id!r} is new, so if_current must be left out.")
+    with store.transaction(con):  # read, compare and write under one write lock
+        rows = store.versions(con, id)
+        old = store.latest_tracker(con, id) if rows else None
+        if rows:
+            if if_current is None:
+                raise Refused(f"Strategy {id!r} already exists; pass if_current (the current_hash "
+                              "from get_strategy) so a save cannot overwrite someone else's "
+                              "change.")
+            if if_current != _current_hash(rows[-1], old):
+                raise Refused(f"Strategy {id!r} was changed since you read it; get it again, "
+                              "redo your edit on that, and save.")
+        elif if_current is not None:
+            raise Refused(f"Strategy {id!r} is new, so if_current must be left out.")
 
-    script = tracker_script if tracker_script is not None else (old and old["script"])
-    limit = tracker_limit if tracker_limit is not None else (old and old["tracker_limit"])
-    if limit and not script:
-        raise Refused("tracker_limit needs a tracker_script: give the script, or drop the limit.")
-    script_hash = hashlib.sha256(script.encode()).hexdigest() if script else None
-    new_text = not rows or rows[-1]["text_hash"] != parsed.text_hash
-    new_tracker = (script_hash, limit or None) != ((old and old["script_hash"]) or None,
-                                                   (old and old["tracker_limit"]) or None)
-    with store.transaction(con):
-        if not rows:
-            store.add_strategy(con, id, at)
-        if new_text:
-            store.add_version(con, id, len(rows) + 1, parsed.text, parsed.text_hash,
-                              dict(parsed.rules), list(parsed.timeframes), at)
-        if new_tracker:
-            store.add_tracker(con, id, script, script_hash, limit or None, at)
+        script = tracker_script if tracker_script is not None else (old and old["script"])
+        limit = tracker_limit if tracker_limit is not None else (old and old["tracker_limit"])
+        if limit and not script:
+            raise Refused("tracker_limit needs a tracker_script: give the script, or drop the "
+                          "limit.")
+        script_hash = hashlib.sha256(script.encode()).hexdigest() if script else None
+        new_text = not rows or rows[-1]["text_hash"] != parsed.text_hash
+        new_tracker = (script_hash, limit or None) != ((old and old["script_hash"]) or None,
+                                                       (old and old["tracker_limit"]) or None)
+        try:
+            if not rows:
+                store.add_strategy(con, id, at)
+            if new_text:
+                store.add_version(con, id, len(rows) + 1, parsed.text, parsed.text_hash,
+                                  dict(parsed.rules), list(parsed.timeframes), at)
+            if new_tracker:
+                store.add_tracker(con, id, script, script_hash, limit or None, at)
+        except sqlite3.IntegrityError as e:
+            raise Refused(f"Strategy {id!r} was changed by another session; get it again, "
+                          "redo your edit on that, and save.") from e
     saved = (f"version {len(rows) + 1} created" if new_text
              else "tracker updated" if new_tracker else "unchanged")
     return _view(con, id, None, saved)
