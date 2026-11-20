@@ -8,8 +8,7 @@ from pathlib import Path
 
 from desk import config
 
-
-_RUN_ID = re.compile(r"^\s*(?:run)?[\s_-]*(\d+)\s*$", re.IGNORECASE)
+_RUN_ID =re.compile(r"^\s*(?:run)?[\s_-]*(\d+)\s*$", re.IGNORECASE)
 
 
 def normalize_run_id(run_id: str) -> str:
@@ -147,7 +146,7 @@ class RulesFile:
 
             if fence is not None:
                 char, length, is_rules = fence
-                if re.fullmatch(re.escape(char) + "{%d,}" % length, stripped):
+                if re.fullmatch(f"{re.escape(char)}{{{length},}}", stripped):
                     fence = None
                 elif is_rules and stripped:
                     self._rule_line(current, number, stripped)
@@ -223,7 +222,9 @@ class RulesFile:
         section["rule_lines"][name] = number
 
     @staticmethod
-    def _ask_line(items: list[str], line: str, stripped: str, after_blank: bool) -> tuple[bool, bool]:
+    def _ask_line(
+        items: list[str], line: str, stripped: str, after_blank: bool,
+    ) -> tuple[bool, bool]:
         """Feed one line to an open Ask-me list. Returns (still open, last line was blank).
 
         A question is a `- ` or `* ` bullet. A line that continues it -- indented, or directly
