@@ -41,8 +41,8 @@ def canonical_ticker(typed: str) -> tuple[str, str | None]:
     reported 100x too little risk and passed a futures ban. A bare root ("GC") says nothing,
     so it is taken as typed.
 
-    Here rather than in the CLI because every comparison of tickers needs it: the CLI on what
-    was typed, and the group check on what rules.md lists.
+    Here rather than in the api because every comparison of tickers needs it: the api on what
+    was typed, and cooldown_after_stop's same-ticker scope on the tickers it compares.
     """
     upper = typed.strip().upper()
     continuous = _CONTINUOUS.match(upper)
@@ -59,7 +59,8 @@ def _signed(side: str, a: float, b: float) -> float:
 
 @dataclass(frozen=True)
 class Plan:
-    """The input to every check; built by the CLI in Task 6 and by the importers in plan 2."""
+    """The input to every check: one planned trade, as the checks read it. Nothing in the package
+    builds one yet; plan 4 builds it from a trade's entry when it wires the checks into trade()."""
     ticker: str
     side: str
     instrument: str
@@ -75,7 +76,7 @@ class Plan:
     horizon: str | None
     setup: str | None
     thesis: str | None
-    account: str
+    account: str   # read by no check: rules belong to a strategy now, not to an account
     run_id: str | None
 
 

@@ -1,5 +1,6 @@
 """Tests for entering a trade through the api. Every figure is invented."""
 import hashlib
+import os
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -10,6 +11,7 @@ NOW = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 T1 = NOW + timedelta(hours=1)
 BASE = dict(side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0, size=10,
             currency="USD", reasons="Dip into support.")
+REPLACE = os.replace
 
 
 def make():
@@ -178,6 +180,26 @@ def test_the_same_file_attached_twice_is_stored_once(con, tmp_path):
         {"file": f"{digest}.png", "name": "chart.png"}, {"link": "https://example.com/c.png"})
     assert b.decisions.screenshots == ({"file": f"{digest}.png", "name": "chart.png"},)
     assert [p.name for p in config.attachments_dir().iterdir()] == [f"{digest}.png"]
+
+
+def test_a_screenshot_copy_cut_short_leaves_nothing_under_its_name(con, tmp_path, monkeypatch):
+    """Review item 11: a crash mid-copy left a short file that exists() then skipped forever.
+    The copy is written under a temporary name and renamed into place whole."""
+    f = tmp_path / "chart.png"
+    f.write_bytes(b"pixels")
+    final = config.attachments_dir() / f"{hashlib.sha256(b'pixels').hexdigest()}.png"
+
+    def crash(*_):
+        raise OSError("cut short before the rename")
+
+    monkeypatch.setattr(os, "replace", crash)
+    with pytest.raises(OSError):
+        enter(con, screenshots=[str(f)])
+    assert not final.exists() and store.trades(con) == []
+    monkeypatch.setattr(os, "replace", REPLACE)
+    enter(con, screenshots=[str(f)])
+    assert final.read_bytes() == b"pixels"
+    assert [p.name for p in config.attachments_dir().iterdir()] == [final.name]
 
 
 @pytest.mark.parametrize("bad", ["missing.png", ".", "http://example.com/c.png", "ftp://x/y"])

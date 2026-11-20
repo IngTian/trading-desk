@@ -61,13 +61,16 @@ def parse(text: str) -> ParsedStrategy:
         raise Refused(
             "strategy: the rules block needs 'timeframes', the candle sizes this strategy "
             "reads, for example 'timeframes: 1h, 15m'")
-    frames = [f.strip() for f in found["timeframes"].split(",")]
-    for f in frames:
+    named: dict[int, str] = {}  # minutes -> the one name kept for that candle size
+    for f in (f.strip() for f in found["timeframes"].split(",")):
         if not _TIMEFRAME.fullmatch(f):
             raise Refused(
                 f"strategy: timeframes: {f!r} is not a candle size; write a whole number and "
                 f"m, h, d or w, such as 15m, 4h, 1d")
-    chosen = tuple(sorted(set(frames), key=lambda f: int(f[:-1]) * _MINUTES[f[-1]]))
+        # Two names for one size would tie, and "finest first" must not depend on which.
+        if (kept := named.setdefault(int(f[:-1]) * _MINUTES[f[-1]], f)) != f:
+            raise Refused(f"strategy: timeframes: {kept} and {f} are the same timeframe; keep one")
+    chosen = tuple(named[n] for n in sorted(named))
     norm = normalise(text)
     return ParsedStrategy(
         name=name, text=text, normalised=norm,

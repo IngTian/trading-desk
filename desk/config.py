@@ -9,7 +9,8 @@ lives under one data root:
 
     ~/Documents/trading-desk/
         config.toml   optional; every key has a default
-        desk.db       the v1 event store -- the only file v1 writes
+        desk.db       the v1 store: the owner's decisions, an append-only log
+        attachments/  screenshots attached to trades, named by content hash
         bars/, reports/, imports/
         hub.db        the v0 book: frozen, opened read-only by name, never written
 
@@ -47,17 +48,15 @@ ENV_HOME = "TRADING_DESK_HOME"
 ENV_BOOK = "TRADING_DESK_BOOK"
 ENV_DB = "TRADING_DESK_DB"
 
-# THE VAULT SETTING WAS REMOVED, THEN RESTORED. The author removed it on 2026-09-07:
-# "maybe we should remove the TRADING_DESK_VAULT as well. so the tool stays on the
-# book only. i manually handle the thesis, i create notes via shortcuts in obsidian or
-# by chatting with AI, the book tool only manages the [book]."
+# THE VAULT. The author removed the setting on 2026-09-07: "maybe we should remove the
+# TRADING_DESK_VAULT as well. so the tool stays on the book only. i manually handle the
+# thesis, i create notes via shortcuts in obsidian or by chatting with AI, the book tool
+# only manages the [book]."
 #
-# v1 deliberately reverses that. The spec's §2 defines the desk↔vault boundary: the
-# desk reads the vault (for active bets' theses and rules) and writes to it (bet
-# reports, the trade journal, the reconciliation log). So the vault path returns in
-# `config.toml` as an OPTIONAL setting -- the vault is required only if you use the
-# features that touch it. The ENVIRONMENT VARIABLE stays gone: vault path comes from
-# config.toml only, so there is no one-off override the way TRADING_DESK_DB provides.
+# The 2026-11-20 design (§2) keeps that boundary: the desk never writes the vault; it reads
+# and writes only its own data. `vault_path()` survives as an OPTIONAL config.toml setting
+# that nothing in the package reads. The ENVIRONMENT VARIABLE stays gone, so there is no
+# one-off override the way TRADING_DESK_DB provides.
 
 
 _config_cache: dict | None = None

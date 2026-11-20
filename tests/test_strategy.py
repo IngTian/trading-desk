@@ -63,6 +63,16 @@ def test_a_repeated_timeframe_is_kept_once():
     assert strategy.parse(make("timeframes: 1h, 15m, 1h")).timeframes == ("15m", "1h")
 
 
+@pytest.mark.parametrize(("frames", "same"), [
+    ("60m, 1h", "60m and 1h"), ("1h, 15m, 60m", "1h and 60m"), ("1d, 24h", "1d and 24h"),
+    ("7d, 1w", "7d and 1w")])
+def test_two_names_for_one_timeframe_are_refused(frames, same):
+    """Review item 10: 60m and 1h tied, so their stored order followed hash randomisation, and
+    plan 3 reads the finest first."""
+    with pytest.raises(Refused, match=f"{same} are the same timeframe; keep one"):
+        strategy.parse(make(f"timeframes: {frames}"))
+
+
 def test_a_retired_rule_is_refused_as_retired_not_as_a_typo():
     with pytest.raises(Refused, match="not a rule in this version"):
         strategy.parse(make("timeframes: 1h\nmax_session_length: 2h"))

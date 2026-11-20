@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -379,9 +380,19 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     with store.transaction(con):  # the run's state and the id's collisions are read under the lock
         _within_run(_run_view(con, row), when)
         for _, data, stored in shots:  # after every refusal; content-addressed, so a repeat skips
-            if data is not None and not (config.attachments_dir() / stored).exists():
-                config.attachments_dir().mkdir(parents=True, exist_ok=True)
-                (config.attachments_dir() / stored).write_bytes(data)
+            if data is None:  # a link: nothing to store
+                continue
+            final = config.attachments_dir() / stored
+            if not final.exists():
+                final.parent.mkdir(parents=True, exist_ok=True)
+                # Whole or not at all under the final name: a short file there would be skipped
+                # by exists() forever. The write lock serialises writers, so one temp name does.
+                partial = final.with_name(f"{stored}.partial")
+                with partial.open("wb") as out:
+                    out.write(data)
+                    out.flush()
+                    os.fsync(out.fileno())
+                os.replace(partial, final)
         id = _generate_trade_id(symbol, when.astimezone().strftime("%Y%m%d"),
                                 [t["id"] for t in store.trades(con)])
         store.add_trade(con, id, run, symbol, side, kind, float(point_value), currency)
