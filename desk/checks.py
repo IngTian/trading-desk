@@ -4,14 +4,11 @@ The owner types a planned trade and this module computes every number rule befor
 Two rules govern the whole file:
 
 **The AI never does a number rule's arithmetic.** Every figure below is computed here, in
-Python. A rule name with no function in `_CHECKS` is reported as one that gets asked each
-time -- never estimated. That is what `CHECK_NAMES` is for: `RulesFile.for_scope` is handed
-this set, and any name outside it lands in `Rules.unchecked` and comes back through
-`run_checks` as an `ok=None` Result carrying `ASKED`.
+Python. A strategy naming a rule with no function in `_CHECKS` is refused at save (see
+`RULE_NAMES`), so nothing is ever estimated or silently skipped.
 
 **A result is a fact, never a block and never a grade.** `ok` says whether the figure sits
-inside the limit; nothing here can stop a click. If the owner takes the trade anyway, the
-record says *taken against*. No scores, no streaks, no "process was good".
+inside the limit; nothing here can stop a click. No scores, no streaks.
 
 ## Withholding
 
@@ -20,15 +17,9 @@ silently passed for want of data would be the worst outcome this tool can produc
 guard below withholds rather than defaults: no 1:1 fallback for a missing exchange rate, no
 zero for an unknown daily total, and no figure at all derived from a negative size.
 
-## Two shapes of context the brief named but v1 has no type for yet
-
-`Context.session_started` is the session's start time rather than a `Session` object: no
-Session type or store accessor exists yet, and the only thing a check needs from a session is
-when it began. `Context.stopped_closes` maps ticker -> the close time of the most recent trade
-on that ticker that exited at or beyond its stop, and is built by `model.stopped_closes(con)`
-rather than here, because deciding what counts as a stop is a fold over the log. `None` means
-it was not supplied (so the cooldown withholds) and `{}` means the log was read and holds no
-stop (so it passes).
+`Context.stopped_closes` maps ticker -> the close time of the most recent trade on that ticker
+that exited at or beyond its stop. `None` means it was not supplied (so the cooldown withholds)
+and `{}` means the log was read and holds no stop (so it passes).
 """
 from __future__ import annotations
 
@@ -38,10 +29,8 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from desk.model import Plan, TradeState, _signed, canonical_ticker
+from desk.model import Plan, _signed, canonical_ticker
 from desk.rules import Rules
-
-ASKED = "no automatic check for this one; I'll ask you each time"
 
 
 @dataclass(frozen=True)
@@ -50,7 +39,7 @@ class Result:
     name: str
     ok: bool | None      # None = could not be computed
     figure: float | None
-    limit: str           # the rule's value, verbatim from rules.md
+    limit: str           # the rule's value, verbatim from the strategy
     says: str            # the fact, e.g. "risk 140.00 CAD against a limit of 100 CAD"
     unit: str | None
 
@@ -65,21 +54,26 @@ def no_fx(src: str, dst: str) -> float | None:
 
 
 @dataclass(frozen=True)
+class OpenPosition:
+    """A trade that may still hold shares: all a check needs to count it."""
+    ticker: str
+    size_open: int
+
+
+@dataclass(frozen=True)
 class Context:
     """Everything a check needs that is not in the plan or the rules."""
     now: dt.datetime
-    open_trades: list[TradeState] = field(default_factory=list)
-    session_started: dt.datetime | None = None
+    open_trades: list[OpenPosition] = field(default_factory=list)
     closed_today_r: float | None = None
     median_candle_range: float | None = None
-    volatility_ratio: float | None = None
     stopped_closes: dict[str, dt.datetime] | None = None
     # fx(src, dst) -> the rate that multiplies an amount in src to give dst, or None if unknown.
     fx: Callable[[str, str], float | None] = no_fx
 
 
 # ------------------------------------------------------------------ parsing ---
-# Rules.numbers values are RAW strings out of rules.md ("100 CAD", "2", "1 day, same ticker"),
+# Rules.numbers values are RAW strings out of the strategy ("100 CAD", "2", "1 day, same ticker"),
 # so every check parses its own. A value that cannot be read is withheld, not guessed at.
 # Every helper below reads a value WHOLE or not at all. Taking the first number found read
 # "1:2" as a floor of 1 and "2,5" as 2, and the first duration read "2h30m" as 2h: three ways
@@ -282,7 +276,7 @@ def _budget(value: str) -> tuple[float | None, str | None]:
     return _number(value), _currency(value)
 
 
-def _open_sizes(ctx: Context) -> tuple[list[TradeState], str]:
+def _open_sizes(ctx: Context) -> tuple[list[OpenPosition], str]:
     """The open trades that still hold something, or ([], why they cannot be counted).
 
     Counted by `size_open > 0` and NOT by `status == "open"`: exiting and closing are separate
@@ -290,13 +284,13 @@ def _open_sizes(ctx: Context) -> tuple[list[TradeState], str]:
     `status="open"` with `size_open=0`. Counting by status would let a finished trade block the
     owner's next trade -- a rule silently refusing a legitimate trade.
     """
-    broken = [t.trade_id for t in ctx.open_trades if t.size_open is not None and t.size_open < 0]
+    broken = [t.ticker for t in ctx.open_trades if t.size_open < 0]
     if broken:
         return [], (
             f"the open trades cannot be counted: a negative open size on "
             f"{', '.join(broken)} means an exit exceeded the size, which needs correcting first"
         )
-    return [t for t in ctx.open_trades if (t.size_open or 0) > 0], ""
+    return [t for t in ctx.open_trades if t.size_open > 0], ""
 
 
 def _units(n: int, plural: str) -> str:
@@ -493,41 +487,6 @@ def _ticker(typed: str) -> str:
     return canonical_ticker(typed)[0]
 
 
-def no_open_trade_in_group(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    # Group names and their tickers are compared the way the CLI records a ticker: in any case,
-    # and a future by its root. A lower-case group used to let its own tickers through, and a
-    # group listing GC1! could never match a trade recorded as GC.
-    groups = {name.lower(): (name, {_ticker(t) for t in members if t.strip()})
-              for name, members in rules.groups.items()}
-    guarded = [g.strip() for g in value.split(",") if g.strip()]
-    undefined = [g for g in guarded if g.lower() not in groups]
-    if undefined:
-        return _withheld(
-            "no_open_trade_in_group", value,
-            f"the rules file defines no group called {', '.join(undefined)}, so I cannot tell "
-            f"which tickers it holds", "trades")
-    holding, why = _open_sizes(ctx)
-    if why:
-        return _withheld("no_open_trade_in_group", value, why, "trades")
-    me = _ticker(plan.ticker)
-    mine = [groups[g.lower()] for g in guarded if me in groups[g.lower()][1]]
-    if not mine:
-        return Result(
-            "no_open_trade_in_group", True, 0.0, value,
-            f"{plan.ticker} is in none of: {value}", "trades")
-    tickers = sorted({t.ticker for t in holding for _, members in mine
-                      if _ticker(t.ticker) in members})
-    group_names = ", ".join(name for name, _ in mine)
-    if not tickers:
-        return Result(
-            "no_open_trade_in_group", True, 0.0, value,
-            f"no open trade in {group_names}, which {plan.ticker} is in", "trades")
-    return Result(
-        "no_open_trade_in_group", False, float(len(tickers)), value,
-        f"{_units(len(tickers), 'trades')} open in {group_names}, which {plan.ticker} is in: "
-        f"{', '.join(tickers)}", "trades")
-
-
 def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
     # "same ticker" is taken out before the duration is read, so its words are not units.
     same_ticker = "same ticker" in value.lower().replace("_", " ")
@@ -564,33 +523,6 @@ def cooldown_after_stop(plan: Plan, value: str, ctx: Context, rules: Rules) -> R
         "cooldown_after_stop", _within(elapsed, hours, at_least=True), elapsed, value,
         f"the last stop{scope} closed {_shown(elapsed, hours, at_least=True, places=1)} h ago "
         f"against a cooldown of {value}", "h")
-
-
-def max_session_length(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    hours = _hours(value)
-    if hours is None:
-        return _unreadable("max_session_length", value, "a duration", "h")
-    if ctx.session_started is None:
-        return _withheld(
-            "max_session_length", value,
-            "no session start was given, so the session's length cannot be measured", "h")
-    elapsed = _hours_since(ctx.now, ctx.session_started)
-    if elapsed is None:
-        return _withheld(
-            "max_session_length", value,
-            "the time now and the session's start cannot be compared: one carries a time zone "
-            "and the other does not", "h")
-    if elapsed < 0:
-        # A session that has not started yet has no length; "-1.0 h against a limit of 2h" was
-        # passing, which is a figure no clock can produce.
-        return _withheld(
-            "max_session_length", value,
-            f"the session's start is {abs(elapsed):.1f} h in the future, so the clocks "
-            f"disagree and the session's length cannot be measured", "h")
-    return Result(
-        "max_session_length", _within(elapsed, hours, at_least=False), elapsed, value,
-        f"the session has run {_shown(elapsed, hours, at_least=False, places=1)} h against a "
-        f"limit of {value}", "h")
 
 
 def daily_loss_limit(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
@@ -655,22 +587,6 @@ def banned(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
         f"a {plan.side} {plan.instrument} is not on the banned list: {value}", None)
 
 
-def max_volatility_ratio(plan: Plan, value: str, ctx: Context, rules: Rules) -> Result:
-    limit = _number(value)
-    if limit is None:
-        return _unreadable("max_volatility_ratio", value, "a number")
-    if ctx.volatility_ratio is None:
-        return _withheld(
-            "max_volatility_ratio", value,
-            "price bars are not in the record yet, so 20-day volatility cannot be compared to "
-            "its 1-year median")
-    ratio = ctx.volatility_ratio
-    return Result(
-        "max_volatility_ratio", _within(ratio, limit, at_least=False), ratio, value,
-        f"20-day volatility is {_shown(ratio, limit, at_least=False)} times its 1-year median "
-        f"against a limit of {value}", None)
-
-
 # The registry, in the order of the spec's §5 table: run_checks walks it, and CHECK_NAMES is
 # derived from it so a new check cannot be implemented without becoming known to rules.py.
 _CHECKS: dict[str, Callable[[Plan, str, Context, Rules], Result]] = {
@@ -682,12 +598,9 @@ _CHECKS: dict[str, Callable[[Plan, str, Context, Rules], Result]] = {
         target_required,
         stop_headroom_candles,
         max_open_trades,
-        no_open_trade_in_group,
         cooldown_after_stop,
-        max_session_length,
         daily_loss_limit,
         banned,
-        max_volatility_ratio,
     )
 }
 
@@ -695,19 +608,43 @@ CHECK_NAMES: frozenset[str] = frozenset(_CHECKS)
 
 
 def run_checks(plan: Plan, rules: Rules, ctx: Context) -> list[Result]:
-    """Every rule in the scope, in the §5 table's order, then the ones with no code check."""
-    results = [
+    """Every rule in the strategy, in the table's order. Unknown names never get here: a save
+    refuses them, so no result is ever "asked"."""
+    return [
         fn(plan, rules.numbers[name], ctx, rules)
         for name, fn in _CHECKS.items()
         if name in rules.numbers
     ]
-    # A name in the file that this module does not implement is asked, never dropped silently,
-    # and its Result carries the value as written so the desk can quote the rule back. The says
-    # field includes both the rule name and value so a misspelling is visible on the line.
-    # rules.unchecked already holds them when for_scope was given CHECK_NAMES; the second half
-    # catches a caller that passed a wider `known` set.
-    asked = {**rules.unchecked,
-             **{n: v for n, v in rules.numbers.items() if n not in _CHECKS}}
-    results.extend(Result(name, None, None, value, f"{name}: {value} — {ASKED}", None)
-                   for name, value in asked.items())
-    return results
+
+
+# Rule names the 1.0 desk checks, besides `timeframes`, which only names the candle sizes.
+RULE_NAMES: frozenset[str] = CHECK_NAMES | {"timeframes"}
+# Names plan 1 checked and 1.0 does not: told apart from a typo so the refusal can say so.
+RETIRED: frozenset[str] = frozenset(
+    {"no_open_trade_in_group", "max_session_length", "max_volatility_ratio"})
+
+
+def read_value(name: str, value: str) -> str | None:
+    """None if the rule's value reads the way its check needs; else why it does not.
+
+    The same readers the checks use, so a value that saves is a value that checks.
+    """
+    if name == "size":
+        ok = value.strip().lower() == "computed"
+        wanted = "computed"
+    elif name == "stop_required" or name == "target_required":
+        ok = _yes(value) is not None
+        wanted = "yes or no"
+    elif name == "max_risk_per_trade":
+        ok = _number(value) is not None and _currency(value) is not None
+        wanted = _EXAMPLES["an amount and a currency"]
+    elif name == "cooldown_after_stop":
+        ok = _hours(re.sub(r"same[\s_]ticker", "", value, flags=re.IGNORECASE)) is not None
+        wanted = "a duration such as 1 day, same ticker"
+    elif name == "banned":
+        ok = bool(value.strip())
+        wanted = "a list such as shorts, options"
+    else:
+        ok = _number(value) is not None
+        wanted = _EXAMPLES["a number"]
+    return None if ok else f"I could not read {value!r}; write it as {wanted}"

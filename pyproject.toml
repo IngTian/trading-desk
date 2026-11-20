@@ -72,7 +72,7 @@ include = ["desk*"]
 # it is a shipped artifact, not a design doc. Moved to desk/ and declared here so an
 # installed copy can find it.
 [tool.setuptools.package-data]
-"desk" = ["schema.sql", "rules.example.md"]
+"desk" = ["schema.sql", "rules.example.md", "strategy.example.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

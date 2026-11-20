@@ -8,14 +8,11 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-from pathlib import Path
 
 import invented
 import pytest
 
-from desk import checks, model, rules, store
-
-FIXTURE = Path(__file__).parent / "fixtures" / "rules_invented.md"
+from desk import checks, model, rules
 
 NOW = dt.datetime(2026, 5, 4, 15, 30, tzinfo=dt.UTC)
 TICKER, OTHER, THIRD = invented.TICKERS
@@ -32,20 +29,9 @@ def named(results: list[checks.Result], name: str) -> checks.Result:
     return found
 
 
-def rules_with(groups=None, unchecked=None, **numbers) -> rules.Rules:
+def rules_with(**numbers) -> rules.Rules:
     """A Rules object for one scope, built from invented values only."""
-    return rules.Rules(
-        numbers={k: str(v) for k, v in numbers.items()},
-        ask=(),
-        groups=groups or {},
-        changes=(),
-        hash="0123456789ab",
-        path=FIXTURE,
-        sections_used=("All",),
-        sections_wanted=("All",),
-        sections_missing=(),
-        unchecked=dict(unchecked or {}),
-    )
+    return rules.Rules(numbers={k: str(v) for k, v in numbers.items()})
 
 
 def plan(**over) -> model.Plan:
@@ -81,57 +67,6 @@ FUTURE_PLAN = plan(
 )
 
 CTX = checks.Context(now=NOW)
-
-
-def enter(con, trade_id, ticker, *, size=10, side="long", exit_size=None, close=False):
-    """Record an entered trade, optionally exited and closed, and return its id."""
-    store.add_trade(
-        con,
-        trade_id=trade_id,
-        account="paper",
-        run_id=None,
-        ticker=ticker,
-        instrument="stock",
-        point_value=1.0,
-        currency="USD",
-        side=side,
-    )
-    store.append(
-        con,
-        kind="entered",
-        actor="owner",
-        source="chat",
-        trade_id=trade_id,
-        payload={
-            "entry": 100.0,
-            "stop": 95.0,
-            "target": 110.0,
-            "size": size,
-            "horizon": "2w",
-            "setup": "test-setup",
-            "thesis": "test thesis",
-        },
-    )
-    if exit_size is not None:
-        store.append(
-            con,
-            kind="exited",
-            actor="owner",
-            source="chat",
-            trade_id=trade_id,
-            payload={"price": 105.0, "size": exit_size},
-        )
-    if close:
-        store.append(con, kind="closed", actor="owner", source="chat", trade_id=trade_id,
-                     payload={})
-    return trade_id
-
-
-@pytest.fixture
-def con(tmp_path):
-    db = tmp_path / "test.db"
-    store.create(db)
-    return store.open(db)
 
 
 # -------------------------------------------------------- reward to risk ---
@@ -286,75 +221,6 @@ def test_a_misspelt_stop_required_withholds_rather_than_switching_the_rule_off()
     assert off.ok is True, "a rule the owner switched off is not a breach"
 
 
-# ----------------------------------------------------------- open trades ---
-def test_max_open_trades_counts_the_stores_open_trades(con):
-    empty = checks.Context(now=NOW, open_trades=model.open_trades(con))
-    r = one(checks.run_checks(PLAN, rules_with(max_open_trades="1"), empty))
-    assert r.figure == pytest.approx(0.0) and r.ok is True
-
-    enter(con, "trade-a", OTHER)
-    ctx = checks.Context(now=NOW, open_trades=model.open_trades(con))
-    r = one(checks.run_checks(PLAN, rules_with(max_open_trades="1"), ctx))
-    assert r.figure == pytest.approx(1.0) and r.ok is False
-    # The sentence must support the breach: "1 open against a limit of 1" would not.
-    assert "this would make 2" in r.says and "limit of 1" in r.says
-
-
-def test_a_fully_exited_trade_with_no_close_event_is_not_counted_as_open(con):
-    """Counting by status would let a finished trade block the next one."""
-    enter(con, "trade-a", OTHER, size=5, exit_size=5)
-    open_now = model.open_trades(con)
-    assert [t.status for t in open_now] == ["open"], "the fold keeps it open until it is closed"
-    assert open_now[0].size_open == 0, "but it holds nothing, so it occupies no slot"
-
-    ctx = checks.Context(now=NOW, open_trades=open_now)
-    r = one(checks.run_checks(PLAN, rules_with(max_open_trades="1"), ctx))
-    assert r.figure == pytest.approx(0.0) and r.ok is True
-
-
-def test_a_negative_open_size_is_withheld_rather_than_counted(con):
-    """An over-exit is recorded, not clamped, so no figure may be derived from it."""
-    enter(con, "trade-a", OTHER, size=5, exit_size=7)
-    broken = model.open_trades(con)
-    assert broken[0].size_open == -2, "the fold leaves the corruption visible"
-
-    ctx = checks.Context(now=NOW, open_trades=broken)
-    rs = rules_with(groups={"tech": (TICKER, OTHER)}, max_open_trades="1",
-                    no_open_trade_in_group="tech")
-    for r in checks.run_checks(PLAN, rs, ctx):
-        assert r.ok is None, f"{r.name} must not count a negative open size"
-        assert "trade-a" in r.says and "negative" in r.says
-
-    # Nor may a plan carrying such a size be risked or sized off.
-    over_exited = plan(size=-2)
-    risk_rules = rules_with(max_risk_per_trade="100 USD", size="computed")
-    for r in checks.run_checks(over_exited, risk_rules, CTX):
-        assert r.ok is None, f"{r.name} must not compute a figure from a negative size"
-        assert "-2" in r.says
-
-
-def test_no_open_trade_in_group_uses_the_groups_from_the_rules_file(con):
-    parsed = rules.load(FIXTURE).for_scope("real", None, checks.CHECK_NAMES)
-    assert parsed.groups["tech"] == (TICKER, OTHER), "the fixture's group, read from the file"
-    rs = rules_with(groups=parsed.groups, no_open_trade_in_group="tech")
-
-    enter(con, "trade-a", OTHER)
-    ctx = checks.Context(now=NOW, open_trades=model.open_trades(con))
-
-    same_group = one(checks.run_checks(plan(ticker=TICKER), rs, ctx))
-    assert same_group.ok is False and same_group.figure == pytest.approx(1.0)
-    assert "tech" in same_group.says and OTHER in same_group.says
-
-    other_group = one(checks.run_checks(plan(ticker=THIRD), rs, ctx))
-    assert other_group.ok is True, f"{THIRD} is in consumer, not tech"
-
-
-def test_a_group_the_rules_file_never_defines_is_withheld():
-    rs = rules_with(groups={"tech": (TICKER,)}, no_open_trade_in_group="tech, semis")
-    r = one(checks.run_checks(PLAN, rs, CTX))
-    assert r.ok is None and "semis" in r.says
-
-
 # -------------------------------------------------------------- the clock ---
 def test_cooldown_after_stop_measures_from_the_last_stopped_close():
     rs = rules_with(cooldown_after_stop="1 day, same ticker")
@@ -380,30 +246,6 @@ def test_cooldown_after_stop_measures_from_the_last_stopped_close():
     # The scope does not depend on which side of the comma it was written.
     reversed_rule = rules_with(cooldown_after_stop="same ticker, 1 day")
     assert one(checks.run_checks(PLAN, reversed_rule, elsewhere)).ok is True
-
-
-def test_max_session_length_measures_from_the_session_start():
-    rs = rules_with(max_session_length="2h")
-    over = checks.Context(now=NOW, session_started=NOW - dt.timedelta(hours=2, minutes=30))
-    r = one(checks.run_checks(PLAN, rs, over))
-    assert r.figure == pytest.approx(2.5) and r.ok is False and "2h" in r.says
-
-    under = checks.Context(now=NOW, session_started=NOW - dt.timedelta(minutes=30))
-    assert one(checks.run_checks(PLAN, rs, under)).ok is True
-    assert one(checks.run_checks(PLAN, rs, CTX)).ok is None, "no session is not a pass"
-
-
-def test_a_clock_that_disagrees_with_itself_is_withheld_not_passed():
-    """Negative elapsed time is nonsense in either direction: neither a pass nor a breach."""
-    ahead = checks.Context(
-        now=NOW,
-        session_started=NOW + dt.timedelta(hours=1),
-        stopped_closes={TICKER: NOW + dt.timedelta(hours=1)},
-    )
-    rs = rules_with(max_session_length="2h", cooldown_after_stop="1 day, same ticker")
-    for r in checks.run_checks(PLAN, rs, ahead):
-        assert r.ok is None, f"{r.name} must not read a figure off a skewed clock"
-        assert "in the future" in r.says and "clocks disagree" in r.says
 
 
 def test_daily_loss_limit_sums_todays_closed_r():
@@ -439,27 +281,8 @@ def test_banned_catches_the_side_and_the_instrument():
     assert one(checks.run_checks(PLAN, rs, CTX)).ok is True, "a long stock is on neither list"
 
 
-def test_stop_headroom_and_volatility_are_uncomputable_without_bars():
-    """Bars arrive in plan 3; until then these report ok=None, never a pass."""
-    rs = rules_with(stop_headroom_candles="1", max_volatility_ratio="1.5")
-    for r in checks.run_checks(PLAN, rs, CTX):
-        assert r.ok is None and r.figure is None
-        assert "bars" in r.says, f"{r.name} must say why it could not compute"
-
-    # The arithmetic is here already, so plan 3 only has to supply the bars.
-    with_bars = checks.Context(now=NOW, median_candle_range=2.0, volatility_ratio=1.2)
-    results = checks.run_checks(PLAN, rs, with_bars)
-    headroom = named(results, "stop_headroom_candles")
-    assert headroom.figure == pytest.approx(2.5), "a 5-point stop over a 2-point candle"
-    assert headroom.ok is True
-    assert named(results, "max_volatility_ratio").figure == pytest.approx(1.2)
-    assert named(results, "max_volatility_ratio").ok is True
-
-
 # ------------------------------------------------------- the whole output ---
 ALL_RULES = rules_with(
-    groups={"tech": (TICKER, OTHER)},
-    unchecked={"feels_right": "strongly"},
     min_reward_risk="2",
     max_risk_per_trade="100 USD",
     size="computed",
@@ -467,35 +290,21 @@ ALL_RULES = rules_with(
     target_required="yes",
     stop_headroom_candles="1",
     max_open_trades="1",
-    no_open_trade_in_group="tech",
     cooldown_after_stop="1 day, same ticker",
-    max_session_length="2h",
     daily_loss_limit="-2R",
     banned="short, leverage, options, futures",
-    max_volatility_ratio="1.5",
 )
 
 FULL_CTX = checks.Context(
     now=NOW,
     open_trades=[],
-    session_started=NOW - dt.timedelta(hours=1),
     closed_today_r=-0.5,
     median_candle_range=2.0,
-    volatility_ratio=1.2,
     stopped_closes={},
 )
 
 
-def test_an_unchecked_rule_is_asked_never_estimated():
-    r = one(checks.run_checks(PLAN, rules_with(unchecked={"feels_right": "strongly"}), CTX))
-    assert r.name == "feels_right" and r.ok is None and r.figure is None
-    # The says field includes the rule name and value so a misspelling is visible
-    expected = "feels_right: strongly — no automatic check for this one; I'll ask you each time"
-    assert r.says == expected
-    assert r.limit == "strongly", "the value is carried so the desk can quote the rule back"
-
-
-def test_every_rule_in_the_file_gets_a_result_in_the_tables_order():
+def test_every_rule_in_the_strategy_gets_a_result_in_the_tables_order():
     results = checks.run_checks(PLAN, ALL_RULES, FULL_CTX)
     assert [r.name for r in results] == [
         "min_reward_risk",
@@ -505,15 +314,60 @@ def test_every_rule_in_the_file_gets_a_result_in_the_tables_order():
         "target_required",
         "stop_headroom_candles",
         "max_open_trades",
-        "no_open_trade_in_group",
         "cooldown_after_stop",
-        "max_session_length",
         "daily_loss_limit",
         "banned",
-        "max_volatility_ratio",
-        "feels_right",
     ]
-    assert len(checks.CHECK_NAMES) == 13
+    assert len(checks.CHECK_NAMES) == 10
+    assert checks.RULE_NAMES == checks.CHECK_NAMES | {"timeframes"}
+
+
+def test_stop_headroom_is_uncomputable_without_bars_and_computed_with_them():
+    rs = rules_with(stop_headroom_candles="1")
+    r = one(checks.run_checks(PLAN, rs, CTX))
+    assert r.ok is None and "bars" in r.says
+    headroom = one(checks.run_checks(PLAN, rs, checks.Context(now=NOW, median_candle_range=2.0)))
+    assert headroom.figure == pytest.approx(2.5), "a 5-point stop over a 2-point candle"
+    assert headroom.ok is True
+
+
+def test_max_open_trades_counts_positions_that_still_hold_shares():
+    rs = rules_with(max_open_trades="1")
+    held = checks.OpenPosition(OTHER, 5)
+    finished = checks.OpenPosition(THIRD, 0)
+    r = one(checks.run_checks(PLAN, rs, checks.Context(now=NOW, open_trades=[held, finished])))
+    assert r.figure == pytest.approx(1.0) and r.ok is False
+    assert "this would make 2" in r.says and "limit of 1" in r.says
+    none = one(checks.run_checks(PLAN, rs, checks.Context(now=NOW, open_trades=[finished])))
+    assert none.ok is True
+
+
+def test_a_negative_open_size_is_withheld_rather_than_counted():
+    ctx = checks.Context(now=NOW, open_trades=[checks.OpenPosition(OTHER, -2)])
+    r = one(checks.run_checks(PLAN, rules_with(max_open_trades="1"), ctx))
+    assert r.ok is None and OTHER in r.says and "negative" in r.says
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("min_reward_risk", "2"), ("daily_loss_limit", "-2R"), ("max_open_trades", "3"),
+    ("stop_headroom_candles", "1.5"), ("max_risk_per_trade", "1,000 usd"),
+    ("stop_required", "yes"), ("target_required", "no"), ("size", "computed"),
+    ("cooldown_after_stop", "2h30m"), ("cooldown_after_stop", "1 day, same ticker"),
+    ("banned", "shorts, options"),
+])
+def test_read_value_accepts_what_the_check_reads(name, value):
+    assert checks.read_value(name, value) is None
+
+
+@pytest.mark.parametrize(("name", "value"), [
+    ("min_reward_risk", "1:2"), ("min_reward_risk", "2,5"), ("max_open_trades", "2 or 3"),
+    ("max_risk_per_trade", "100"), ("max_risk_per_trade", "100 USD or CAD"),
+    ("stop_required", "ture"), ("size", "10"), ("cooldown_after_stop", "soon"),
+    ("banned", " "),
+])
+def test_read_value_says_why_a_value_cannot_be_read(name, value):
+    why = checks.read_value(name, value)
+    assert why and repr(value) in why
 
 
 def test_a_result_never_contains_a_grade_or_a_score():
@@ -533,13 +387,6 @@ def test_a_near_miss_is_a_breach_and_prints_the_digits_that_show_it():
     r = one(checks.run_checks(near, rules_with(min_reward_risk="2"), CTX))
     assert r.ok is False
     assert "1.996" in r.says, "a breach must not print as 2.00"
-
-
-def test_a_session_three_minutes_over_its_limit_is_over_it():
-    ctx = checks.Context(now=NOW, session_started=NOW - dt.timedelta(hours=2, minutes=3))
-    r = one(checks.run_checks(PLAN, rules_with(max_session_length="2h"), ctx))
-    assert r.ok is False
-    assert "2.05" in r.says
 
 
 @pytest.mark.parametrize("value", ["1:2", "2,5", "2 or 3", "2-3", "about 2"])
@@ -614,21 +461,6 @@ def test_the_suggested_size_is_always_the_largest_size_max_risk_passes(
         assert at_n.ok is True, f"size allows {n} but max_risk says {at_n.says}"
     above = one(checks.run_checks(plan(**{**base.__dict__, "size": n + 1}), risk, ctx))
     assert above.ok is False, f"size allows only {n} but max_risk passes {n + 1}"
-
-
-def test_group_tickers_are_matched_whatever_their_case(con):
-    rs = rules_with(groups={"tech": ("acme", "wxyz")}, no_open_trade_in_group="Tech")
-    enter(con, "trade-a", OTHER)
-    ctx = checks.Context(now=NOW, open_trades=model.open_trades(con))
-    r = one(checks.run_checks(plan(ticker=TICKER), rs, ctx))
-    assert r.ok is False, "a lower-case group used to let its own tickers through"
-
-
-def test_a_group_listing_a_continuous_future_matches_the_futures_root():
-    rs = rules_with(groups={"metals": ("GC1!", "SI=F")}, no_open_trade_in_group="metals")
-    ctx = checks.Context(now=NOW, open_trades=[])
-    r = one(checks.run_checks(plan(ticker="GC", instrument="future", point_value=100.0), rs, ctx))
-    assert r.says == "no open trade in metals, which GC is in", r.says
 
 
 @pytest.mark.parametrize("value", [

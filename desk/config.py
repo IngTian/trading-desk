@@ -211,3 +211,9 @@ def example_rules() -> Path:
     `desk/rules.example.md` is a real file on disk either way -- no importlib.resources needed.
     """
     return Path(__file__).resolve().parent / "rules.example.md"
+
+
+def example_strategy() -> Path:
+    """The worked example strategy a new user copies to start their own. Package-relative,
+    like example_rules(): a real file on disk for a checkout and an installed wheel alike."""
+    return Path(__file__).resolve().parent / "strategy.example.md"
