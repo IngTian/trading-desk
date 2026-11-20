@@ -7,11 +7,45 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from dataclasses import asdict
 from datetime import UTC, datetime
 
-from desk import checks, config, integrity, model, rules, store
+from desk import checks, config, fmt, integrity, model, rules, store
+
+
+def _price(value: str) -> float:
+    """A price argument: a finite number above zero, refused at the boundary otherwise.
+
+    float() accepts "nan", "inf" and "-9". None of them is a price, and each one used to reach
+    a check or the log: a NaN entry printed a full set of results and then crashed on writing
+    the event, and a negative stop produced a risk figure for a trade that cannot exist.
+    """
+    try:
+        number = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number") from None
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a price: a price must be a positive number")
+    return number
+
+
+def _size(value: str) -> int:
+    """A size argument: a whole number of shares or contracts above zero.
+
+    An exit of 0 recorded nothing, and an exit of -3 GREW the open position by 3 while
+    printing nothing unusual.
+    """
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a whole number") from None
+    if number <= 0:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a size: a size must be a positive whole number")
+    return number
 
 
 def _generate_trade_id(ticker: str, local_date: str, existing_ids: list[str]) -> str:
@@ -84,8 +118,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Reject --point-value 0 (the schema CHECK requires point_value > 0)
-    if args.point_value is not None and args.point_value <= 0:
+    # Reject --point-value 0 (the schema CHECK requires point_value > 0), and NaN, which
+    # compares false to everything and so slipped past `<= 0` into a traceback.
+    if args.point_value is not None and (
+            not math.isfinite(args.point_value) or args.point_value <= 0):
         print(
             "--point-value must be positive: a zero or negative point value would make every "
             "risk calculation wrong. For a stock or ETF, omit --point-value (the default is 1.0).",
@@ -157,12 +193,14 @@ def cmd_check(args: argparse.Namespace) -> int:
             # Route to stderr so --json stdout stays pure
             print(f"Created run {args.run}", file=sys.stderr)
 
-    # Build context (bars-dependent fields None until plan 3)
+    # Build context. Bars-dependent fields stay None until plan 3, and the session start until
+    # sessions exist in plan 4: withheld, not defaulted.
     ctx = checks.Context(
         now=now_utc,
         open_trades=model.open_trades(con, account=args.account, run_id=args.run),
         session_started=None,
-        closed_today_r=None,
+        closed_today_r=model.realised_r_on(
+            con, now_utc.astimezone().date(), account=args.account, run_id=args.run),
         median_candle_range=None,
         volatility_ratio=None,
         stopped_closes=model.stopped_closes(con, account=args.account, run_id=args.run),
@@ -309,6 +347,18 @@ def cmd_entered(args: argparse.Namespace) -> int:
         )
         return 1
 
+    # A stop at the entry is no risk at all, and 1R is measured against the stop at entry for
+    # the trade's whole life -- so every R this trade ever produced would be a division by zero.
+    # (Moving the stop to the entry LATER is routine and fine: R keeps the stop at entry.)
+    if args.stop == args.entry:
+        print(
+            f"Trade {trade_id}: a stop at the entry ({args.stop:g}) means no risk, so the trade "
+            f"has no 1R to measure it in. Record the stop you actually had when you entered; "
+            f"if you have since moved it to breakeven, record that with stop-moved.",
+            file=sys.stderr,
+        )
+        return 1
+
     # Build the payload
     payload = {
         "entry": args.entry,
@@ -339,7 +389,6 @@ def cmd_entered(args: argparse.Namespace) -> int:
 
 def cmd_exited(args: argparse.Namespace) -> int:
     """Record an exited event: a partial or full exit at this price and size."""
-    from desk import fmt
     db_path = config.db_path()
     if not db_path.exists():
         print(f"No database at {db_path}", file=sys.stderr)
@@ -389,26 +438,15 @@ def cmd_exited(args: argparse.Namespace) -> int:
         payload=payload,
     )
 
-    # Print the resulting state
+    # Print the resulting state: what is still open, and what has been realised so far, in
+    # money (points x size x point value, so a future reads in dollars, not points) and in R.
     state = model.state_of(con, trade_id)
-    parts = [f"{trade_id}:"]
-    if state.size_open is not None and state.size_open > 0:
-        parts.append(f"{state.size_open} {unit} open")
-    else:
-        # Flat
-        parts.append("flat")
-        if state.realised_r is not None:
-            # Don't print realised_r (wrong by a factor of size), print cash result instead
-            if state.entry:
-                cash_result = sum(
-                    f.price * f.size - state.entry * f.size for f in state.fills
-                )
-            else:
-                cash_result = None
-            if state.side == "short" and cash_result is not None:
-                cash_result = -cash_result
-            parts.append(f"realised {fmt.signed(cash_result)}")
-    print(" ".join(parts))
+    held = (f"{state.size_open} {unit} open" if state.size_open and state.size_open > 0
+            else "flat")
+    r = "R withheld: the trade had no risk at entry" if state.realised_r is None \
+        else f"{fmt.signed(state.realised_r)} R"
+    print(f"{trade_id}: {held}, realised {fmt.signed(state.realised_cash)} {state.currency} "
+          f"({r})")
     return 0
 
 
@@ -435,6 +473,14 @@ def cmd_stop_moved(args: argparse.Namespace) -> int:
             f"Trade {trade_id} has no entered event; "
             f"cannot move the stop on a trade that was never entered.",
             file=sys.stderr
+        )
+        return 1
+    if state.status == "closed" or (state.size_open is not None and state.size_open <= 0):
+        # A flat trade has no stop to manage. Recording one anyway is not harmless: it reads
+        # like a live order on a finished trade.
+        print(
+            f"Trade {trade_id} is flat; there is no open position whose stop could move.",
+            file=sys.stderr,
         )
         return 1
 
@@ -556,23 +602,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     check_parser.add_argument(
         "--entry",
-        type=float,
+        type=_price,
         required=True,
         help="Entry price: the price you plan to enter at",
     )
     check_parser.add_argument(
         "--stop",
-        type=float,
+        type=_price,
         help="Stop price: where you exit if the trade moves against you (optional but recommended)",
     )
     check_parser.add_argument(
         "--target",
-        type=float,
+        type=_price,
         help="Target price: where you exit if the trade works (optional)",
     )
     check_parser.add_argument(
         "--size",
-        type=int,
+        type=_size,
         help="Position size in shares or contracts (optional)",
     )
     check_parser.add_argument(
@@ -616,19 +662,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     entered_parser.add_argument("trade_id", help="Trade ID (from check command)")
     entered_parser.add_argument(
-        "--entry", type=float, required=True,
+        "--entry", type=_price, required=True,
         help="Entry price: the price the trade was actually entered at"
     )
     entered_parser.add_argument(
-        "--stop", type=float, required=True,
+        "--stop", type=_price, required=True,
         help="Stop price: where you will exit if the trade moves against you"
     )
     entered_parser.add_argument(
-        "--target", type=float, required=True,
+        "--target", type=_price, required=True,
         help="Target price: where you will exit if the trade works"
     )
     entered_parser.add_argument(
-        "--size", type=int, required=True,
+        "--size", type=_size, required=True,
         help="Position size in shares or contracts"
     )
     entered_parser.add_argument(
@@ -650,9 +696,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Record that shares were exited at this price",
     )
     exited_parser.add_argument("trade_id", help="Trade ID")
-    exited_parser.add_argument("--price", type=float, required=True,
+    exited_parser.add_argument("--price", type=_price, required=True,
                               help="Exit price: the price at which shares were sold")
-    exited_parser.add_argument("--size", type=int, required=True,
+    exited_parser.add_argument("--size", type=_size, required=True,
                               help="Number of shares exited")
 
     # stop-moved subcommand
@@ -661,7 +707,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Record that the stop was adjusted to a new price",
     )
     stop_moved_parser.add_argument("trade_id", help="Trade ID")
-    stop_moved_parser.add_argument("--stop", type=float, required=True,
+    stop_moved_parser.add_argument("--stop", type=_price, required=True,
                                   help="New stop price")
 
     # closed subcommand
