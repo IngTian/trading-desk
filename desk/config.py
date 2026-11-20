@@ -159,6 +159,11 @@ def reports_dir() -> Path:
     return (home() / "reports").resolve()
 
 
+def attachments_dir() -> Path:
+    """Where screenshots attached to trades are stored, named by content hash."""
+    return (home() / "attachments").resolve()
+
+
 def imports_dir() -> Path:
     """Where imported trade CSVs are staged."""
     return (home() / "imports").resolve()

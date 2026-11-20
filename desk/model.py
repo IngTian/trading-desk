@@ -414,3 +414,44 @@ def open_trades(
     of trading, so run 3's max_open_trades counts only run 3's trades.
     """
     return [s for s in _states(con, account=account, run_id=run_id) if s.status == "open"]
+
+
+@dataclass(frozen=True)
+class Entry:
+    type: str
+    price: float
+    stop: float | None
+    target: float | None
+    size: int
+    at: dt.datetime
+
+
+@dataclass(frozen=True)
+class Move:
+    at: dt.datetime
+    stop: float | None
+    target: float | None
+    reason: str
+
+
+@dataclass(frozen=True)
+class Decisions:
+    entry: Entry
+    moves: tuple[Move, ...]       # in `at` order
+    close_at: dt.datetime | None
+    close_reason: str | None
+    voided: bool
+    reasons: str
+    screenshots: tuple[dict, ...]
+
+
+def decisions_of(con: sqlite3.Connection, trade_id: str) -> Decisions:
+    """What was decided on a trade, folded from its events. For now only the `entered` one;
+    moves, closes, corrections and voids fold in here as they are added."""
+    entered = next(e for e in store.events(con, trade_id=trade_id) if e["kind"] == "entered")
+    p = json.loads(entered["payload"])
+    return Decisions(
+        entry=Entry(type=p["entry_type"], price=p["entry"], stop=p["stop"], target=p["target"],
+                    size=p["size"], at=dt.datetime.fromisoformat(entered["at"])),
+        moves=(), close_at=None, close_reason=None, voided=False, reasons=p["reasons"],
+        screenshots=tuple(p["screenshots"]))

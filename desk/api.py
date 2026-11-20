@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
-from desk import store, strategy
+from desk import config, model, store, strategy
 from desk.checks import _hours
 from desk.errors import Refused
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
-           "RunView", "start_run", "stop_run", "list_runs"]
+           "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade"]
 
 _SLUG = re.compile(r"[a-z0-9-]+")
 _BARS = re.compile(r"(\d+) bars after exit")
@@ -225,3 +227,129 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
 
 def list_runs(con: sqlite3.Connection, strategy: str | None = None) -> list[RunView]:
     return [_run_view(con, r) for r in store.runs(con, strategy)]
+
+
+@dataclass(frozen=True)
+class TradeView:
+    id: str
+    run: str
+    strategy: str
+    version: int
+    ticker: str
+    side: str
+    instrument: str
+    point_value: float
+    currency: str
+    decisions: model.Decisions
+
+
+def _trade_view(con, row: sqlite3.Row) -> TradeView:
+    run = store.run(con, row["run_id"])
+    return TradeView(id=row["id"], run=row["run_id"], strategy=run["strategy_id"],
+                     version=run["version"], ticker=row["ticker"], side=row["side"],
+                     instrument=row["instrument"], point_value=row["point_value"],
+                     currency=row["currency"], decisions=model.decisions_of(con, row["id"]))
+
+
+def _generate_trade_id(ticker: str, local_date: str, existing_ids) -> str:
+    """ticker-YYYYMMDD on the trader's local date; "-2", "-3"... on collision. Only [a-z0-9]
+    survive from the ticker so an id types unquoted in any shell."""
+    base = f"{re.sub(r'[^a-z0-9]', '', ticker.lower())}-{local_date}"
+    ids = set(existing_ids)
+    n = 1
+    while (id := base if n == 1 else f"{base}-{n}") in ids:
+        n += 1
+    return id
+
+
+def _price(name: str, v, *, required: bool = True) -> None:
+    if v is None and not required:
+        return
+    if isinstance(v, bool) or not isinstance(v, int | float) or not math.isfinite(v) or v <= 0:
+        raise Refused(f"{name} must be a number above zero, e.g. 101.5; got {v!r}.")
+
+
+def _screenshot(item) -> tuple[dict, bytes | None, str | None]:
+    """(payload entry, file bytes, stored name) for one screenshot, or Refused. Writes nothing."""
+    text = str(item)
+    if text.startswith("https://"):
+        return {"link": text}, None, None
+    path = Path(text).expanduser()
+    if not path.is_file():
+        raise Refused(f"screenshot {text!r} is not an existing file or an https:// link; give "
+                      "the path of an image file, or a link starting https://.")
+    data = path.read_bytes()
+    stored = f"{hashlib.sha256(data).hexdigest()}{path.suffix.lower()}"
+    return {"file": stored, "name": path.name}, data, stored
+
+
+def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_type: str,
+          entry: float, size: int, currency: str, reasons: str, stop: float | None = None,
+          target: float | None = None, screenshots=(), at: datetime | None = None,
+          instrument: str | None = None, point_value: float | None = None,
+          now: datetime | None = None) -> TradeView:
+    """Enter a trade on a run: one `trades` row and one `entered` event, written together.
+    Everything is validated, and every screenshot file read, before anything is written."""
+    row = store.run(con, run)
+    if row is None:
+        raise Refused(f"There is no run {run!r}; list_runs to see the ones that exist.")
+    when = _decision_time(row["mode"], at, now, "enter a trade")
+    if side not in ("long", "short"):
+        raise Refused(f"side {side!r} is not known; use 'long' (profit if the price rises) or "
+                      "'short' (profit if it falls).")
+    if entry_type not in ("market", "limit"):
+        raise Refused(f"entry_type {entry_type!r} is not known; use 'market' (fill at once at the "
+                      "going price) or 'limit' (fill only at your price or better).")
+    symbol, implied = model.canonical_ticker(ticker)
+    if not symbol:
+        raise Refused("ticker is empty; give the symbol, e.g. 'ACME' or 'GC1!'.")
+    if instrument not in (None, "stock", "etf", "future"):
+        raise Refused(f"instrument {instrument!r} is not known; use 'stock', 'etf' or 'future'.")
+    if implied == "future" and instrument not in (None, "future"):
+        raise Refused(f"{ticker!r} is a continuous futures contract, so instrument must be "
+                      f"'future', not {instrument!r}; leave instrument out.")
+    kind = implied or instrument or "stock"
+    if kind == "future":
+        if point_value is None:
+            raise Refused("A future needs point_value: the cash a one-point move is worth on one "
+                          "contract, e.g. 100.")
+        _price("point_value", point_value)
+    else:
+        point_value = 1.0
+    _price("entry", entry)
+    _price("stop", stop, required=False)
+    _price("target", target, required=False)
+    if stop == entry:
+        raise Refused("stop equals entry, so the risk (the distance to the stop, 1R) is zero and "
+                      "no reward-to-risk can be measured; put the stop away from the entry.")
+    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
+        raise Refused(f"size must be a whole number above zero, e.g. 10; got {size!r}.")
+    if currency not in config.CURRENCIES:
+        raise Refused(f"currency {currency!r} is not known; use one of "
+                      f"{', '.join(config.CURRENCIES)}.")
+    if not reasons.strip():
+        raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
+    shots = [_screenshot(s) for s in screenshots]
+    started = _run_view(con, row).started
+    if when < started:
+        raise Refused(f"Run {run!r} started at {started.isoformat()}; a trade cannot be entered "
+                      "before that, so give a later `at`.")
+    for _, data, stored in shots:  # content-addressed, so a repeat is skipped
+        if data is not None and not (config.attachments_dir() / stored).exists():
+            config.attachments_dir().mkdir(parents=True, exist_ok=True)
+            (config.attachments_dir() / stored).write_bytes(data)
+    with store.transaction(con):  # the run's state and the id's collisions are read under the lock
+        view = _run_view(con, row)
+        if view.stopped is not None and when >= view.stopped:
+            raise Refused(f"Run {run!r} stopped at {view.stopped.isoformat()}; a trade cannot be "
+                          "entered at or after that, so give an earlier `at`.")
+        id = _generate_trade_id(symbol, when.astimezone().strftime("%Y%m%d"),
+                                [t["id"] for t in store.trades(con)])
+        store.add_trade(con, id, run, symbol, side, kind, float(point_value), currency)
+        store.append(con, kind="entered", run_id=run, trade_id=id, at=_at(when),
+                     recorded_at=_at(now),
+                     payload={"entry_type": entry_type, "entry": float(entry),
+                              "stop": stop and float(stop), "target": target and float(target),
+                              "size": size, "reasons": reasons,
+                              "screenshots": [s[0] for s in shots]})
+    return _trade_view(con, store.trade(con, id))
