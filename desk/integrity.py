@@ -61,8 +61,9 @@ def _run_started_stopped(con: sqlite3.Connection) -> list[str]:
 
 
 def _decision_dates(con: sqlite3.Connection) -> list[str]:
-    """By effective time: an entry is not before its run's start; a move is not before the entry
-    and is strictly before the hand close (R11); a close is strictly after the entry (R12).
+    """By effective time: an entry is not before its run's start, nor (unless the trade is void)
+    at or after its run's stop; a move is not before the entry and is strictly before the hand
+    close (R11); a close is strictly after the entry (R12).
 
     A trade is skipped when another invariant already reports why it cannot be folded (not one
     `entered`, a correction naming nothing in the trade, an unreadable event time). A fold that
@@ -77,13 +78,16 @@ def _decision_dates(con: sqlite3.Connection) -> list[str]:
             continue
         who = f"trade {t['id']}"
         try:
-            started = [_aware(e["at"]) for e in store.events(con, run_id=t["run_id"])
-                       if e["kind"] == "run_started"]
-            started = [s for s in started if s]
+            run = store.events(con, run_id=t["run_id"])
+            started, stopped = ([s for e in run if e["kind"] == kind and (s := _aware(e["at"]))]
+                                for kind in ("run_started", "run_stopped"))
             d = model.decisions_of(con, t["id"])
             if started and d.entry.at < min(started):
                 failures.append(f"{who}: entered at {d.entry.at.isoformat()}, before its run "
                                 "started")
+            if stopped and not d.voided and d.entry.at >= min(stopped):
+                failures.append(f"{who}: entered at {d.entry.at.isoformat()}, at or after its "
+                                f"run stopped at {min(stopped).isoformat()}")
             for m in d.moves:
                 if m.at < d.entry.at:
                     failures.append(f"{who}: move at {m.at.isoformat()} is before the entry")

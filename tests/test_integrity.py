@@ -120,9 +120,13 @@ def test_a_run_with_two_stops_is_reported(con):
 
 
 def test_a_stop_before_the_start_is_reported_and_one_second_after_is_not(con):
-    ev(con, "run_stopped", NOW + timedelta(seconds=1))
+    # A run with no trades, so no entry falls after the stop (decision_dates' half).
+    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags)"
+                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'replay', '[]')")
+    ev(con, "run_started", NOW, run="dip-buyer-r2")
+    ev(con, "run_stopped", NOW + timedelta(seconds=1), run="dip-buyer-r2")
     assert found(con)[0] == 0
-    ev(con, "run_stopped", NOW - timedelta(seconds=1))  # a second stop, and before the start
+    ev(con, "run_stopped", NOW - timedelta(seconds=1), run="dip-buyer-r2")  # a second, too early
     count, lines = found(con)
     assert any("before" in ln for ln in lines)
 
@@ -163,6 +167,17 @@ def test_a_move_at_the_hand_close_is_reported_and_one_second_before_is_not(con):
     assert found(con)[0] == 0
     ev(con, "order_moved", T3, trade="MOVE-1", payload={"stop": 99.0, "reason": "x"})
     assert only(con, "decision_dates") == 1
+
+
+@pytest.mark.parametrize(("stop", "reported"), [(T1, 1), (T1 + timedelta(seconds=1), 0)])
+def test_a_trade_entered_at_or_after_its_runs_stop_is_reported_unless_void(con, stop, reported):
+    """Review item 3: stop_run accepted a stop dated before a trade already on the run. ACME and
+    the void WXYZ are both entered at T1; only ACME counts."""
+    ev(con, "run_stopped", stop)
+    if reported:
+        assert only(con, "decision_dates") == reported
+    else:
+        assert found(con) == (0, [])
 
 
 def test_an_entry_before_the_run_started_is_reported(con):

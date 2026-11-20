@@ -91,6 +91,27 @@ def test_at_or_after_the_run_stop_is_refused(con):
     assert len(store.trades(con)) == 1
 
 
+def test_a_run_cannot_stop_at_or_before_a_trade_on_it(con):
+    """Review item 3: a replay run with a trade entered on day 5 could be stopped on day 1,
+    leaving a trade that trade() itself would refuse, and integrity reported nothing."""
+    t = enter(con, "dip-buyer-r2", at=NOW + timedelta(days=5))
+    for at in (NOW + timedelta(days=1), NOW + timedelta(days=5)):
+        with pytest.raises(api.Refused, match=f"{t.id}.*entered at"):
+            api.stop_run(con, "dip-buyer-r2", at=at, now=NOW)
+    assert api.list_runs(con)[1].stopped is None
+    after = NOW + timedelta(days=5, seconds=1)
+    assert api.stop_run(con, "dip-buyer-r2", at=after, now=NOW).stopped == after
+
+
+def test_a_run_stop_is_judged_against_the_corrected_entry_and_ignores_a_void_trade(con):
+    t = enter(con, "dip-buyer-r2", at=NOW + timedelta(days=1))
+    api.correct_trade(con, t.id, fields={"at": NOW + timedelta(days=5)}, reason="x", now=NOW)
+    with pytest.raises(api.Refused, match=t.id):
+        api.stop_run(con, "dip-buyer-r2", at=NOW + timedelta(days=3), now=NOW)
+    api.void_trade(con, t.id, reason="Wrong run.", now=NOW)
+    assert api.stop_run(con, "dip-buyer-r2", at=NOW + timedelta(days=3), now=NOW).stopped
+
+
 @pytest.mark.parametrize("typed", ["GC1!", "gc1!", "GC=F", "COMEX:GC1!", "GC2!"])
 def test_a_futures_ticker_in_any_form_is_a_future_on_its_root(con, typed):
     t = enter(con, ticker=typed, point_value=100.0)

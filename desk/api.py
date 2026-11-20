@@ -226,6 +226,8 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
 
 def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
              now: datetime | None = None) -> RunView:
+    """Stop the run at `at`: strictly after its start and after every non-void trade's entry,
+    whichever was logged first, since trade() refuses an entry at or after the stop."""
     row = store.run(con, run)
     if row is None:
         raise Refused(f"There is no run {run!r}; list_runs to see the ones that exist.")
@@ -237,6 +239,12 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
         if stop < view.started:
             raise Refused(f"Run {run!r} started at {view.started.isoformat()}; its stop cannot "
                           "be before that, so give a later `at`.")
+        entries = [(d.entry.at, t["id"]) for t in store.trades(con, run)
+                   if not (d := model.decisions_of(con, t["id"])).voided]
+        if entries and (last := max(entries))[0] >= stop:
+            raise Refused(f"Trade {last[1]!r} on run {run!r} was entered at "
+                          f"{last[0].isoformat()}; the run cannot stop at or before a trade on "
+                          "it, so give a later `at` (or void that trade, if it does not belong).")
         store.append(con, kind="run_stopped", run_id=run, at=_at(stop), payload={},
                      recorded_at=_at(now))
     return _run_view(con, row)
