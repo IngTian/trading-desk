@@ -328,6 +328,56 @@ def test_a_run_that_names_no_single_run_is_refused_cleanly(home, capsys):
     assert "Traceback" not in err
 
 
+# ---------------------------------------------------------------- taken against ---
+# Spec §5: if the owner takes a trade that breaks a rule, the trade records "taken against:
+# max_risk_per_trade (140 vs 100)". `entered` re-runs the number rules on the FILL, because a
+# worse fill or a widened stop is exactly what the check before the click could not see.
+
+
+def _state(trade_id):
+    from desk import model
+    return model.state_of(store.open(), trade_id)
+
+
+def test_a_fill_that_breaks_a_rule_is_recorded_as_taken_against_and_not_refused(home, capsys):
+    tid = checked(capsys, *GC, "--side", "long", "--entry", "2000", "--stop", "1998.5",
+                  "--target", "2003", "--size", "1", "--account", "replay")
+    # Filled with the stop widened to 4 points: 400 USD of risk against 200, and 0.75R of reward.
+    rc, out, _ = run(capsys, "entered", tid, "--entry", "2000", "--stop", "1996",
+                     "--target", "2003", "--size", "1")
+    assert rc == 0, "a result is a fact, never a block"
+    assert "taken against: max_risk_per_trade (risk 400.00 USD against a limit of 200 USD)" \
+        in out
+    assert "taken against: min_reward_risk" in out
+    # And size: 200 USD over a 400-per-contract risk allows 0 contracts, against the 1 filled.
+    assert _state(tid).taken_against == ("min_reward_risk", "max_risk_per_trade", "size")
+    (entered,) = [e for e in store.events(store.open(), trade_id=tid) if e["kind"] == "entered"]
+    assert entered["rules_hash"], "the rules version the fill was checked against is kept"
+
+
+def test_a_fill_inside_every_rule_records_nothing_taken_against(home, capsys):
+    tid = checked(capsys, *GC, "--side", "long", "--entry", "2000", "--stop", "1998.5",
+                  "--target", "2003", "--size", "1", "--account", "replay")
+    rc, out, _ = run(capsys, "entered", tid, "--entry", "2000", "--stop", "1998.5",
+                     "--target", "2003", "--size", "1")
+    assert rc == 0
+    assert "taken against" not in out
+    assert _state(tid).taken_against == ()
+
+
+def test_a_fill_that_could_not_be_checked_says_so_and_is_recorded_as_unknown(home, capsys):
+    """No rules file at entry: the fill is still recorded -- the click happened -- but
+    'nothing taken against' would be a claim, so the record says unknown (None)."""
+    tid = checked(capsys, *GC, "--side", "long", "--entry", "2000", "--stop", "1998.5",
+                  "--target", "2003", "--size", "1", "--account", "replay")
+    (home / "rules.md").unlink()
+    rc, out, err = run(capsys, "entered", tid, "--entry", "2000", "--stop", "1996",
+                       "--target", "2003", "--size", "1")
+    assert rc == 0
+    assert "not checked against the rules" in err
+    assert _state(tid).taken_against is None
+
+
 # ------------------------------------------------------------------- daily loss ---
 
 

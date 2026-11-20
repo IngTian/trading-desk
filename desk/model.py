@@ -12,7 +12,9 @@ everything derives from the append-only log.
   the trade), so flattening it would merge the plan's keys into the event's namespace and risk
   collision with event-level fields.
 - **imported**: (reserved for plan 2; carries what the importer read)
-- **entered**: `entry`, `stop`, `target`, `size`, `horizon`, `setup`, `thesis`
+- **entered**: `entry`, `stop`, `target`, `size`, `horizon`, `setup`, `thesis`, and
+  `taken_against`: the rule results the FILL broke, each `{name, figure, limit, says}` -- an
+  empty list when it broke none, null when no rules could be read at entry
 - **stop_moved**: `stop`
 - **target_moved**: `target`
 - **exited**: `price`, `size`
@@ -118,8 +120,10 @@ class TradeState:
     opened_at: int | None  # event_id when entered
     flat_at: str | None  # when an exit last took the open size to zero
     closed_at: int | None  # event_id when closed
-    # Rule results the trade was taken against, by rule name, as recorded by `entered`.
-    taken_against: tuple[str, ...]
+    # Rules the FILL broke, by name, as `entered` recorded them. () means the fill was checked
+    # and broke none; None means it was not checked (no entry yet, or no readable rules at
+    # entry) -- and "nothing taken against" is a claim the desk cannot make unchecked.
+    taken_against: tuple[str, ...] | None
     # Shapes the log should never hold (an exit larger than the open size), for integrity.py.
     violations: tuple[str, ...]
 
@@ -161,7 +165,7 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
     opened_at = None
     flat_at = None
     closed_at = None
-    taken_against: tuple[str, ...] = ()
+    taken_against: tuple[str, ...] | None = None
     violations = []
 
     for event in events:
@@ -183,7 +187,8 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
             size_entered = size_open = payload["size"]
             setup = payload.get("setup")
             opened_at = event["id"]
-            taken_against = tuple(r["name"] for r in payload.get("taken_against", ()))
+            broke = payload.get("taken_against")
+            taken_against = None if broke is None else tuple(r["name"] for r in broke)
 
         elif kind == "stop_moved":
             stop = payload["stop"]

@@ -125,6 +125,48 @@ def _scope_warnings(rules_file: rules.RulesFile, scoped: rules.Rules, account: s
     return warnings
 
 
+def _context(con, account: str, run_id: str | None, now_utc: datetime) -> checks.Context:
+    """What the checks need from the log, scoped to one account and run.
+
+    Bars-dependent fields stay None until plan 3, and the session start until sessions exist
+    in plan 4: withheld, not defaulted.
+    """
+    return checks.Context(
+        now=now_utc,
+        open_trades=model.open_trades(con, account=account, run_id=run_id),
+        session_started=None,
+        closed_today_r=model.realised_r_on(
+            con, now_utc.astimezone().date(), account=account, run_id=run_id),
+        median_candle_range=None,
+        volatility_ratio=None,
+        stopped_closes=model.stopped_closes(con, account=account, run_id=run_id),
+        fx=checks.no_fx,
+    )
+
+
+def _check_the_fill(con, trade_row, args, now_utc: datetime):
+    """The number rules, run on the terms the trade was actually entered at.
+
+    Returns (broken results, rules hash), or (None, why not) when the rules cannot be read
+    or scoped -- the fill is still recorded, since the click happened, but as unchecked.
+    """
+    try:
+        rules_file = rules.load(config.rules_path())
+        scoped = rules_file.for_scope(trade_row["account"], trade_row["run_id"],
+                                      checks.CHECK_NAMES)
+    except (FileNotFoundError, ValueError) as e:
+        return None, str(e)
+    plan = model.Plan(
+        ticker=trade_row["ticker"], side=trade_row["side"], instrument=trade_row["instrument"],
+        point_value=trade_row["point_value"], currency=trade_row["currency"],
+        entry=args.entry, stop=args.stop, target=args.target, size=args.size,
+        horizon=args.horizon, setup=args.setup, thesis=args.thesis,
+        account=trade_row["account"], run_id=trade_row["run_id"],
+    )
+    ctx = _context(con, trade_row["account"], trade_row["run_id"], now_utc)
+    return [r for r in checks.run_checks(plan, scoped, ctx) if r.ok is False], rules_file.hash
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     """Run checks on a planned trade and record the event."""
     # Two clocks: local date for the trade id (because "today" means the trader's day),
@@ -263,22 +305,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             # Route to stderr so --json stdout stays pure
             print(f"Created run {args.run}", file=sys.stderr)
 
-    # Build context. Bars-dependent fields stay None until plan 3, and the session start until
-    # sessions exist in plan 4: withheld, not defaulted.
-    ctx = checks.Context(
-        now=now_utc,
-        open_trades=model.open_trades(con, account=args.account, run_id=args.run),
-        session_started=None,
-        closed_today_r=model.realised_r_on(
-            con, now_utc.astimezone().date(), account=args.account, run_id=args.run),
-        median_candle_range=None,
-        volatility_ratio=None,
-        stopped_closes=model.stopped_closes(con, account=args.account, run_id=args.run),
-        fx=checks.no_fx,
-    )
-
-    # Run the checks
-    results = checks.run_checks(plan, scoped_rules, ctx)
+    results = checks.run_checks(plan, scoped_rules, _context(con, args.account, args.run, now_utc))
 
     warnings = _scope_warnings(rules_file, scoped_rules, args.account)
 
@@ -413,7 +440,11 @@ def cmd_entered(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # Build the payload
+    # The rules, run again on the fill. A worse fill or a widened stop is exactly what the check
+    # before the click could not see. Never a refusal: the click has happened, so the record
+    # says what it broke (spec §5, "taken against: max_risk_per_trade (140 vs 100)").
+    broken, hash_or_why = _check_the_fill(con, trade_row, args, datetime.now(UTC))
+
     payload = {
         "entry": args.entry,
         "stop": args.stop,
@@ -422,9 +453,11 @@ def cmd_entered(args: argparse.Namespace) -> int:
         "horizon": args.horizon,
         "setup": args.setup,
         "thesis": args.thesis,
+        "taken_against": None if broken is None else [
+            {"name": r.name, "figure": r.figure, "limit": r.limit, "says": r.says}
+            for r in broken
+        ],
     }
-
-    # Record the event
     store.append(
         con,
         kind="entered",
@@ -432,12 +465,17 @@ def cmd_entered(args: argparse.Namespace) -> int:
         source="cli",
         trade_id=trade_id,
         payload=payload,
+        rules_hash=None if broken is None else hash_or_why,
     )
 
-    # Print the resulting state
     state = model.state_of(con, trade_id)
     unit = _unit_name(trade_row["instrument"])
     print(f"{trade_id}: {state.size_open} {unit} open")
+    if broken is None:
+        print(f"{trade_id}: recorded, but not checked against the rules: {hash_or_why}",
+              file=sys.stderr)
+    for result in broken or ():
+        print(f"taken against: {result.name} ({result.says})")
     return 0
 
 
