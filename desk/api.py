@@ -19,7 +19,8 @@ from desk.checks import _hours
 from desk.errors import Refused
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
-           "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade"]
+           "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade", "move_order",
+           "close_trade", "correct_trade", "void_trade", "get_trade", "list_trades"]
 
 _SLUG = re.compile(r"[a-z0-9-]+")
 _BARS = re.compile(r"(\d+) bars after exit")
@@ -31,9 +32,9 @@ def _aware(when: datetime | None, name: str = "now") -> datetime:
     its zone would be guessed."""
     if when is None:
         return datetime.now(UTC)
-    if when.tzinfo is None:
-        raise Refused(f"`{name}` has no timezone; give an aware time, e.g. "
-                      "datetime(2026, 3, 2, 14, 30, tzinfo=timezone.utc).")
+    if not isinstance(when, datetime) or when.tzinfo is None:
+        raise Refused(f"`{name}` must be a time with a timezone, e.g. "
+                      f"datetime(2026, 3, 2, 14, 30, tzinfo=timezone.utc); got {when!r}.")
     return when
 
 
@@ -245,10 +246,21 @@ class TradeView:
 
 def _trade_view(con, row: sqlite3.Row) -> TradeView:
     run = store.run(con, row["run_id"])
+    d = model.decisions_of(con, row["id"])
     return TradeView(id=row["id"], run=row["run_id"], strategy=run["strategy_id"],
                      version=run["version"], ticker=row["ticker"], side=row["side"],
-                     instrument=row["instrument"], point_value=row["point_value"],
-                     currency=row["currency"], decisions=model.decisions_of(con, row["id"]))
+                     instrument=row["instrument"], point_value=d.point_value,
+                     currency=d.currency, decisions=d)
+
+
+def _within_run(view: RunView, when: datetime) -> None:
+    """A trade's entry falls inside its run: not before the start, and before any stop."""
+    if when < view.started:
+        raise Refused(f"Run {view.id!r} started at {view.started.isoformat()}; a trade cannot "
+                      "be entered before that, so give a later `at`.")
+    if view.stopped is not None and when >= view.stopped:
+        raise Refused(f"Run {view.id!r} stopped at {view.stopped.isoformat()}; a trade cannot be "
+                      "entered at or after that, so give an earlier `at`.")
 
 
 def _generate_trade_id(ticker: str, local_date: str, existing_ids) -> str:
@@ -267,6 +279,16 @@ def _price(name: str, v, *, required: bool = True) -> None:
         return
     if isinstance(v, bool) or not isinstance(v, int | float) or not math.isfinite(v) or v <= 0:
         raise Refused(f"{name} must be a number above zero, e.g. 101.5; got {v!r}.")
+
+
+def _size(v) -> None:
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        raise Refused(f"size must be a whole number above zero, e.g. 10; got {v!r}.")
+
+
+def _currency(v) -> None:
+    if v not in config.CURRENCIES:
+        raise Refused(f"currency {v!r} is not known; use one of {', '.join(config.CURRENCIES)}.")
 
 
 def _screenshot(item) -> tuple[dict, bytes | None, str | None]:
@@ -322,23 +344,13 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     if stop == entry:
         raise Refused("stop equals entry, so the risk (the distance to the stop, 1R) is zero and "
                       "no reward-to-risk can be measured; put the stop away from the entry.")
-    if isinstance(size, bool) or not isinstance(size, int) or size <= 0:
-        raise Refused(f"size must be a whole number above zero, e.g. 10; got {size!r}.")
-    if currency not in config.CURRENCIES:
-        raise Refused(f"currency {currency!r} is not known; use one of "
-                      f"{', '.join(config.CURRENCIES)}.")
+    _size(size)
+    _currency(currency)
     if not reasons.strip():
         raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
     shots = [_screenshot(s) for s in screenshots]
-    started = _run_view(con, row).started
-    if when < started:
-        raise Refused(f"Run {run!r} started at {started.isoformat()}; a trade cannot be entered "
-                      "before that, so give a later `at`.")
     with store.transaction(con):  # the run's state and the id's collisions are read under the lock
-        view = _run_view(con, row)
-        if view.stopped is not None and when >= view.stopped:
-            raise Refused(f"Run {run!r} stopped at {view.stopped.isoformat()}; a trade cannot be "
-                          "entered at or after that, so give an earlier `at`.")
+        _within_run(_run_view(con, row), when)
         for _, data, stored in shots:  # after every refusal; content-addressed, so a repeat skips
             if data is not None and not (config.attachments_dir() / stored).exists():
                 config.attachments_dir().mkdir(parents=True, exist_ok=True)
@@ -353,3 +365,165 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                               "size": size, "reasons": reasons,
                               "screenshots": [s[0] for s in shots]})
     return _trade_view(con, store.trade(con, id))
+
+
+def _trade_row(con, trade: str) -> sqlite3.Row:
+    row = store.trade(con, trade)
+    if row is None:
+        raise Refused(f"There is no trade {trade!r}; list_trades to see the ones that exist.")
+    return row
+
+
+def _decision(con, trade: str, reason) -> sqlite3.Row:
+    """The trade's identity row, once the decision's reason is given and the trade exists."""
+    if not isinstance(reason, str) or not reason.strip():
+        raise Refused("reason is empty; say why, in your own words.")
+    return _trade_row(con, trade)
+
+
+def _not_void(con, trade: str) -> tuple[model.Decisions, int, tuple[int, ...]]:
+    """The trade's fold; call it under the write lock, since what it reads decides the write."""
+    folded = model._fold(con, trade)
+    if folded[0].voided:
+        raise Refused(f"Trade {trade!r} is void, so it takes no further decision; if it should "
+                      "count, enter it again with its original `at`.")
+    return folded
+
+
+def _after_entry(trade: str, d: model.Decisions, when: datetime) -> None:
+    if when < d.entry.at:
+        raise Refused(f"Trade {trade!r} was entered at {d.entry.at.isoformat()}; a decision on it "
+                      "cannot be before that, so give a later `at`.")
+
+
+def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float | None = None,
+               target: float | None = None, at: datetime | None = None,
+               now: datetime | None = None) -> TradeView:
+    """Move the trade's stop, its target or both, from `at` on."""
+    now = _aware(now)
+    row = _decision(con, trade, reason)
+    when = _decision_time(store.run(con, row["run_id"])["mode"], at, now, "move an order")
+    if stop is None and target is None:
+        raise Refused("A move names a new stop, a new target, or both; give at least one.")
+    _price("stop", stop, required=False)
+    _price("target", target, required=False)
+    with store.transaction(con):
+        _after_entry(trade, _not_void(con, trade)[0], when)
+        moved = {k: float(v) for k, v in (("stop", stop), ("target", target)) if v is not None}
+        store.append(con, kind="order_moved", run_id=row["run_id"], trade_id=trade, at=_at(when),
+                     recorded_at=_at(now), payload={**moved, "reason": reason})
+    return _trade_view(con, row)
+
+
+def close_trade(con: sqlite3.Connection, trade: str, *, reason: str, at: datetime | None = None,
+                now: datetime | None = None) -> TradeView:
+    """Close the trade by hand at `at`. A trade is closed once."""
+    now = _aware(now)
+    row = _decision(con, trade, reason)
+    when = _decision_time(store.run(con, row["run_id"])["mode"], at, now, "close a trade")
+    with store.transaction(con):
+        d = _not_void(con, trade)[0]
+        if d.close_at is not None:
+            raise Refused(f"Trade {trade!r} was already closed at {d.close_at.isoformat()}: "
+                          f"{d.close_reason!r}. A trade is closed once; if that close was a "
+                          "mistake, void the trade and enter it again.")
+        _after_entry(trade, d, when)
+        store.append(con, kind="closed", run_id=row["run_id"], trade_id=trade, at=_at(when),
+                     recorded_at=_at(now), payload={"reason": reason})
+    return _trade_view(con, row)
+
+
+_ENTRY_FIELDS = ("entry", "stop", "target", "size", "at", "point_value", "currency")
+_MOVE_FIELDS = ("stop", "target", "at")
+
+
+def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: str,
+                  now: datetime | None = None) -> TradeView:
+    """Correct the entry, or with `move: <index>` (its place in get_trade's moves) one move.
+    Appended as a `corrected` event naming that `entered` or `order_moved` event, read in its
+    place; only the fields named change. A wrong run, ticker or side is not corrected: void
+    the trade and enter it again."""
+    now = _aware(now)
+    row = _decision(con, trade, reason)
+    fields = dict(fields)
+    index = fields.pop("move", None)
+    names = _ENTRY_FIELDS if index is None else _MOVE_FIELDS
+    if not fields:
+        raise Refused(f"fields names nothing to correct; give one or more of {', '.join(names)}.")
+    if unknown := [k for k in fields if k not in names]:
+        raise Refused(f"{', '.join(unknown)} cannot be corrected on "
+                      f"{'an entry' if index is None else 'a move'}; correct only "
+                      f"{', '.join(names)}, or void the trade and enter it again.")
+    for name in ("entry", "point_value"):
+        if name in fields:
+            _price(name, fields[name])
+    _price("stop", fields.get("stop"), required=False)
+    _price("target", fields.get("target"), required=False)
+    if "size" in fields:
+        _size(fields["size"])
+    if "currency" in fields:
+        _currency(fields["currency"])
+    if "point_value" in fields and row["instrument"] != "future":
+        raise Refused(f"Trade {trade!r} is a {row['instrument']}, whose point value is 1; only a "
+                      "future's point value can be corrected.")
+    if "at" in fields and fields["at"] is None:  # _aware would read None as the wall clock
+        raise Refused("`at` cannot be removed; give the corrected time, with a timezone.")
+    when = _aware(fields["at"], "at") if "at" in fields else None
+    with store.transaction(con):  # the decisions the correction is checked against, under the lock
+        d, entered, move_ids = _not_void(con, trade)
+        if index is None:
+            if fields.get("entry", d.entry.price) == fields.get("stop", d.entry.stop):
+                raise Refused("The corrected stop equals the entry, so the risk (the distance to "
+                              "the stop, 1R) is zero; put the stop away from the entry.")
+            if when is not None:
+                _within_run(_run_view(con, store.run(con, row["run_id"])), when)
+                later = [m.at for m in d.moves] + [d.close_at] * (d.close_at is not None)
+                if later and when > min(later):
+                    raise Refused(f"Trade {trade!r} has a decision at {min(later).isoformat()}; "
+                                  "its entry cannot be after that, so give an `at` at or "
+                                  "before it.")
+            corrects = entered
+        else:
+            if (isinstance(index, bool) or not isinstance(index, int)
+                    or not 0 <= index < len(d.moves)):
+                raise Refused(f"Trade {trade!r} has no move {index!r}; `move` is a move's place "
+                              f"in get_trade's moves, from 0, and it has {len(d.moves)}.")
+            m = d.moves[index]
+            if fields.get("stop", m.stop) is None and fields.get("target", m.target) is None:
+                raise Refused("A move names a new stop, a new target, or both; this correction "
+                              "would leave it naming neither.")
+            if when is not None:
+                _after_entry(trade, d, when)
+            corrects = move_ids[index]
+        stored = {**fields, **{k: float(fields[k]) for k in ("entry", "stop", "target",
+                                                             "point_value") if fields.get(k)}}
+        if when is not None:
+            stored["at"] = _at(when)
+        store.append(con, kind="corrected", run_id=row["run_id"], trade_id=trade, at=_at(now),
+                     recorded_at=_at(now), corrects=corrects,
+                     payload={"fields": stored, "reason": reason})
+    return _trade_view(con, row)
+
+
+def void_trade(con: sqlite3.Connection, trade: str, *, reason: str,
+               now: datetime | None = None) -> TradeView:
+    """Take the trade out of every stat and every other trade's checks; it stays in the log."""
+    now = _aware(now)
+    row = _decision(con, trade, reason)
+    with store.transaction(con):
+        _not_void(con, trade)
+        store.append(con, kind="voided", run_id=row["run_id"], trade_id=trade, at=_at(now),
+                     recorded_at=_at(now), payload={"reason": reason})
+    return _trade_view(con, row)
+
+
+def get_trade(con: sqlite3.Connection, trade: str) -> TradeView:
+    return _trade_view(con, _trade_row(con, trade))
+
+
+def list_trades(con: sqlite3.Connection, run: str | None = None,
+                strategy: str | None = None) -> list[TradeView]:
+    """Every trade in the order it was recorded, voided ones included, narrowed to a run and a
+    strategy when given."""
+    views = [_trade_view(con, r) for r in store.trades(con, run)]
+    return [v for v in views if strategy in (None, v.strategy)]
