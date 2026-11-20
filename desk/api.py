@@ -396,6 +396,14 @@ def _after_entry(trade: str, d: model.Decisions, when: datetime) -> None:
                       "cannot be before that, so give a later `at`.")
 
 
+def _before_close(trade: str, d: model.Decisions, when: datetime) -> None:
+    """A move is strictly before the hand close (Ruling R11): one at the close's `at` would
+    take effect only from the bar after the exit."""
+    if d.close_at is not None and when >= d.close_at:
+        raise Refused(f"Trade {trade!r} was closed by hand at {d.close_at.isoformat()}; a move "
+                      "at or after that has no order to move, so give an earlier `at`.")
+
+
 def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float | None = None,
                target: float | None = None, at: datetime | None = None,
                now: datetime | None = None) -> TradeView:
@@ -408,8 +416,10 @@ def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float 
     _price("stop", stop, required=False)
     _price("target", target, required=False)
     with store.transaction(con):
-        _after_entry(trade, _not_void(con, trade)[0], when)
-        moved = {k: float(v) for k, v in (("stop", stop), ("target", target)) if v is not None}
+        d = _not_void(con, trade)[0]
+        _after_entry(trade, d, when)
+        _before_close(trade, d, when)
+        moved ={k: float(v) for k, v in (("stop", stop), ("target", target)) if v is not None}
         store.append(con, kind="order_moved", run_id=row["run_id"], trade_id=trade, at=_at(when),
                      recorded_at=_at(now), payload={**moved, "reason": reason})
     return _trade_view(con, row)
@@ -428,6 +438,10 @@ def close_trade(con: sqlite3.Connection, trade: str, *, reason: str, at: datetim
                           f"{d.close_reason!r}. A trade is closed once; if that close was a "
                           "mistake, void the trade and enter it again.")
         _after_entry(trade, d, when)
+        if d.moves and when <= d.moves[-1].at:  # moves are in `at` order: the last is latest
+            raise Refused(f"Trade {trade!r} has a move at {d.moves[-1].at.isoformat()}; a close "
+                          "at or before it would leave that move after the close, so give a "
+                          "later `at`.")
         store.append(con, kind="closed", run_id=row["run_id"], trade_id=trade, at=_at(when),
                      recorded_at=_at(now), payload={"reason": reason})
     return _trade_view(con, row)
@@ -494,6 +508,7 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                               "would leave it naming neither.")
             if when is not None:
                 _after_entry(trade, d, when)
+                _before_close(trade, d, when)
             corrects = move_ids[index]
         stored = {**fields, **{k: float(fields[k]) for k in ("entry", "stop", "target",
                                                              "point_value") if fields.get(k)}}
