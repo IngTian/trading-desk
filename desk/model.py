@@ -43,11 +43,22 @@ def _signed(side: str, a: float, b: float) -> float:
 
 @dataclass(frozen=True)
 class Fill:
-    """A single exit fill."""
+    """A single exit fill.
+
+    `realised_r` is this fill's share of the trade's R: the R one unit made, times the share of
+    the entered size this fill closed. A trade's fills therefore sum to the trade's R, and
+    exiting 4 of 10 shares at +2R realises +0.8R. None when the trade had no initial risk.
+
+    `stopped` is whether the fill was at or through the stop in force WHEN IT FILLED -- a long
+    filling at or below it, a short at or above it -- so a stop moved afterwards cannot
+    rewrite what happened.
+    """
     event_id: int
+    at: str
     price: float
     size: int
-    realised_r: float
+    realised_r: float | None
+    stopped: bool
 
 
 @dataclass(frozen=True)
@@ -77,64 +88,83 @@ class TradeState:
     """The derived current state of a trade."""
     trade_id: str
     # From the trade's identity row, because deriving anything directional or per-ticker from
-    # a fold needs them: no_open_trade_in_group needs the ticker, stopped_closes the side.
+    # a fold needs them: no_open_trade_in_group needs the ticker, stopped_closes the side, and
+    # a cash result the point value and currency.
     ticker: str
     side: str  # long | short
     account: str
     run_id: str | None
+    instrument: str
+    point_value: float
+    currency: str
     status: str  # planned | open | closed | passed
     entry: float | None
+    # Two stops, because they answer different questions. `initial_stop` is the stop in force
+    # when the trade was entered, and 1R -- the size of the bet -- is measured against it for
+    # the trade's whole life. `stop` is the one in force now, which is what a tracker watches.
+    # Measuring R against `stop` divided by zero on a breakeven stop and inflated every trailed one.
+    initial_stop: float | None
     stop: float | None
     target: float | None
+    size_entered: int | None
     size_open: int | None
     size_closed: int | None
     fills: tuple[Fill, ...]
     setup: str | None
     setup_labelled_at: int | None  # event_id when labelled, for hindsight guard
-    realised_r: float | None  # None if no exits yet, otherwise sum across fills
+    realised_r: float | None  # in R; None with no exits yet or no initial risk -- never 0
+    realised_cash: float | None  # signed points x size x point value, in `currency`
     planned_r: float | None
     opened_at: int | None  # event_id when entered
+    flat_at: str | None  # when an exit last took the open size to zero
     closed_at: int | None  # event_id when closed
-    taken_against: tuple[str, ...]  # invariant violations
+    # Rule results the trade was taken against, by rule name, as recorded by `entered`.
+    taken_against: tuple[str, ...]
+    # Shapes the log should never hold (an exit larger than the open size), for integrity.py.
+    violations: tuple[str, ...]
+
+
+def _per_unit_r(side: str, entry: float, price: float, initial_stop: float) -> float | None:
+    """R one unit makes exiting at `price`, against the initial risk. None with no risk."""
+    risk = abs(entry - initial_stop)
+    if risk == 0:
+        return None
+    return _signed(side, entry, price) / risk
 
 
 def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
     """Derive a trade's current state by folding its events in id order.
 
-    Skips any event named by a later correction. Detects invariant violations and records
-    them in taken_against.
+    Skips any event named by a later correction. Records shapes that should not exist in
+    `violations` rather than raising, so integrity.py can report them.
     """
-    # Get the trade metadata
     trade_row = store.trade(con, trade_id)
-
     if not trade_row:
         raise ValueError(f"Trade {trade_id} not found")
-
     side = trade_row["side"]
+    point_value = trade_row["point_value"]
 
-    # Get all events for this trade
     events = store.events(con, trade_id=trade_id)
-
-    # Build a set of corrected event IDs to skip
     corrected_ids = {e["corrects"] for e in events if e["corrects"] is not None}
 
-    # Initial state
     status = "planned"
     entry = None
+    initial_stop = None
     stop = None
     target = None
+    size_entered = None
     size_open = None
     size_closed = 0
-    fills = []
+    fills: list[Fill] = []
     setup = None
     setup_labelled_at = None
     opened_at = None
+    flat_at = None
     closed_at = None
+    taken_against: tuple[str, ...] = ()
     violations = []
 
-    # Fold the events
     for event in events:
-        # Skip corrected events
         if event["id"] in corrected_ids:
             continue
 
@@ -148,11 +178,12 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
         elif kind == "entered":
             status = "open"
             entry = payload["entry"]
-            stop = payload["stop"]
+            initial_stop = stop = payload["stop"]
             target = payload["target"]
-            size_open = payload["size"]
+            size_entered = size_open = payload["size"]
             setup = payload.get("setup")
             opened_at = event["id"]
+            taken_against = tuple(r["name"] for r in payload.get("taken_against", ()))
 
         elif kind == "stop_moved":
             stop = payload["stop"]
@@ -164,23 +195,25 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
             exit_price = payload["price"]
             exit_size = payload["size"]
 
-            # Check for over-exit
             if size_open is not None and exit_size > size_open:
                 violations.append("exit_exceeds_size")
 
-            # Update open/closed sizes
             if size_open is not None:
                 size_open -= exit_size
                 size_closed += exit_size
+                if size_open <= 0:
+                    flat_at = event["at"]
 
-            # Compute realised R for this fill
-            if entry is not None and stop is not None:
-                fill_r = _signed(side, entry, exit_price) / abs(entry - stop) * exit_size
+            if entry is not None and initial_stop is not None:
+                per_unit = _per_unit_r(side, entry, exit_price, initial_stop)
+                share = exit_size / size_entered if size_entered else None
                 fills.append(Fill(
                     event_id=event["id"],
+                    at=event["at"],
                     price=exit_price,
                     size=exit_size,
-                    realised_r=fill_r,
+                    realised_r=None if per_unit is None or share is None else per_unit * share,
+                    stopped=stop is not None and _signed(side, exit_price, stop) >= 0,
                 ))
 
         elif kind == "labelled":
@@ -191,12 +224,19 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
             status = "closed"
             closed_at = event["id"]
 
-    # Compute derived fields
-    realised_r = sum(f.realised_r for f in fills) if fills else None
+    # One unknown fill makes the trade's R unknown: a partial sum would read as the whole.
+    if not fills or any(f.realised_r is None for f in fills):
+        realised_r = None
+    else:
+        realised_r = sum(f.realised_r for f in fills)
 
-    # Planned R: target R - risk is 1R by definition
-    if entry is not None and stop is not None and target is not None:
-        planned_r = _signed(side, entry, target) / abs(entry - stop)
+    realised_cash = (
+        sum(_signed(side, entry, f.price) * f.size for f in fills) * point_value
+        if fills and entry is not None else None
+    )
+
+    if entry is not None and initial_stop is not None and target is not None:
+        planned_r = _per_unit_r(side, entry, target, initial_stop)
     else:
         planned_r = None
 
@@ -206,20 +246,28 @@ def state_of(con: sqlite3.Connection, trade_id: str) -> TradeState:
         side=side,
         account=trade_row["account"],
         run_id=trade_row["run_id"],
+        instrument=trade_row["instrument"],
+        point_value=point_value,
+        currency=trade_row["currency"],
         status=status,
         entry=entry,
+        initial_stop=initial_stop,
         stop=stop,
         target=target,
+        size_entered=size_entered,
         size_open=size_open,
         size_closed=size_closed if size_closed > 0 else None,
         fills=tuple(fills),
         setup=setup,
         setup_labelled_at=setup_labelled_at,
         realised_r=realised_r,
+        realised_cash=realised_cash,
         planned_r=planned_r,
         opened_at=opened_at,
+        flat_at=flat_at,
         closed_at=closed_at,
-        taken_against=tuple(violations),
+        taken_against=taken_against,
+        violations=tuple(violations),
     )
 
 
@@ -235,23 +283,25 @@ def stopped_closes(
     account: str | None = None,
     run_id: str | None = None,
 ) -> dict[str, dt.datetime]:
-    """Ticker -> when the most recent trade stopped out on that ticker closed.
+    """Ticker -> when the most recent trade stopped out on that ticker finished.
 
     Derived state, so it folds the log here rather than in a consumer: it feeds
     `checks.Context.stopped_closes`, which `cooldown_after_stop` measures against.
 
-    WHAT COUNTS AS STOPPED: a fill at or beyond the trade's stop on the losing side of it,
-    `_signed(side, price, stop) >= 0` -- a long filling at or below its stop, a short at or
-    above it. The stop is the one the fold ends with, which is the stop as it stood when the
-    trade finished.
+    WHAT COUNTS AS STOPPED: a trade with a fill at or through the stop in force when that fill
+    happened (`Fill.stopped`) -- a long filling at or below its stop, a short at or above it.
+    Judged at fill time, so a stop moved after the exit cannot erase a stop-out. An exit at a
+    trailed stop counts too, even in profit: that is the owner's call to revisit, not this
+    function's.
 
-    ONLY CLOSED TRADES COUNT. The rule is "time since the last stopped trade's close", so a
-    trade that is still open cannot be one -- and a partial fill through the stop on a trade
-    still holding shares is not a stop-out, it is a trade in progress.
+    ONLY FINISHED TRADES COUNT. The rule is "time since the last stopped trade's close", so a
+    partial fill through the stop on a trade still holding shares is a trade in progress.
+    Finished means flat -- an exit took the open size to zero -- or, failing that, `closed`.
 
-    WHICH TIME: the `closed` event's, which is what "close" means here. A stopped trade nobody
-    has closed yet therefore starts no cooldown; the fix is to close it, and the integrity
-    checker is where an unclosed empty trade belongs.
+    WHICH TIME: the moment the trade went flat. Exiting and closing are separate acts, and the
+    cooldown is about when the owner was stopped out, not when they did the bookkeeping. Before
+    this, a stop-out nobody had closed started no cooldown at all. A trade closed while still
+    holding size (which integrity reports) dates from its `closed` event instead.
 
     An empty dict means the log was read and holds no stop. That is a different answer from
     "not supplied", which the caller says by passing None, and the two must not be confused:
@@ -262,26 +312,61 @@ def stopped_closes(
     so run 3's cooldowns count only run 3's stops.
     """
     latest: dict[str, dt.datetime] = {}
-    for trade_id in store.trade_ids(con):
-        state = state_of(con, trade_id)
-        # Filter by account and run_id
-        if account is not None and state.account != account:
+    for state in _states(con, account=account, run_id=run_id):
+        if not any(f.stopped for f in state.fills):
             continue
-        if run_id is not None and state.run_id != run_id:
-            continue
-        if state.status != "closed" or state.stop is None or not state.fills:
-            continue
-        stopped = [f for f in state.fills if _signed(state.side, f.price, state.stop) >= 0]
-        if not stopped:
-            continue
-        times = {e["id"]: e["at"] for e in store.events(con, trade_id=trade_id)}
-        at = times.get(state.closed_at)
-        if at is None:  # a closed status always carries one; a corrupt log might not
+        at = state.flat_at
+        if at is None and state.status == "closed":
+            times = {e["id"]: e["at"] for e in store.events(con, trade_id=state.trade_id)}
+            at = times.get(state.closed_at)
+        if at is None:  # still holding: a trade in progress
             continue
         moment = _moment(at)
         if state.ticker not in latest or moment > latest[state.ticker]:
             latest[state.ticker] = moment
     return latest
+
+
+def realised_r_on(
+    con: sqlite3.Connection,
+    day: dt.date,
+    *,
+    account: str | None = None,
+    run_id: str | None = None,
+) -> float | None:
+    """The R realised on one local calendar day, for `daily_loss_limit`.
+
+    Each exit fill realises R on its share on the day it filled, so a partial exit counts on
+    its own day and a trade still open contributes what it has already realised. "Day" is the
+    owner's local date, the same one trade ids use.
+
+    0.0 when the log was read and holds no fill that day: that is a fact about the log, unlike
+    `sum([])` over data that was never fetched. None when any of that day's fills has no R (a
+    trade entered with no initial risk) -- one unknown makes the total unknown, never smaller.
+    """
+    total = 0.0
+    for state in _states(con, account=account, run_id=run_id):
+        for f in state.fills:
+            if _moment(f.at).astimezone().date() != day:
+                continue
+            if f.realised_r is None:
+                return None
+            total += f.realised_r
+    return total
+
+
+def _states(
+    con: sqlite3.Connection,
+    *,
+    account: str | None = None,
+    run_id: str | None = None,
+) -> list[TradeState]:
+    """Every trade's state, narrowed to an account and a run when they are given."""
+    return [
+        state for state in (state_of(con, trade_id) for trade_id in store.trade_ids(con))
+        if (account is None or state.account == account)
+        and (run_id is None or state.run_id == run_id)
+    ]
 
 
 def open_trades(
@@ -296,13 +381,4 @@ def open_trades(
     account's trades. When run_id is also given, narrows to that run: a run is a bounded block
     of trading, so run 3's max_open_trades counts only run 3's trades.
     """
-    # Get all trade IDs
-    trade_ids = store.trade_ids(con)
-
-    # Compute state for each and filter to open ones
-    return [
-        state for state in (state_of(con, trade_id) for trade_id in trade_ids)
-        if state.status == "open"
-        and (account is None or state.account == account)
-        and (run_id is None or state.run_id == run_id)
-    ]
+    return [s for s in _states(con, account=account, run_id=run_id) if s.status == "open"]

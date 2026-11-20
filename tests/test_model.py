@@ -165,11 +165,12 @@ def test_partial_exits_reduce_the_open_size_and_realise_r_on_their_share(con):
     assert state.size_open == 0, "All shares should be closed"
     assert state.size_closed == 5, "All shares should be accounted for"
     assert len(state.fills) == 2, "There should be two fill records"
-    # Realised R calculation: (exit - entry) / (entry - stop) * shares
-    # First exit: (105 - 100) / (100 - 95) * 2 = 5/5 * 2 = 2.0 R
-    # Second exit: (108 - 100) / (100 - 95) * 3 = 8/5 * 3 = 4.8 R
-    # Total: 6.8 R
-    assert state.realised_r == pytest.approx(6.8), "Realised R should sum across fills"
+    # Each fill realises R on its share of the 5 entered: (exit - entry) / (entry - stop) x share.
+    # First exit: (105 - 100) / (100 - 95) x 2/5 = 0.4 R
+    # Second exit: (108 - 100) / (100 - 95) x 3/5 = 0.96 R
+    # Total: 1.36 R. This test used to pin 6.8, which was R x shares: the same trade on 50
+    # shares would have read 68R.
+    assert state.realised_r == pytest.approx(1.36), "Realised R should sum across fills"
 
 
 def test_a_corrected_event_is_superseded_by_the_one_that_corrects_it(con):
@@ -270,7 +271,7 @@ def test_an_exit_cannot_exceed_the_open_size(con):
 
     state = model.state_of(con, invented.TEST_TRADE_ID)
     # The state should track this as an invariant violation
-    assert "exit_exceeds_size" in state.taken_against, \
+    assert "exit_exceeds_size" in state.violations, \
         "Over-exit should be flagged as an invariant violation"
 
 
@@ -401,20 +402,23 @@ def test_realised_r_respects_side_for_short_positions(con):
     )
 
     state = model.state_of(con, invented.TEST_TRADE_ID)
-    # For short: (entry - exit) / abs(entry - stop) * shares
-    # (100 - 90) / abs(100 - 105) * 10 = 10 / 5 * 10 = 20.0 R
-    assert state.realised_r == pytest.approx(20.0), \
+    # For short: (entry - exit) / abs(entry - stop), on all 10 of the 10 shares entered
+    # (100 - 90) / abs(100 - 105) = 2.0 R
+    assert state.realised_r == pytest.approx(2.0), \
         "A profitable short should have positive R"
 
 
-def test_a_stop_fill_dates_the_cooldown_from_the_trades_close(con):
-    """A long filling at or below its stop is a stop, and the cooldown runs from the close."""
+def test_a_stop_fill_dates_the_cooldown_from_when_the_trade_went_flat(con):
+    """A long filling at or below its stop is a stop, and the cooldown runs from that fill.
+
+    Not from the `closed` event ten minutes later: that is bookkeeping, and dating the cooldown
+    from it meant a stop-out nobody had closed started no cooldown at all.
+    """
     _trade(con, "trade-a")
     _exit(con, "trade-a", 95.0, STOPPED_AT)
-    closed_at = STOPPED_AT + dt.timedelta(minutes=10)
-    _close(con, "trade-a", closed_at)
+    _close(con, "trade-a", STOPPED_AT + dt.timedelta(minutes=10))
 
-    assert model.stopped_closes(con) == {invented.TICKERS[0]: closed_at}
+    assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}
 
 
 def test_a_trade_still_open_through_its_stop_is_not_a_stopped_close(con):
@@ -707,3 +711,136 @@ def test_stopped_closes_filters_by_account(con):
     assert len(paper_stopped) == 1
     assert invented.TICKERS[1] in paper_stopped
     assert invented.TICKERS[0] not in paper_stopped
+
+
+# ---------------------------------------------------------------------------------------------
+# R is measured against the INITIAL risk, the stop in force when the trade was entered.
+# A stop moved later -- trailed, or to breakeven -- changes where the trade exits, never the size
+# of the bet it started as. Measuring against the current stop crashed on a breakeven stop
+# (a zero distance) and inflated R on every trailed one.
+
+
+def _move_stop(con, trade_id, stop):
+    store.append(con, kind="stop_moved", actor="owner", source="cli", trade_id=trade_id,
+                 payload={"stop": stop})
+
+
+def test_a_stop_moved_to_breakeven_does_not_break_the_fold(con):
+    _trade(con, "trade-a")  # long 10 @ 100, stop 95, target 110
+    _move_stop(con, "trade-a", 100.0)
+
+    state = model.state_of(con, "trade-a")
+    assert state.stop == 100.0, "the current stop is the moved one"
+    assert state.initial_stop == 95.0, "the stop at entry is kept"
+    assert state.planned_r == pytest.approx(2.0), "10 of reward over 5 of initial risk"
+
+    _exit(con, "trade-a", 100.0, STOPPED_AT)
+    state = model.state_of(con, "trade-a")
+    assert state.realised_r == pytest.approx(0.0)
+    # And every fold over the whole log still works, for this account and others.
+    assert model.open_trades(con, account="real") == []
+    model.open_trades(con)
+    model.stopped_closes(con)
+
+
+def test_a_trailed_stop_does_not_inflate_r(con):
+    _trade(con, "trade-a")  # long 10 @ 100, stop 95
+    _move_stop(con, "trade-a", 102.0)
+    _exit(con, "trade-a", 102.0, STOPPED_AT)
+
+    state = model.state_of(con, "trade-a")
+    assert state.planned_r == pytest.approx(2.0), "against the 5-point risk at entry, not 2"
+    assert state.realised_r == pytest.approx(0.4), "2 points won over 5 risked"
+
+
+def test_realised_r_is_in_r_not_r_times_size(con):
+    _trade(con, "trade-a")  # long 10 @ 100, stop 95: 1R is 5 points on 10 shares
+    _exit(con, "trade-a", 110.0, STOPPED_AT, size=4)
+    _exit(con, "trade-a", 95.0, STOPPED_AT, size=6)
+
+    state = model.state_of(con, "trade-a")
+    # 4 of 10 shares realise +2R on their share (+0.8R), 6 of 10 realise -1R (-0.6R).
+    assert [f.realised_r for f in state.fills] == [pytest.approx(0.8), pytest.approx(-0.6)]
+    assert state.realised_r == pytest.approx(0.2)
+
+
+def test_an_entry_with_no_risk_withholds_r_instead_of_dividing(con):
+    """The CLI refuses stop == entry, but the fold must survive one written another way."""
+    _trade(con, "trade-a", stop=100.0)
+    _exit(con, "trade-a", 104.0, STOPPED_AT)
+
+    state = model.state_of(con, "trade-a")
+    assert state.planned_r is None
+    assert state.realised_r is None, "no initial risk means no R, which is not 0R"
+    assert state.realised_cash == pytest.approx(40.0), "the cash result does not need R"
+
+
+def test_realised_cash_uses_the_point_value(con):
+    store.add_trade(con, trade_id="fut-a", account="replay", run_id=None,
+                    ticker="GC1!", instrument="future",
+                    point_value=invented.FUTURE_POINT_VALUE, currency="USD", side="long")
+    store.append(con, kind="entered", actor="owner", source="cli", trade_id="fut-a",
+                 payload={"entry": 2000.0, "stop": 1998.5, "target": 2003.0, "size": 1})
+    store.append(con, kind="exited", actor="owner", source="cli", trade_id="fut-a",
+                 payload={"price": 2004.0, "size": 1})
+
+    state = model.state_of(con, "fut-a")
+    assert state.realised_cash == pytest.approx(400.0), "4 points x 100 per point x 1 contract"
+    assert state.currency == "USD"
+    assert state.realised_r == pytest.approx(4.0 / 1.5)
+
+
+def test_a_short_realises_cash_and_r_on_the_right_side(con):
+    _trade(con, "trade-a", side="short", stop=105.0)  # short 10 @ 100, target 90
+    _exit(con, "trade-a", 90.0, STOPPED_AT)
+
+    state = model.state_of(con, "trade-a")
+    assert state.realised_r == pytest.approx(2.0)
+    assert state.realised_cash == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------------------------
+# The cooldown starts when the trade went flat through its stop, without waiting for `closed`.
+
+
+def test_a_stop_out_starts_the_cooldown_without_a_closed_event(con):
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 95.0, STOPPED_AT)
+
+    assert model.state_of(con, "trade-a").status == "open", "flat, not yet closed"
+    assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}
+
+
+def test_a_stop_moved_after_the_exit_does_not_erase_the_stop_out(con):
+    """The fill is judged against the stop in force when it filled, not the last stop."""
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 95.0, STOPPED_AT)
+    _move_stop(con, "trade-a", 90.0)
+
+    assert model.stopped_closes(con) == {invented.TICKERS[0]: STOPPED_AT}
+
+
+# ---------------------------------------------------------------------------------------------
+# Today's realised R, for daily_loss_limit. Each exit fill realises R on its share on the day
+# it filled; an unknown R anywhere makes the day's total unknown, never smaller.
+
+
+def test_realised_r_on_a_day_sums_that_days_fills_in_scope(con):
+    day = STOPPED_AT.astimezone().date()
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 95.0, STOPPED_AT)                          # -1R that day
+    _trade(con, "trade-b", ticker=invented.TICKERS[1])
+    _exit(con, "trade-b", 110.0, STOPPED_AT - dt.timedelta(days=3))  # +2R, another day
+
+    assert model.realised_r_on(con, day) == pytest.approx(-1.0)
+    assert model.realised_r_on(con, day, account="real") == 0.0, "the log was read: nothing"
+
+
+def test_realised_r_on_a_day_is_withheld_when_one_fill_has_no_r(con):
+    day = STOPPED_AT.astimezone().date()
+    _trade(con, "trade-a")
+    _exit(con, "trade-a", 95.0, STOPPED_AT)
+    _trade(con, "trade-b", stop=100.0, ticker=invented.TICKERS[1])  # no initial risk
+    _exit(con, "trade-b", 99.0, STOPPED_AT)
+
+    assert model.realised_r_on(con, day) is None

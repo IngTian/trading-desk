@@ -37,7 +37,7 @@ def _exit_exceeds_open_size(con: sqlite3.Connection) -> list[str]:
     failures = []
     for trade_id in store.trade_ids(con):
         state = model.state_of(con, trade_id)
-        if "exit_exceeds_size" in state.taken_against:
+        if "exit_exceeds_size" in state.violations:
             # The fold detected an over-exit but doesn't preserve which specific exit
             # or by how much, so we report that it happened without claiming exact figures
             failures.append(f"trade {trade_id}: an exit exceeded the open position")
