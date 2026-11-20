@@ -15,9 +15,8 @@ import zipfile
 
 # THE SCHEMA IS THE TOOL: without it a fresh install cannot create desk.db. It once lived in
 # book/, which was not a package, so an installed copy resolved to a path that did not exist.
-# THE EXAMPLE RULES are what a new user copies first; `check` points at them when rules.md is
-# missing, so a wheel without them sends the user to a file that is not there.
-REQUIRED = ("desk/schema.sql", "desk/rules.example.md")
+# THE EXAMPLE STRATEGY is what a new user copies first (config.example_strategy()).
+REQUIRED = ("desk/schema.sql", "desk/strategy.example.md")
 SCRIPTS = {"trading-desk": "desk.cli:main"}
 
 

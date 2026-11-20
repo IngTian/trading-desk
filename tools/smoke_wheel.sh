@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Install a built wheel into a clean venv OUTSIDE the checkout and use it the way a new user
-# would: copy the shipped example rules, check one trade, run the integrity checker, and
+# would: save the shipped example strategy, record one trade through the API, run the integrity
+# checker, and
 # assert the trade was recorded. Run by CI and by the release, before publishing.
 #
 #     bash tools/smoke_wheel.sh <dir holding the .whl>
@@ -27,24 +28,28 @@ export TRADING_DESK_HOME="$work/home"
 mkdir -p "$TRADING_DESK_HOME"
 
 "$bin/trading-desk" --help > /dev/null
-cp "$("$bin/python" -c 'from desk import config; print(config.example_rules())')" \
-   "$TRADING_DESK_HOME/rules.md"
-"$bin/trading-desk" check --ticker ACME --side long --currency USD \
-    --entry 100 --stop 95 --target 110 --size 10 --account paper
-"$bin/trading-desk" integrity
-
 "$bin/python" - "$work" <<'PY'
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import desk
-from desk import store
+from desk import api, config, store
 
 where = Path(desk.__file__).resolve()
 assert str(where).startswith(sys.argv[1]), f"desk imported from {where}, not the clean venv"
-con = store.open(read_only=True)
-ids = store.trade_ids(con)
-kinds = [e["kind"] for e in store.events(con)]
-assert len(ids) == 1 and kinds == ["checked"], (ids, kinds)
-print(f"installed wheel recorded {ids[0]} and passed its integrity check")
+now = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
+store.create(config.db_path())
+with store.open() as con:
+    saved = api.save_strategy(con, "example", config.example_strategy().read_text(), now=now)
+    run = api.start_run(con, "example", mode="live", at=now, now=now)
+    # Invented figures: a market buy of 10 shares of a made-up ticker.
+    t = api.trade(con, run.id, ticker="ACME", side="long", entry_type="market", entry=100.0,
+                  stop=98.5, target=103.0, size=10, currency="USD", reasons="Smoke test.",
+                  at=now, now=now)
+    assert api.get_trade(con, t.id).id == t.id
+    kinds = [e["kind"] for e in store.events(con, trade_id=t.id)]
+    assert len(store.trades(con)) == 1 and kinds == ["entered"], kinds
+print(f"installed wheel recorded {t.id} through the API")
 PY
+"$bin/trading-desk" integrity
