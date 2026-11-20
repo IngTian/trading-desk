@@ -85,3 +85,12 @@ def test_replay_stop_without_at_is_refused(con):
 def test_unknown_run_is_refused(con):
     with pytest.raises(api.Refused, match="no run"):
         api.stop_run(con, "ghost-r1", now=NOW)
+
+
+def test_a_naive_datetime_is_refused_for_start_and_stop(con):
+    naive = datetime(2026, 3, 2, 12, 0)
+    with pytest.raises(api.Refused, match="timezone"):
+        api.start_run(con, "dip-buyer", mode="replay", at=naive, now=NOW)
+    api.start_run(con, "dip-buyer", mode="live", now=NOW)
+    with pytest.raises(api.Refused, match="timezone"):
+        api.stop_run(con, "dip-buyer-r1", at=naive, now=LATER)

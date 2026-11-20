@@ -127,3 +127,9 @@ def test_a_writer_holding_the_lock_blocks_a_save(con, tmp_path):
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         api.save_strategy(con, "dip-buyer", make(), now=NOW)
     other.close()
+
+
+def test_a_naive_now_is_refused_on_save(con):
+    with pytest.raises(api.Refused, match="timezone"):
+        api.save_strategy(con, "dip-buyer", make(), now=datetime(2026, 3, 2))
+    assert api.list_strategies(con) == []

@@ -24,8 +24,19 @@ _BARS = re.compile(r"(\d+) bars after exit")
 _AFTER = " after exit"
 
 
+def _aware(when: datetime | None, name: str = "now") -> datetime:
+    """`when` (default: the wall clock) as an aware datetime; a naive one is refused, since
+    its zone would be guessed."""
+    if when is None:
+        return datetime.now(UTC)
+    if when.tzinfo is None:
+        raise Refused(f"`{name}` has no timezone; give an aware time, e.g. "
+                      "datetime(2026, 3, 2, 14, 30, tzinfo=timezone.utc).")
+    return when
+
+
 def _at(now: datetime | None) -> str:
-    return (now or datetime.now(UTC)).astimezone(UTC).isoformat()
+    return _aware(now).astimezone(UTC).isoformat()
 
 
 @dataclass(frozen=True)
@@ -160,12 +171,13 @@ def _run_view(con, row: sqlite3.Row) -> RunView:
 def _decision_time(mode: str, at: datetime | None, now: datetime | None, what: str) -> datetime:
     """A live decision defaults to `now`; a replay one never defaults, or it would be dated
     after every bar in the history being replayed."""
+    _aware(now)
     if at is not None:
-        return at
+        return _aware(at, "at")
     if mode == "replay":
         raise Refused(f"A replay run needs `at` to {what}: give the moment in the replayed "
                       "history, not the wall clock.")
-    return now or datetime.now(UTC)
+    return _aware(now)
 
 
 def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
