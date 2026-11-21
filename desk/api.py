@@ -458,6 +458,8 @@ def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int, *, 
         # it is unknown from there; checks._unknown's `<` is strict, hence the 1 µs.
         jt, bar = o.judged_through, timedelta(minutes=minutes)
         unknown_from = jt + bar - (jt - judge._EPOCH) % bar - timedelta(microseconds=1)
+        if 60 % minutes:   # 90m: Yahoo's session-anchored bars may sit off the epoch's grid
+            unknown_from = jt
     return checks.Other(id=row["id"], ticker=row["ticker"], entered=d.entry.at, seq=seq,
                         ended=o.exited_at or o.cancelled_at, exited=o.status == "exited",
                         r=o.r, cash=o.cash, unknown_from=unknown_from, closed_at=closed_at,

@@ -428,6 +428,25 @@ def test_a_futures_open_report_inside_an_undelivered_bar_is_unknown_from_that_ba
     assert (out.exited_at, out.r) == (T15 + timedelta(minutes=15), -1.0)
 
 
+def test_a_90m_futures_bar_off_the_epochs_grid_is_unknown_from_judged_through(con, fake_yahoo):
+    # Yahoo's 90m bars here open at 11:00, 12:30, 14:00: the epoch's grid is 10:30, 12:00, 13:30
+    def at(h, m=0):
+        return datetime(2026, 3, 2, h, m, tzinfo=UTC)
+    quiet = [replace(QUIET[0], open_time=t) for t in (at(11), at(12, 30))]
+    fake_yahoo(quiet, market_time=at(14))
+    live, _ = version(con, LAGGED.replace('"15m"', '"90m"'))
+    a = enter(con, live, **{**GOLD, "at": at(11), "now": at(14, 10)})
+    held = api.report(con, a.id, state="open", at=at(15, 10), reason="Invented.", now=at(15, 10))
+    assert held.outcome.judged_through == at(15, 10)   # inside the 14:00 bar, not yet delivered
+    cv = enter(con, live, at=at(15, 40), now=at(15, 40), check_only=True)
+    for r in (result(cv, n) for n in RECORD):
+        assert r.ok is None and a.id in r.says, r
+    # the feed catches up: the 14:00 bar stops A out at its close, 15:30, before 15:40
+    fake_yahoo(quiet + [replace(STOPPED, open_time=at(14))])
+    out = api.get_trade(con, a.id, now=at(16)).outcome
+    assert (out.exited_at, out.r) == (at(15, 30), -1.0)
+
+
 @pytest.mark.parametrize("a, current, ok", [
     (GOLD, True, [True, False, False]),   # the feed current: out at 14:45 at -1R
     ({}, False, [False, True, True])])    # a stock's empty stretch reads as the market shut
