@@ -45,8 +45,9 @@ _HINT = ('; from 0.7 the rules block is TOML: write timeframes = ["1h", "15m"], 
 
 @dataclass(frozen=True)
 class Rules:
-    """The rules the checks read: name -> value as written."""
-    numbers: dict[str, str]
+    """The rules the checks read: a version's validated table, and its timeframes."""
+    values: dict                 # the version's TOML table, timeframes excluded
+    timeframes: tuple[str, ...]  # finest first
 
 
 @dataclass(frozen=True)

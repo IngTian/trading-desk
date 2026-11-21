@@ -69,8 +69,7 @@ def _signed(side: str, a: float, b: float) -> float:
 
 @dataclass(frozen=True)
 class Plan:
-    """The input to every check: one planned trade, as the checks read it. Nothing in the package
-    builds one yet; the release that wires the checks into trade() builds it from an entry."""
+    """The input to every check: one planned trade, as the checks read it."""
     ticker: str
     side: str
     instrument: str
@@ -82,12 +81,7 @@ class Plan:
     # rather than reading a breach into a missing input.
     stop: float | None
     target: float | None
-    size: int | None
-    horizon: str | None
-    setup: str | None
-    thesis: str | None
-    account: str   # read by no check: rules belong to a strategy now, not to an account
-    run_id: str | None
+    size: int
 
 
 @dataclass(frozen=True)
