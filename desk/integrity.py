@@ -11,10 +11,12 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import sqlite3
 from collections.abc import Callable
+from dataclasses import fields
 
-from desk import model, store, strategy
+from desk import checks, model, rules, store, strategy
 
 
 def _trade_entered_once(con: sqlite3.Connection) -> list[str]:
@@ -210,6 +212,71 @@ def _run_currency(con: sqlite3.Connection) -> list[str]:
     return failures
 
 
+def _finite_number(v) -> bool:
+    return isinstance(v, int | float) and not isinstance(v, bool) and rules._finite(v)
+
+
+# What each of checks.Result's fields holds, as trade() writes it.
+_RESULT = {"name": (lambda v: isinstance(v, str), "text"),
+           "ok": (lambda v: v is None or isinstance(v, bool), "true, false or null"),
+           "figure": (lambda v: v is None or _finite_number(v), "a finite number or null"),
+           "limit": (lambda v: isinstance(v, str), "text"),
+           "says": (lambda v: isinstance(v, str), "text"),
+           "unit": (lambda v: v is None or isinstance(v, str), "text or null"),
+           "computed": (lambda v: isinstance(v, dict) and all(map(_finite_number, v.values())),
+                        "a mapping of finite numbers")}
+
+
+def _shown_problems(p: dict) -> list[str]:
+    """What is wrong with an entered payload's `checks`, `market` and `checklist`, each read only
+    when present."""
+    names = [f.name for f in fields(checks.Result)]
+    out = []
+    if "checks" in p:
+        c = p["checks"]
+        if not isinstance(c, list):
+            out.append(f"checks {c!r} is not a list of results")
+        for i, r in enumerate(c if isinstance(c, list) else ()):
+            if not isinstance(r, dict) or set(r) != set(names):
+                out.append(f"checks[{i}] {r!r} does not hold exactly {', '.join(names)}")
+            else:
+                out += [f"checks[{i}] {k} {r[k]!r} is not {what}"
+                        for k, (fits, what) in _RESULT.items() if not fits(r[k])]
+    if "market" in p:
+        m = p["market"]
+        if not isinstance(m, dict):
+            out.append(f"market {m!r} is not a mapping of market keys to numbers")
+        else:
+            out += [f"market[{k!r}] {v!r} is not a finite number"
+                    for k, v in m.items() if not _finite_number(v)]
+    if "checklist" in p:
+        c = p["checklist"]
+        if not isinstance(c, list):
+            out.append(f"checklist {c!r} is not a list of answers")
+        out += [f"checklist[{i}] {a!r} is not {{item, verdict pass or fail, reason}}, as text"
+                for i, a in enumerate(c if isinstance(c, list) else ())
+                if not (isinstance(a, dict) and set(a) == {"item", "verdict", "reason"}
+                        and isinstance(a["item"], str) and a["verdict"] in ("pass", "fail")
+                        and isinstance(a["reason"], str))]
+    return out
+
+
+def _entered_checks(con: sqlite3.Connection) -> list[str]:
+    """What an entry kept of what it showed: `checks`, a list of results each with exactly
+    checks.Result's fields and their types; `market`, finite numbers by key; `checklist`, a list
+    of {item, verdict pass or fail, reason}."""
+    failures = []
+    for e in store.events(con):
+        if e["kind"] != "entered":
+            continue
+        try:
+            lines = _shown_problems(json.loads(e["payload"]))
+        except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
+            lines = [f"payload could not be read: {type(exc).__name__}: {exc}"]
+        failures += [f"event {e['id']} (trade {e['trade_id']}): {ln}" for ln in lines]
+    return failures
+
+
 INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "event_times": _event_times,
     "trade_entered_once": _trade_entered_once,
@@ -221,6 +288,7 @@ INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "one_report": _one_report,
     "version_text_hash": _version_text_hash,
     "run_currency": _run_currency,
+    "entered_checks": _entered_checks,
 }
 
 

@@ -13,18 +13,20 @@ import re
 import sqlite3
 from bisect import bisect_left, bisect_right
 from contextlib import closing
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from desk import bars, config, judge, model, store, strategy, yahoo
+from desk import bars, checks, config, indicators, judge, model, store, strategy, yahoo
 from desk.errors import Refused
+from desk.rules import Indicator, Rules, _finite, market_keys
+from desk.rules import indicators as indicator_checks  # `indicators` is the formulas' module
 from desk.strategy import minutes  # start_run's `strategy` parameter shadows the module
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
-           "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade", "move_order",
-           "close_trade", "report", "correct_trade", "void_trade", "get_trade", "list_trades",
-           "TradeBars", "trade_bars"]
+           "RunView", "start_run", "stop_run", "list_runs", "TradeView", "CheckView", "trade",
+           "move_order", "close_trade", "report", "correct_trade", "void_trade", "get_trade",
+           "list_trades", "TradeBars", "trade_bars"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
 _YAHOO_HAS = "1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w"   # yahoo.INTERVALS, as a refusal names them
@@ -250,13 +252,48 @@ class TradeView:
     outcome: judge.Outcome
     judged: judge.Outcome | None   # live: the bars' answer to the decisions alone; replay: None
     differs: tuple[str, ...]       # the fields where `outcome` and `judged` differ
+    # The run's version's rules as shown at entry; None only for stored results that do not read
+    # (integrity reports them).
+    checks_shown: tuple[checks.Result, ...] | None = None
+    # One {"item", "verdict", "reason"} per checklist item of the version, in its order; an
+    # unanswered one reads verdict "not answered", reason None. Never scored.
+    checklist: tuple[dict, ...] = ()
+    checks_now: tuple[checks.Result, ...] | None = None
+    checks_differ: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CheckView:
+    """What trade(check_only=True) returns: the results an entry would be shown, written nowhere."""
+    run: str
+    at: datetime
+    ticker: str
+    side: str
+    instrument: str
+    point_value: float
+    currency: str
+    checks: tuple[checks.Result, ...]
+    checklist: tuple[dict, ...]
+
+
+def _version(con, run_row: sqlite3.Row) -> tuple[Rules, tuple[str, ...]]:
+    """The run's version's rules and checklist items: never the strategy's latest."""
+    v = next(r for r in store.versions(con, run_row["strategy_id"])
+             if r["version"] == run_row["version"])
+    return (Rules(json.loads(v["rules"]), tuple(json.loads(v["timeframes"]))),
+            tuple(json.loads(v["checklist"])))
 
 
 def _timeframes(con, run_row: sqlite3.Row) -> dict[int, str]:
     """The run's version's timeframes, minutes -> name, finest first."""
-    v = next(r for r in store.versions(con, run_row["strategy_id"])
-             if r["version"] == run_row["version"])
-    return {minutes(n): n for n in json.loads(v["timeframes"])}
+    return {minutes(n): n for n in _version(con, run_row)[0].timeframes}
+
+
+def _r6(timeframe: str) -> str:
+    """Ruling R6: why a future's daily or weekly Yahoo bar is not read."""
+    return (f"Yahoo stamps a future's {timeframe} bar at midnight exchange time, after its session "
+            "opened the evening before, so an entry made that evening would be judged against "
+            "prices from before it")
 
 
 def _not_judged(row: sqlite3.Row, d: model.Decisions, note: str, *, live: bool
@@ -295,10 +332,8 @@ def _outcomes(con, row: sqlite3.Row, d: model.Decisions, now: datetime, *, fetch
         future = row["instrument"] == "future"
         if future and m in (1440, 10080):  # ruling R6; drop once a real daily future bar is checked
             return _not_judged(row, d, (
-                f"not judged: Yahoo stamps a future's {name} bar at midnight exchange time, after "
-                "its session opened the evening before, so an entry made that evening would be "
-                "judged against prices from before it; the outcome is what you report: the exit, "
-                "or the order's cancellation"), live=True)
+                f"not judged: {_r6(name)}; the outcome is what you report: the exit, or the "
+                "order's cancellation"), live=True)
         symbol = yahoo.ticker_symbol(row["ticker"], row["instrument"], d.currency)
         start = d.entry.at - timedelta(minutes=m)
         with closing(bars.open()) as bcon:
@@ -328,11 +363,17 @@ def _trade_view(con, row: sqlite3.Row, now: datetime) -> TradeView:
     run = store.run(con, row["run_id"])
     d = model.decisions_of(con, row["id"])
     o, j = _outcomes(con, row, d, now)
+    try:
+        shown = None if d.checks is None else tuple(checks.Result(**c) for c in d.checks)
+    except (TypeError, KeyError):   # stored results that do not read: integrity reports them
+        shown = None
     return TradeView(id=row["id"], run=row["run_id"], strategy=run["strategy_id"],
                      version=run["version"], ticker=row["ticker"], side=row["side"],
                      instrument=row["instrument"], point_value=d.point_value,
                      currency=d.currency, decisions=d, outcome=o, judged=j,
-                     differs=judge.differs(o, j, next(iter(_timeframes(con, run)))))
+                     differs=judge.differs(o, j, next(iter(_timeframes(con, run)))),
+                     checks_shown=shown, checklist=_checklist_view(_version(con, run)[1],
+                                                                   d.checklist))
 
 
 def _within_run(view: RunView, when: datetime) -> None:
@@ -386,13 +427,212 @@ def _screenshot(text: str) -> tuple[dict, bytes | None, str | None]:
     return {"file": stored, "name": path.name}, data, stored
 
 
+# ------------------------------------------------- the checks, as of a trade's `at` (§7) ---
+def _settles(o: judge.Outcome) -> str:
+    """The report that settles a trade whose state is unknown."""
+    if o.fill is None:
+        return ("report its fill or its cancellation (report(trade, state='filled' | "
+                "'cancelled', at=…))")
+    return ("report its exit, or that it is still open (report(trade, state='exited' | 'open', "
+            "at=…))")
+
+
+def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int) -> checks.Other:
+    """Another trade of the run as the checks read it, from its effective outcome. An exit always
+    carries its cash (judge._money gives one), which the record rules add up."""
+    unknown_from = closed_at = None
+    settles = _settles(o)
+    if o.status == "not judged":   # a reported open position is known open up to its report
+        unknown_from = o.missing[0] if d.held is None else max(o.missing[0], d.held.at)
+        closed_at = d.close_at
+    elif o.status == "closing":    # a hand close whose last bar is still forming
+        unknown_from = closed_at = d.close_at
+        settles = ("report its exit with the broker's price (report(trade, state='exited', "
+                   "price=…, at=…))")
+    return checks.Other(id=row["id"], ticker=row["ticker"], entered=d.entry.at, seq=seq,
+                        ended=o.exited_at or o.cancelled_at, exited=o.status == "exited",
+                        r=o.r, cash=o.cash, unknown_from=unknown_from, closed_at=closed_at,
+                        settles=settles)
+
+
+def _others(con, run_row: sqlite3.Row, now: datetime, *, fetch: bool,
+            skip: str | None = None) -> tuple[checks.Other, ...]:
+    """The run's non-void trades but `skip`, each from its effective outcome now (the checks read
+    them as of `at` from those dates). `seq` is the index in the unfiltered store.trades, so
+    leaving voids out never renumbers one."""
+    out = []
+    for seq, t in enumerate(store.trades(con, run_row["id"])):
+        if t["id"] == skip:
+            continue
+        d = model.decisions_of(con, t["id"])
+        if not d.voided:
+            out.append(_other(t, d, _outcomes(con, t, d, now, fetch=fetch)[0], seq))
+    return tuple(out)
+
+
+def _span(w: int, m: int) -> timedelta:
+    """How far back `w` bars of `m` minutes reach, nights, weekends and holidays included."""
+    # shortcut: a calendar estimate of W bars; widen it if a strategy reads unknown for want of
+    # warm-up
+    if m < 1440:
+        return timedelta(minutes=w * m * 6, days=4)
+    return timedelta(days=w * 1.6 + 10) if m == 1440 else timedelta(weeks=w * 1.1 + 3)
+
+
+def _value(i: Indicator, used: list[judge.Bar]) -> float | None:
+    """Indicator check `i`'s value on the bars `used`, by Pine's formula."""
+    closes, s = [b.close for b in used], i.settings
+    if i.rule == "stop_atr":
+        return indicators.atr(used, s["length"])
+    if i.rule == "macd":
+        out = indicators.macd(closes, s["fast"], s["slow"], s["signal"])
+        return None if out is None else out[("line", "signal", "histogram").index(s["output"])]
+    return {"rsi": indicators.rsi, "ema": indicators.ema, "sma": indicators.sma}[i.rule](
+        closes, s["length"])
+
+
+def _computed(bcon, symbol: str, instrument: str, tf: str, group: list[Indicator], at: datetime,
+              now: datetime) -> dict[str, checks.Figure]:
+    """The figures of the indicator checks on one Yahoo timeframe, from its completed bars before
+    `at`: never an older bar in silence (Notes 5), and each from exactly its warm-up's bars."""
+    m = minutes(tf)
+    bar = timedelta(minutes=m)
+    start = at - _span(max(indicators.warmup(i.rule, i.settings) for i in group), m)
+    days = yahoo.RETENTION_DAYS.get(m)
+    # Fetched no further back than Yahoo keeps, so `why` names no bars the warm-up does not
+    # need; bars kept from an earlier fetch are still read, so a recompute reads the same ones.
+    why = yahoo.ensure(bcon, symbol, m, start if days is None else
+                       max(start, now - timedelta(days=days)), now, end=at)
+    kept = [b for b in bars.read(bcon, yahoo.SOURCE, symbol, m, start, at)
+            if b.open_time + bar <= at]
+    covered = bars.covered(bcon, yahoo.SOURCE, symbol, m)
+    keys = [k for i in group for k in i.keys]
+
+    def unknown(reason: str) -> dict[str, checks.Figure]:
+        return {k: checks.Figure(None, f"{reason}; supply {k}") for k in keys}
+    if not kept:
+        return unknown(f"no {tf} bars kept before {at.isoformat()}" + (f"; {why}" if why else ""))
+    newest = kept[-1]
+    c = newest.open_time + bar
+    if not any(f <= c and to >= at for f, to in covered) and c + bar <= at:
+        if instrument == "future":
+            return unknown(f"the newest {tf} bar kept closed at {c.isoformat()}, a bar or more "
+                           f"before {at.isoformat()}: the bar acted on is not in Yahoo's feed yet "
+                           "(Yahoo delays futures 10 to 30 minutes)")
+        if why:   # else a stock's or an ETF's empty stretch reads as the market shut
+            return unknown(why)
+    opened = newest.open_time.astimezone(UTC)
+    says = f"computed on the {tf} bar that opened {opened:%Y-%m-%d %H:%M} UTC"
+    figures = {}
+    for i in group:
+        n = indicators.warmup(i.rule, i.settings)
+        used, key = kept[-n:], i.keys[0]
+        value = None
+        if gaps := yahoo._gaps(covered, used[0].open_time, c):
+            reason = "bars are missing " + ", ".join(
+                f"from {a.isoformat()} to {b.isoformat()}" for a, b in gaps)
+        elif len(used) < n:
+            reason = f"{len(used)} of the {n} {tf} bars this needs are kept" + (
+                f", as Yahoo keeps {tf} bars for about {days} days" if days
+                else f"; {why}" if why else "")
+        elif (value := _value(i, used)) is None:
+            reason = f"no close moved in the last {n} {tf} bars, so {key} has no value"
+        figures[key] = (checks.Figure(value, says) if value is not None
+                        else checks.Figure(None, f"{reason}; supply {key}"))
+        figures.update({k: checks.Figure(newest.close, says) for k in i.keys[1:]})  # close_<tf>
+    return figures
+
+
+def _figures(con, run_row: sqlite3.Row, ticker: str, instrument: str, currency: str,
+             rules: Rules, at: datetime, now: datetime) -> dict[str, checks.Figure]:
+    """The desk's own figure, or why there is none, for every indicator key the rules read; facts
+    are never computed. It always fetches, so it is never called under the write lock."""
+    found = indicator_checks(rules.values, rules.timeframes)
+    if run_row["mode"] == "replay":
+        return {k: checks.Figure(None, f"a replay run keeps no bars: supply {k}, read off the "
+                                       "chart at the bar acted on")
+                for i in found for k in i.keys}
+    figures: dict[str, checks.Figure] = {}
+    for tf in dict.fromkeys(i.timeframe for i in found):
+        group = [i for i in found if i.timeframe == tf]
+        keys = [k for i in group for k in i.keys]
+        if instrument == "future" and minutes(tf) in (1440, 10080):
+            figures.update({k: checks.Figure(None, f"{_r6(tf)}; supply {k}") for k in keys})
+        elif minutes(tf) not in yahoo.INTERVALS:
+            figures.update({k: checks.Figure(None, f"Yahoo has no {tf} bars: supply {k}")
+                            for k in keys})
+        else:
+            with closing(bars.open()) as bcon:
+                figures.update(_computed(bcon, yahoo.ticker_symbol(ticker, instrument, currency),
+                                         instrument, tf, group, at, now))
+    return figures
+
+
+def _market(rules: Rules, market) -> dict[str, float]:
+    """The agent's values (design §7.5): only the keys the version's rules read, each a finite
+    number, kept as floats. None is none."""
+    if market is None:
+        return {}
+    if not isinstance(market, dict):
+        raise Refused("market must be a mapping of market keys to numbers, e.g. "
+                      f"{{'rsi_14_15m': 28.5}}, or left out; got {market!r}.")
+    keys = market_keys(rules.values, rules.timeframes)
+    for k, v in market.items():
+        if not isinstance(k, str) or k not in keys:
+            raise Refused(f"market key {k!r} is not one this version's rules read; " + (
+                f"they read {', '.join(keys)}." if keys
+                else "this version's rules read no market values, so leave market out."))
+        if isinstance(v, bool) or not isinstance(v, int | float) or not _finite(v):
+            raise Refused(f"market[{k!r}] must be a finite number, e.g. 28.5; got {v!r}.")
+    return {k: float(v) for k, v in market.items()}
+
+
+def _answers(items: tuple[str, ...], checklist) -> tuple[dict, ...]:
+    """The agent's checklist answers (design §7.6), kept as given in the order given. None is
+    none."""
+    if checklist is None:
+        return ()
+    form = "{'item': …, 'verdict': 'pass' or 'fail', 'reason': …}"
+    if not isinstance(checklist, list):
+        raise Refused(f"checklist must be a list of answers, each {form}, or left out; got "
+                      f"{checklist!r}.")
+    seen = set()
+    for a in checklist:
+        if not isinstance(a, dict) or set(a) != {"item", "verdict", "reason"}:
+            raise Refused(f"A checklist answer is {form}, with exactly those keys; got {a!r}.")
+        if a["item"] not in items:
+            listed = "; ".join(repr(i) for i in items) or "it has none"
+            raise Refused(f"checklist item {a['item']!r} is not one of this version's items, "
+                          f"which are matched by their exact text: {listed}.")
+        if a["item"] in seen:
+            raise Refused(f"checklist item {a['item']!r} has a second answer; give one.")
+        seen.add(a["item"])
+        if a["verdict"] not in ("pass", "fail"):
+            raise Refused(f"checklist verdict {a['verdict']!r} is not known; use pass or fail.")
+        if not isinstance(a["reason"], str) or not a["reason"].strip():
+            raise Refused(f"checklist item {a['item']!r} has no reason; say why, in one line.")
+    return tuple(checklist)
+
+
+def _checklist_view(items: tuple[str, ...], answers) -> tuple[dict, ...]:
+    """One answer per item of the version, in its order; an unanswered one reads so."""
+    given = {a["item"]: a for a in answers}
+    return tuple(given.get(i, {"item": i, "verdict": "not answered", "reason": None})
+                 for i in items)
+
+
 def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_type: str,
           entry: float, size: int, currency: str, reasons: str, stop: float | None = None,
           target: float | None = None, screenshots=(), at: datetime | None = None,
-          instrument: str | None = None, point_value: float | None = None,
-          now: datetime | None = None) -> TradeView:
-    """Enter a trade on a run: one `trades` row and one `entered` event, written together.
-    Everything is validated, and every screenshot file read, before anything is written."""
+          instrument: str | None = None, point_value: float | None = None, market=None,
+          checklist=None, check_only=None, now: datetime | None = None) -> TradeView | CheckView:
+    """Enter a trade on a run: one `trades` row and one `entered` event, written together, with
+    the results of the run's version's rules as of `at`, as shown: a breach never refuses a
+    trade. `market` holds the agent's values for the keys the rules read, `checklist` its
+    answers. With check_only, validate and check exactly as an entry, write nothing, and return
+    a CheckView. Everything is validated, and every screenshot file read, before anything is
+    written; every fetch runs before the write lock."""
+    now = _aware(now)
     row = store.run(con, run)
     if row is None:
         raise Refused(f"There is no run {run!r}; list_runs to see the ones that exist.")
@@ -437,9 +677,30 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                       f"currency={row['currency']!r}.")
     if not _text("reasons", reasons).strip():
         raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
+    if check_only is not None and not isinstance(check_only, bool):
+        raise Refused(f"check_only must be true, false or left out; got {check_only!r}.")
+    rules, items = _version(con, row)
+    market = _market(rules, market)
+    answers = _answers(items, checklist)
     shots = [_screenshot(s) for s in _strings("screenshots", screenshots)]
+    plan = model.Plan(symbol, side, kind, float(point_value), currency, float(entry),
+                      stop and float(stop), target and float(target), size)
+    _within_run(_run_view(con, row), when)   # before any fetch; again under the lock
+    others = _others(con, row, now, fetch=True)   # the fetches, before the write lock
+    # market data from insert-only bars, not the record: computed once, used again under the lock
+    figures = _figures(con, row, symbol, kind, currency, rules, when, now)
+
+    def shown(others: tuple[checks.Other, ...], seq: int | None) -> tuple[checks.Result, ...]:
+        return tuple(checks.run_checks(plan, rules, checks.Context(
+            at=when, seq=seq, currency=row["currency"], others=others, market=market,
+            computed=figures)))
+    if check_only:
+        return CheckView(run=run, at=when, ticker=symbol, side=side, instrument=kind,
+                         point_value=float(point_value), currency=currency,
+                         checks=shown(others, None), checklist=_checklist_view(items, answers))
     with store.transaction(con):  # the run's state and the id's collisions are read under the lock
         _within_run(_run_view(con, row), when)
+        results = shown(_others(con, row, now, fetch=False), len(store.trades(con, run)))
         for _, data, stored in shots:  # after every refusal; content-addressed, so a repeat skips
             if data is None:  # a link: nothing to store
                 continue
@@ -462,8 +723,10 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                      payload={"entry_type": entry_type, "entry": float(entry),
                               "stop": stop and float(stop), "target": target and float(target),
                               "size": size, "reasons": reasons,
-                              "screenshots": [s[0] for s in shots]})
-    return _trade_view(con, store.trade(con, id), _aware(now))
+                              "screenshots": [s[0] for s in shots],
+                              "checks": [asdict(r) for r in results], "market": market,
+                              "checklist": list(answers)})
+    return _trade_view(con, store.trade(con, id), now)
 
 
 def _trade_row(con, trade: str) -> sqlite3.Row:

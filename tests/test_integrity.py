@@ -334,6 +334,24 @@ def test_the_checker_never_raises_on_a_damaged_log(con):
     assert any("trade RAW-2: report check failed: TypeError" in ln for ln in lines)
 
 
+ENTERED = {"entry_type": "limit", "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
+           "reasons": "x", "screenshots": []}
+
+
+@pytest.mark.parametrize(("key", "value", "says"), [
+    ("checks", [{"name": 1}], "checks[0]"),
+    ("checks", 5, "checks 5"),
+    ("market", {"x": "nan"}, "market['x']"),
+    ("checklist", [{"item": "x", "verdict": "maybe", "reason": "y"}], "checklist[0]"),
+])
+def test_entered_checks_reports_a_malformed_record_and_never_raises(con, key, value, says):
+    assert found(con)[0] == 0   # the API's own entries, results kept, report nothing
+    raw_trade(con, "RAW-1", entered=False)
+    id = ev(con, "entered", T1, trade="RAW-1", payload={**ENTERED, key: value})
+    assert only(con, "entered_checks") == 1
+    assert found(con)[1][0].startswith(f"entered_checks: event {id} (trade RAW-1): {says}")
+
+
 def test_integrity_reports_a_run_currency_mismatch_written_by_hand(con):
     assert found(con)[0] == 0
     t = tid(con, "ACME")

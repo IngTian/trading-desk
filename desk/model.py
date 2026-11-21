@@ -8,7 +8,11 @@ the bars, with the reports laid over it (`judge.live`).
 
 ## Payload-key contract (what each trade event carries)
 
-- **entered**: `entry_type`, `entry`, `stop`, `target`, `size`, `reasons`, `screenshots`
+- **entered**: `entry_type`, `entry`, `stop`, `target`, `size`, `reasons`, `screenshots`, and
+  what the author was shown at entry (design §7.1): `checks` (each result as `checks.Result`'s
+  fields; `[]` when the version has no rules), `market` (the agent's values by market key, as
+  floats) and `checklist` (the answers as given: `item`, `verdict` `pass` or `fail`, `reason`).
+  Never corrected; an entry written without `checks` shows none
 - **order_moved**: `stop` and/or `target` (only what moved), `reason`
 - **filled**: `reason`, and `price` when given (absent: the limit)
 - **cancelled**: `reason`, `why` (`not filled`: the market never reached the limit, or the order
@@ -30,7 +34,7 @@ import datetime as dt
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from desk import store
 
@@ -130,6 +134,10 @@ class Decisions:
     held_first: Report | None = None  # the one with the earliest (the same one when one stands)
     close_kind: str | None = None     # "hand" | "stop" | "target" while closed
     close_price: float | None = None  # as given with the close; None: not given
+    # What was shown at entry, as stored: None when the entry holds no results.
+    checks: tuple[dict, ...] | None = None
+    market: dict = field(default_factory=dict)
+    checklist: tuple[dict, ...] = ()
 
 
 def decisions_of(con: sqlite3.Connection, trade_id: str) -> Decisions:
@@ -183,6 +191,7 @@ def _fold(con: sqlite3.Connection, trade_id: str
     latest = max(of("held"), key=lambda id: (when(id), id), default=None)
     earliest = min(of("held"), key=lambda id: (when(id), id), default=None)
     p, row = payload[entered], store.trade(con, trade_id)
+    shown, answers = p.get("checks"), p.get("checklist", [])   # a damaged one: as stored
     reports = {k: id for k, id in (("fill", filled), ("cancel", cancelled), ("open", latest),
                                    ("close", closed)) if id is not None}
     return Decisions(
@@ -202,6 +211,9 @@ def _fold(con: sqlite3.Connection, trade_id: str
         held=report(latest), held_first=report(earliest),
         close_kind=None if closed is None else payload[closed].get("kind", "hand"),
         close_price=payload.get(closed, {}).get("price"),
+        checks=tuple(shown) if isinstance(shown, list) else shown,
+        market=p.get("market", {}),
+        checklist=tuple(answers) if isinstance(answers, list) else answers,
     ), entered, tuple(moves), reports
 
 

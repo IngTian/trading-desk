@@ -202,6 +202,22 @@ def test_in_force_reads_the_moves_dated_at_or_before(con):
         (98.5, 103.0), (99.0, 103.0), (99.0, 104.0)]
 
 
+def test_the_results_shown_market_values_and_answers_are_read_as_stored(con):
+    shown = [{"name": "min_reward_risk", "ok": False, "figure": 1.5, "limit": "2",
+              "says": "reward to risk 1.50 against a minimum of 2", "unit": "R", "computed": {}}]
+    answer = {"item": "The trend is up.", "verdict": "pass", "reason": "Higher highs."}
+    log(con, "entered", T0, {**ENTERED, "checks": shown, "market": {"rsi_14_15m": 28.0},
+                             "checklist": [answer]})
+    d = model.decisions_of(con, "gc-1")
+    assert (d.checks, d.market, d.checklist) == (tuple(shown), {"rsi_14_15m": 28.0}, (answer,))
+
+
+def test_an_entry_without_results_reads_none_shown(con):
+    log(con, "entered", T0, ENTERED)
+    d = model.decisions_of(con, "gc-1")
+    assert (d.checks, d.market, d.checklist) == (None, {}, ())
+
+
 def test_the_plan_1_fold_is_gone():
     for name in ("Fill", "TradeState", "state_of", "open_trades", "stopped_closes",
                  "realised_r_on", "_states", "_moment", "_per_unit_r"):
