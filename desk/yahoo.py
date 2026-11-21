@@ -129,8 +129,12 @@ def ensure(con: sqlite3.Connection, symbol: str, minutes: int, start: datetime, 
             at = to
         if rows:
             last = max(r.open_time for r in rows)
-            complete = [_widened(r) for r in rows if r.open_time < last
-                        or (market is not None and r.open_time + bar <= market)]
+            # Yahoo's post-close stub (volume 0, flat) is not a traded bar, but it still proves
+            # the bar before it is complete, hence `last` above. Never captured: Notes 11.
+            complete = [_widened(r) for r in rows
+                        if (r.open_time < last or (market is not None
+                                                   and r.open_time + bar <= market))
+                        and not (r.volume == 0 and r.high == r.low)]
             if complete:
                 bars.add(con, SOURCE, symbol, minutes, complete, a,
                          max(r.open_time for r in complete) + bar, now)
