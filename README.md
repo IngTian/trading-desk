@@ -25,7 +25,7 @@ tool.
 
 | Thing | What it is |
 |---|---|
-| **Strategy** | A Markdown file you write: the idea, how you enter, where the target and the stop go, and one `rules` block and a checklist that the desk reads and checks each trade against. |
+| **Strategy** | A Markdown file you write: the idea, how you enter, where the target and the stop go, one `rules` block that the desk checks each trade against, and a checklist that you answer at each entry, which the desk records and shows apart, taking no part in whether the trade kept its rules. |
 | **Version** | A strategy's text at one moment. Any change to the text makes a new version, except for spacing within a line, trailing spaces, line endings and extra blank lines. A version never changes once saved, so it tells you exactly what each of its trades was taken under. |
 | **Run** | One version deployed over a period. Its mode is `live` (trading now) or `replay` (bar-by-bar replay of the past). It also carries free-text tags such as `paper`, `real` or `GC 15m`, which the desk stores and never interprets. |
 | **Trade** | One entry in one run: ticker, side, a market or limit entry, stop, target, size, currency (CAD or USD), your reasons in your own words, and screenshots. |
