@@ -14,12 +14,15 @@ judged in full, and in one still forming at it only the stop counts.
 
 Missing bars make the trade "not judged" for the range they leave out; nothing past them is
 claimed.
+
+The reports (§14), still pure: `replay` reads a replay trade from its reports alone, and `live`
+lays a live trade's reports over the judge, keeping the judged outcome for `differs`.
 """
 from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from desk import model
 
@@ -205,3 +208,112 @@ def judge(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
                                        "cancelled_why", "missing")), **end},
                    fill=fill, filled_at=filled_at, r=r, cash=cash, judged_through=t,
                    notes=tuple(notes))
+
+
+_COMPARED = ("status", "fill", "filled_at", "exit", "exited_at", "exit_reason", "cancelled_at",
+             "r", "cash")
+_BLANK = dict.fromkeys(_COMPARED + ("cancelled_why", "judged_through", "missing"))
+
+
+def _position(d: model.Decisions) -> tuple[float, dt.datetime]:
+    """The position's price and `at`: a standing reported fill's (its price, else the limit), else
+    the entry's. The one home of that default (F7)."""
+    f = d.fill
+    if f is None:
+        return d.entry.price, d.entry.at
+    return (d.entry.price if f.price is None else f.price), f.at
+
+
+def _ends(d: model.Decisions, base: Outcome, *, side: str) -> Outcome:
+    """`base` with d's reports laid over it: a reported cancellation or exit replaces it whole, and
+    a reported fill only marks it (the caller has already set the fill)."""
+    e, c = d.entry, d.cancel
+    if c is not None:
+        return Outcome(**{**_BLANK, "status": "cancelled", "cancelled_at": c.at,
+                          "cancelled_why": c.why}, notes=(), reported=("cancel",))
+    if d.close_at is not None and (d.close_price is not None or d.close_kind in ("stop", "target")):
+        fill, filled_at = _position(d)
+        exit = d.close_price
+        if exit is None:
+            stop, target = model.in_force(d, d.close_at)
+            exit = stop if d.close_kind == "stop" else target
+        r, cash = _money(side, fill, e.stop, exit, e.size, d.point_value)
+        return Outcome(**{**_BLANK, "status": "exited", "fill": fill, "filled_at": filled_at,
+                          "exit": exit, "exited_at": d.close_at, "exit_reason": d.close_kind,
+                          "r": r, "cash": cash},
+                       notes=(NO_1R,) if e.stop is not None and r is None else (),
+                       reported=("fill", "exit") if d.fill else ("exit",))
+    return replace(base, reported=("fill",)) if d.fill else base
+
+
+def replay(d: model.Decisions, *, side: str, stopped: dt.datetime | None = None) -> Outcome:
+    """A replay trade's outcome from its record alone, with no bars (§14). A position reads open
+    until its exit is reported (an open report changes nothing); a pending limit is cancelled at
+    the earlier of a hand close and the run stop; a run stop closes no position."""
+    if d.entry.type == "market" or d.fill is not None:
+        fill, filled_at = _position(d)
+        base = dict(status="open", fill=fill, filled_at=filled_at)
+    elif d.close_at is not None or stopped is not None:
+        due = min(x for x in (d.close_at, stopped) if x is not None)
+        base = dict(status="cancelled", cancelled_at=due, cancelled_why=_why(d.close_at, stopped))
+    else:
+        base = dict(status="pending")
+    return _ends(d, Outcome(**{**_BLANK, **base}, notes=()), side=side)
+
+
+def _decided(d: model.Decisions) -> model.Decisions:
+    """What the bars are read against: d with the trade's end (a close of any kind, or a reported
+    cancellation) as a hand close at its `at`. The judge reads only the entry, the moves and
+    close_at, so no reported price, kind, fill or open report reaches it."""
+    return replace(d, close_at=d.cancel.at if d.cancel else d.close_at)
+
+
+def live(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
+         covered: Sequence[tuple[dt.datetime, dt.datetime]], now: dt.datetime,
+         stopped: dt.datetime | None = None, unavailable: str | None = None
+         ) -> tuple[Outcome, Outcome]:
+    """(effective, judged): the judge on `bars`, and the outcome with d's reports laid over it.
+    The judge continues from the latest report: from a reported fill as a market entry there (its
+    own bar unjudged, Q27, ruling R4), and from an open report at h at the open of the bar holding
+    h, every bar before it set aside, ends and holes alike."""
+    kw = dict(side=side, minutes=minutes, bars=bars, covered=covered, now=now, stopped=stopped,
+              unavailable=unavailable)
+    decided = _decided(d)
+    judged = base = judge(decided, **kw)
+    if d.fill is not None or d.held is not None:
+        price, at = _position(d)
+        m = dt.timedelta(minutes=minutes)
+        t0 = at
+        if d.held is not None:
+            h = d.held.at
+            t0 = max(at, next((b.open_time for b in bars if b.open_time <= h < b.open_time + m),
+                              h))
+        base = judge(replace(decided, entry=replace(d.entry, type="market", price=price, at=t0)),
+                     **kw)
+        base = replace(base, fill=price, filled_at=at)
+        if (d.held is not None and base.exit_reason in ("stop", "target")
+                and base.exited_at - m <= h < base.exited_at):
+            out = base.exited_at.isoformat()
+            base = replace(base, notes=base.notes + (
+                f"the open report at {h.isoformat()} is inside the bar that ended the trade at "
+                f"{out}; a bar cannot say which came first, so the exit stands: report open at "
+                f"or after {out} to set it aside",))
+    return _ends(d, base, side=side), judged
+
+
+def differs(o: Outcome, judged: Outcome | None, minutes: int) -> tuple[str, ...]:
+    """The fields among _COMPARED whose values differ between `o` and `judged`, in that order; ()
+    when there is nothing to compare. A time given in both is the same when `o`'s lies in the
+    judged one's bar: the bars date an end at the bar's close, a report at its instant.
+    cancelled_why is not compared: the cause is the record's, never the bars'."""
+    if judged is None or judged.status == "not judged":
+        return ()
+    m = dt.timedelta(minutes=minutes)
+
+    def same(k: str) -> bool:
+        a, b = getattr(o, k), getattr(judged, k)
+        if k.endswith("_at") and a is not None and b is not None:
+            return b - m < a <= b
+        return a == b
+
+    return tuple(k for k in _COMPARED if not same(k))
