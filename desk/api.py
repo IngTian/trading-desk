@@ -1,4 +1,4 @@
-"""The desk's one outward face: what the MCP server (a later release) wraps, function for function.
+"""The desk's one outward face: what plan 5's MCP server wraps, function for function.
 
 Every function takes an open connection and `now` (default: the wall clock, in UTC) so tests
 control time. Every refusal is a `Refused` whose message says what to change.
@@ -1145,7 +1145,7 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
 
 def void_trade(con: sqlite3.Connection, trade: str, *, reason: str, report: str | None = None,
                now: datetime | None = None) -> TradeView:
-    """Void a trade: it stays in the log; later releases' statistics and checks leave it out.
+    """Void a trade: it stays in the log; statistics and the checks of other trades leave it out.
     With `report` ("fill", "cancel", "open" or "close"), withdraw that standing report instead
     ("open": the latest, leaving the one before it standing): it is read as absent, and the
     trade stands."""
@@ -1218,7 +1218,8 @@ def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = N
     """A live trade's bars at one of its run's version's timeframes (default: the finest): from
     `before` bars ahead of the bar holding the entry through `after` bars past the last bar
     opening before the exit or cancellation, or through the latest bar while it has not ended.
-    `missing`: what no fetch covered from the entry to that end (or now); `notes`: why."""
+    `missing`: what no fetch covered from the entry to its end, or to now while it has not ended;
+    `notes`: why."""
     now = _aware(now)
     row = _trade_row(con, _text("trade", trade))
     run = store.run(con, row["run_id"])

@@ -1,4 +1,4 @@
-"""Integrity checker for the v3 log.
+"""Integrity checker for the v4 log.
 
 Each invariant is a named check returning failure lines (empty when healthy). The log is
 append-only, so a damaged row cannot be repaired in place; these checks find what the API

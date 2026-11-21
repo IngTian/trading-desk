@@ -55,14 +55,20 @@ with store.open() as con:
 
     # Replay: the outcome is what is reported, and no bars are read.
     replay = api.start_run(con, "example", mode="replay", currency="USD", at=now, now=now)
-    r = api.trade(con, replay.id, ticker="ACME", side="long", entry_type="limit", entry=100.0,
-                  stop=98.5, target=104.0, size=10, currency="USD", reasons="Smoke test.",
-                  at=now, now=now)
+    plan = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5,
+                target=104.0, size=10, currency="USD", reasons="Smoke test.", at=now, now=now)
+    # check_only: the example strategy's rules give results, and nothing is written.
+    before = len(store.events(con))
+    seen = api.trade(con, replay.id, check_only=True, **plan)
+    assert seen.checks and len(store.events(con)) == before and len(store.trades(con)) == 1
+    r = api.trade(con, replay.id, **plan)
     api.report(con, r.id, state="filled", at=now + timedelta(minutes=15), reason="Smoke test.",
                now=later)
     o = api.report(con, r.id, state="exited", kind="target", at=now + timedelta(minutes=30),
                    reason="Smoke test.", now=later).outcome
     assert (o.status, o.exit, o.reported) == ("exited", 104.0, ("fill", "exit")), o
+    st = api.stats(con, run=replay.id, now=later)
+    assert st.trades == (r.id,) and st.closed == (r.id,), st
 
     # Live, before any bars: the clean venv has no yfinance, so the fetch fails without reaching
     # the network, and the read names the extra.
