@@ -438,9 +438,11 @@ def _settles(o: judge.Outcome) -> str:
             "at=…))")
 
 
-def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int) -> checks.Other:
+def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int, *, live: bool,
+           minutes: int) -> checks.Other:
     """Another trade of the run as the checks read it, from its effective outcome. An exit always
-    carries its cash (judge._money gives one), which the record rules add up."""
+    carries its cash (judge._money gives one), which the record rules add up. `live` and `minutes`
+    are its run's mode and finest timeframe."""
     unknown_from = closed_at = None
     settles = _settles(o)
     if o.status == "not judged":   # a reported open position is known open up to its report
@@ -450,6 +452,10 @@ def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int) -> 
         unknown_from = closed_at = d.close_at
         settles = ("report its exit with the broker's price (report(trade, state='exited', "
                    "price=…, at=…))")
+    elif live and row["instrument"] == "future" and o.status in ("open", "pending"):
+        # Yahoo delays futures (Notes 5): an exit in the bar after judged_through is dated at its
+        # close, so it is unknown from there; checks._unknown's `<` is strict, hence the 1 µs.
+        unknown_from = o.judged_through + timedelta(minutes=minutes, microseconds=-1)
     return checks.Other(id=row["id"], ticker=row["ticker"], entered=d.entry.at, seq=seq,
                         ended=o.exited_at or o.cancelled_at, exited=o.status == "exited",
                         r=o.r, cash=o.cash, unknown_from=unknown_from, closed_at=closed_at,
@@ -462,12 +468,13 @@ def _others(con, run_row: sqlite3.Row, now: datetime, *, fetch: bool,
     them as of `at` from those dates). `seq` is the index in the unfiltered store.trades, so
     leaving voids out never renumbers one."""
     out = []
+    kw = dict(live=run_row["mode"] == "live", minutes=next(iter(_timeframes(con, run_row))))
     for seq, t in enumerate(store.trades(con, run_row["id"])):
         if t["id"] == skip:
             continue
         d = model.decisions_of(con, t["id"])
         if not d.voided:
-            out.append(_other(t, d, _outcomes(con, t, d, now, fetch=fetch)[0], seq))
+            out.append(_other(t, d, _outcomes(con, t, d, now, fetch=fetch)[0], seq, **kw))
     return tuple(out)
 
 
@@ -1311,7 +1318,9 @@ def stats(con: sqlite3.Connection, *, strategy: str | None = None, version: int 
     if conforming_only:
         others: dict[str, list[checks.Other]] = {}   # each run's, built once (B6)
         for r, _, t, v, seq in read:
-            others.setdefault(r["id"], []).append(_other(t, v.decisions, v.outcome, seq))
+            others.setdefault(r["id"], []).append(_other(
+                t, v.decisions, v.outcome, seq, live=r["mode"] == "live",
+                minutes=next(iter(_timeframes(con, r)))))
         breached, unknown, kept = [], {}, []
         for r, held, t, v, seq in read:
             results = _results_now(con, t, v.decisions,

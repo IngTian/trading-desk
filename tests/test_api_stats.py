@@ -166,7 +166,8 @@ def test_conforming_only_reads_the_results_now_and_names_what_it_left_out(con, m
 
     built = []
     real = api._other
-    monkeypatch.setattr(api, "_other", lambda *a: built.append(a[0]["id"]) or real(*a))
+    monkeypatch.setattr(api, "_other",
+                        lambda *a, **kw: built.append(a[0]["id"]) or real(*a, **kw))
     s = api.stats(con, run=r, conforming_only=True, now=NOW)
     assert len(built) == 5     # each run's Others once, never once per pair of trades
     assert (s.conforming_only, s.trades, s.closed, s.open) == (True, (k.id, x.id), (k.id,),

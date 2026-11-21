@@ -358,6 +358,54 @@ def test_another_trades_unknown_state_withholds_and_names_the_report_that_settle
     assert "report its exit with the broker's price" in r.says
 
 
+LAGGED = ('timeframes = ["15m"]\nmax_open_trades = 1\ndaily_loss_limit = { R = 0.5 }\n'
+          'cooldown_after_loss = { minutes = 30 }\n')
+RECORD = ("max_open_trades", "daily_loss_limit", "cooldown_after_loss")
+T14 = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
+T15 = T14 + timedelta(hours=1)
+QUIET = [judge.Bar(T14 + timedelta(minutes=15 * i), 100.0, 100.5, 99.5, 100.0, 1000.0)
+         for i in range(2)]                                     # 14:00 and 14:15
+STOPPED = judge.Bar(T14 + timedelta(minutes=30), 99.0, 99.5, 97.5, 98.0, 1000.0)   # the 14:30
+
+
+def lagged(con, fake_yahoo, *, current: bool, **a):
+    """Trade A at 14:00, read at 15:00, stopped out in the 14:30 bar (dated 14:45) when the feed
+    is current; with Yahoo's delay, the feed ends at the 14:15 bar."""
+    fake_yahoo(QUIET + [STOPPED] if current else QUIET,
+               market_time=None if current else T14 + timedelta(minutes=30))
+    live, _ = version(con, LAGGED)
+    return live, enter(con, live, **{**a, "at": T14, "now": T15})
+
+
+def record(con, live, minutes):
+    cv = enter(con, live, at=T14 + timedelta(minutes=minutes), now=T15, check_only=True)
+    return [result(cv, n) for n in RECORD]
+
+
+def test_a_live_futures_exit_the_feed_has_not_delivered_reads_unknown(con, fake_yahoo):
+    live, a = lagged(con, fake_yahoo, current=False, **GOLD)
+    assert (a.outcome.status, a.outcome.judged_through) == ("open", T14 + timedelta(minutes=30))
+    # at 14:40 the 14:30 bar is forming, and an exit in it is dated 14:45: A is known open
+    assert [r.ok for r in record(con, live, 40)] == [False, True, True]
+    for minutes in (45, 60):   # a bar past what A was judged through could hold its exit
+        for r in record(con, live, minutes):
+            assert r.ok is None and a.id in r.says, r
+            assert "report its exit, or that it is still open" in r.says
+    b = enter(con, live, at=T15, now=T15)
+    left = api.stats(con, run=live, conforming_only=True, now=T15).left_out
+    assert left == {"breached": (), "unknown": {n: (b.id,) for n in RECORD}}
+
+
+@pytest.mark.parametrize("a, current, ok", [
+    (GOLD, True, [True, False, False]),   # the feed current: out at 14:45 at -1R
+    ({}, False, [False, True, True])])    # a stock's empty stretch reads as the market shut
+def test_a_futures_exit_the_feed_has_delivered_or_a_stocks_lag_reads_known(con, fake_yahoo, a,
+                                                                            current, ok):
+    live, t = lagged(con, fake_yahoo, current=current, **a)
+    assert t.outcome.status == ("exited" if current else "open")
+    assert [r.ok for r in record(con, live, 60)] == ok
+
+
 def test_the_day_is_the_system_timezones_midnight_to_midnight(con, fake_yahoo, monkeypatch):
     monkeypatch.setenv("TZ", "America/Toronto")
     time.tzset()
