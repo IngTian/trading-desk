@@ -83,6 +83,10 @@ TF = ("15m", "1h")
     ({"min_reward_risk": True}, "is not a number"),
     ({"min_reward_risk": 0}, "above zero"),
     ({"min_reward_risk": float("inf")}, "finite"),
+    ({"min_reward_risk": 10**400}, "min_reward_risk: .*too large"),
+    ({"rsi": {"between": [1, 10**400]}}, "rsi.between: .*not two numbers"),
+    ({"rsi": []}, "rsi: an empty list holds no check"),
+    ({"facts": {}}, "facts: an empty table holds no fact"),
     ({"max_risk_per_trade": 150}, "max_risk_per_trade: .*a table"),
     ({"max_risk_per_trade": {}}, "at least one currency"),
     ({"max_risk_per_trade": {"GBP": 100}}, "only CAD or USD"),
@@ -171,3 +175,7 @@ def test_defaults_are_filled_in_the_indicator_settings():
     assert (m.settings, m.timeframe) == (
         {"fast": 12, "slow": 26, "signal": 9, "output": "histogram"}, "15m")
     assert m.compare == {"at_least": 0}
+
+
+def test_a_huge_whole_number_is_not_a_raw_error():
+    rules.validate({"max_open_trades": 10**400}, TF)   # an int compares exactly: kept as written

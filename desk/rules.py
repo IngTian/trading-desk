@@ -126,11 +126,18 @@ def _is_number(v) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool)
 
 
+def _finite(v) -> bool:
+    try:
+        return math.isfinite(v)
+    except OverflowError:   # an int too large for a float
+        return False
+
+
 def _number(path: str, v, *, positive: bool = False) -> None:
     if not _is_number(v):
         raise _no(path, f"{v!r} is not a number", f"{path.rsplit('.', 1)[-1]} = 2")
-    if not math.isfinite(v):
-        raise _no(path, "must be finite")
+    if not _finite(v):
+        raise _no(path, "must be finite, and not too large to read")
     if positive and v <= 0:
         raise _no(path, f"{v!r} must be above zero")
 
@@ -167,7 +174,7 @@ def _one(path: str, table: dict, *, fact: bool = False) -> None:
             raise _no(where, f"{v!r} is a yes/no or text; a yes/no belongs in the checklist")
         _number(where, v)
     elif (not isinstance(v, list) or len(v) != 2 or not all(_is_number(x) for x in v)
-          or not all(math.isfinite(x) for x in v)):
+          or not all(_finite(x) for x in v)):
         raise _no(where, f"{v!r} is not two numbers", "between = [1, 3]")
     elif v[0] > v[1]:
         raise _no(where, f"{v!r} has lo above hi", f"between = [{v[1]}, {v[0]}]")
@@ -239,7 +246,11 @@ def _hours(path: str, table: dict) -> None:
 
 
 def _facts(path: str, v) -> None:
-    for name, cmp in _table(path, v, "[facts]\nrvol = { at_least = 2 }").items():
+    table = _table(path, v, "[facts]\nrvol = { at_least = 2 }")
+    if not table:
+        raise _no(path, "an empty table holds no fact; write one, such as rvol = { at_least = 2 }, "
+                        "or delete the line")
+    for name, cmp in table.items():
         where = f"{path}.{name}"
         if not _FACT.fullmatch(name):
             raise _no(where, "a fact's name is lowercase letters, digits and underscores, "
@@ -309,6 +320,9 @@ def validate(values: dict, timeframes: tuple[str, ...]) -> None:
         elif rule == "trading_hours":
             _hours(rule, _table(rule, v, 'trading_hours = { start = "09:45", end = "11:30" }'))
         elif rule in INDICATORS:
+            if v == []:
+                raise _no(rule, "an empty list holds no check; write one [[" + rule +
+                          "]] table, or delete the line")
             for n, table in enumerate(v if isinstance(v, list) else [v]):
                 _indicator(rule, f"{rule}[{n}]" if isinstance(v, list) else rule, table,
                            timeframes)
