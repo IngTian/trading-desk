@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 # nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
-version = "0.6.0"
+version = "0.7.0"
 description = "Record your trades under versioned strategies: reasons, screenshots and every later decision, in an append-only SQLite log"
 readme = "README.md"
 requires-python = ">=3.11"

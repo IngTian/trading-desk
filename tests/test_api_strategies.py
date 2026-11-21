@@ -10,7 +10,7 @@ from desk import api, store, strategy
 NOW = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 
 
-def make(prose: str = "Buy dips.", rules: str = "timeframes: 1h, 15m\nmin_reward_risk: 2"):
+def make(prose: str = "Buy dips.", rules: str = 'timeframes = ["1h", "15m"]\nmin_reward_risk = 2'):
     return f"---\nname: Dip buyer\n---\n\n# Dip buyer\n\n{prose}\n\n```rules\n{rules}\n```\n"
 
 
@@ -25,7 +25,7 @@ def con(tmp_path):
 def test_a_new_strategy_is_version_one(con):
     v = api.save_strategy(con, "dip-buyer", make(), now=NOW)
     assert (v.version, v.versions, v.saved, v.name) == (1, 1, "version 1 created", "Dip buyer")
-    assert v.timeframes == ("15m", "1h") and v.rules == {"min_reward_risk": "2"}
+    assert v.timeframes == ("15m", "1h") and v.rules == {"min_reward_risk": 2} and v.checklist == ()
     assert api.get_strategy(con, "dip-buyer") == replace(v, saved="unchanged")
     assert [s.id for s in api.list_strategies(con)] == ["dip-buyer"]
 
@@ -93,15 +93,16 @@ def test_a_stored_version_the_parser_would_now_refuse_is_still_readable(con):
     """Review item 8: reading a strategy re-parsed its stored text, so tightening the parser
     would make old versions, and list_strategies for every strategy, unreadable."""
     api.save_strategy(con, "dip-buyer", make(), now=NOW)
-    old = make(rules="timeframes: 1h\nfeels_right: strongly")
+    old = make(rules='timeframes = ["1h"]\nfeels_right = "strongly"')
     con.execute("INSERT INTO versions (strategy_id, version, text, text_hash, rules, timeframes,"
-                " saved_at) VALUES ('dip-buyer', 2, ?, ?, '{\"feels_right\": \"strongly\"}',"
-                " '[\"1h\"]', ?)",
+                " checklist, saved_at) VALUES ('dip-buyer', 2, ?, ?,"
+                " '{\"feels_right\": \"strongly\"}', '[\"1h\"]', '[]', ?)",
                 (old, hashlib.sha256(strategy.normalise(old).encode()).hexdigest(),
                  NOW.isoformat()))
     con.commit()
     v = api.get_strategy(con, "dip-buyer")
-    assert (v.name, v.version, v.rules) == ("Dip buyer", 2, {"feels_right": "strongly"})
+    assert (v.name, v.version, v.rules, v.checklist) == (
+        "Dip buyer", 2, {"feels_right": "strongly"}, ())
     assert [s.version for s in api.list_strategies(con)] == [2]
 
 

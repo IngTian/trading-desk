@@ -29,7 +29,7 @@ integrity` reads there rather than to the configured store.
 
 ISOLATING A RUN: set $TRADING_DESK_HOME (which moves config.toml, attachments/ and bars.db
 too). $TRADING_DESK_DB moves desk.db alone, so screenshots and bars.db still go to the real
-root. NOT $TRADING_DESK_BOOK: 0.6 does not use it (in 0.4 it named hub.db), so a scratch run
+root. NOT $TRADING_DESK_BOOK: 0.7 does not use it (in 0.4 it named hub.db), so a scratch run
 that sets just it still writes to the real desk.db. The test suite clears both overrides and
 points the root at a temp dir before every test (conftest.py).
 
@@ -105,7 +105,7 @@ def config() -> dict:
 
 
 def book_path(explicit: str | os.PathLike | None = None) -> Path:
-    """0.4's book path, hub.db. Nothing in 0.6 calls this; the old setting still resolves.
+    """0.4's book path, hub.db. Nothing in 0.7 calls this; the old setting still resolves.
 
     Explicit path, then $TRADING_DESK_BOOK, then `book =` in config.toml, then <root>/hub.db.
     """
@@ -167,7 +167,7 @@ def vault_path() -> Path | None:
 
 
 def legacy_book() -> Path:
-    """0.4's book; nothing in 0.6 calls this. Same path resolution as book_path()."""
+    """0.4's book; nothing in 0.7 calls this. Same path resolution as book_path()."""
     return book_path()
 
 

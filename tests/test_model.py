@@ -23,8 +23,8 @@ def con(tmp_path):
     store.create(db)
     with store.open(db) as c:
         store.add_strategy(c, "dip-buyer", T0.isoformat())
-        store.add_version(c, "dip-buyer", 1, "text", "hash", {}, ["1h"], T0.isoformat())
-        store.add_run(c, "dip-buyer-r1", "dip-buyer", 1, "replay", [])
+        store.add_version(c, "dip-buyer", 1, "text", "hash", {}, ["1h"], [], T0.isoformat())
+        store.add_run(c, "dip-buyer-r1", "dip-buyer", 1, "replay", [], "USD")
         store.add_trade(c, "gc-1", "dip-buyer-r1", "GC", "long", "future", 100.0, "USD")
         yield c
 
@@ -200,6 +200,22 @@ def test_in_force_reads_the_moves_dated_at_or_before(con):
     d = model.decisions_of(con, "gc-1")
     assert [model.in_force(d, T0 + timedelta(hours=n)) for n in (0.5, 1, 3)] == [
         (98.5, 103.0), (99.0, 103.0), (99.0, 104.0)]
+
+
+def test_the_results_shown_market_values_and_answers_are_read_as_stored(con):
+    shown = [{"name": "min_reward_risk", "ok": False, "figure": 1.5, "limit": "2",
+              "says": "reward to risk 1.50 against a minimum of 2", "unit": "R", "computed": {}}]
+    answer = {"item": "The trend is up.", "verdict": "pass", "reason": "Higher highs."}
+    log(con, "entered", T0, {**ENTERED, "checks": shown, "market": {"rsi_14_15m": 28.0},
+                             "checklist": [answer]})
+    d = model.decisions_of(con, "gc-1")
+    assert (d.checks, d.market, d.checklist) == (tuple(shown), {"rsi_14_15m": 28.0}, (answer,))
+
+
+def test_an_entry_without_results_reads_none_shown(con):
+    log(con, "entered", T0, ENTERED)
+    d = model.decisions_of(con, "gc-1")
+    assert (d.checks, d.market, d.checklist) == (None, {}, ())
 
 
 def test_the_plan_1_fold_is_gone():

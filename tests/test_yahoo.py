@@ -191,3 +191,22 @@ def test_no_test_reaches_the_network():
     assert yahoo.fetch is not yahoo._yfinance
     with pytest.raises(OSError, match="network is off"):
         yahoo.fetch("ACME", "60m", h(0), h(1))
+
+
+M15 = datetime(2026, 3, 2, 19, 45, tzinfo=UTC)
+
+
+def test_the_post_close_stub_bar_is_not_stored(con, fake_yahoo):
+    stub = judge.Bar(M15 + timedelta(minutes=15), 10.5, 10.5, 10.5, 10.5, 0.0)
+    fake_yahoo({"15m": [judge.Bar(M15, 10, 11, 9, 10.5, 5.0), stub]})   # market = call end
+    yahoo.ensure(con, "ACME", 15, M15, M15 + timedelta(minutes=30))
+    assert [b.open_time for b in bars.read(con, "yahoo", "ACME", 15, M15)] == [M15]
+
+
+def test_a_zero_volume_bar_with_a_range_or_a_flat_bar_without_volume_is_kept(con, fake_yahoo):
+    nxt = M15 + timedelta(minutes=15)
+    rows = [judge.Bar(M15, 10, 11, 9, 10.5, 0.0), judge.Bar(nxt, 10.5, 10.5, 10.5, 10.5, None),
+            judge.Bar(nxt + timedelta(minutes=15), 10, 10, 10, 10, 3.0)]
+    fake_yahoo({"15m": rows})
+    yahoo.ensure(con, "ACME", 15, M15, M15 + timedelta(minutes=45))
+    assert len(bars.read(con, "yahoo", "ACME", 15, M15)) == 3

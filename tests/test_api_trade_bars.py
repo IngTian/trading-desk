@@ -9,7 +9,7 @@ from desk import api, bars, judge, store
 
 B = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
 LATER = B + timedelta(hours=24)
-GOLD = "---\nname: Gold\n---\n\n# Gold\n\n```rules\ntimeframes: 1h, 4h\n```\n"
+GOLD = "---\nname: Gold\n---\n\n# Gold\n\n```rules\ntimeframes = [\"1h\", \"4h\"]\n```\n"
 BASE = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, stop=98.0, target=104.0,
             size=10, currency="USD", reasons="Invented.")
 
@@ -27,8 +27,8 @@ def con(tmp_path):
     store.create(tmp_path / "desk.db")
     with store.open(tmp_path / "desk.db") as c:
         api.save_strategy(c, "gold", GOLD, now=h(0))
-        api.start_run(c, "gold", mode="replay", at=h(0), now=h(0))   # gold-r1
-        api.start_run(c, "gold", mode="live", at=h(0), now=h(0))     # gold-r2
+        api.start_run(c, "gold", mode="replay", currency="USD", at=h(0), now=h(0))   # gold-r1
+        api.start_run(c, "gold", mode="live", currency="USD", at=h(0), now=h(0))     # gold-r2
         yield c
 
 
@@ -78,9 +78,9 @@ def test_an_open_trade_runs_through_the_latest_bar(con, fake_yahoo):
 
 def test_a_coarser_timeframe_reads_its_own_bars(con, fake_yahoo):
     # Yahoo has no 4h (ruling R10), so the coarser timeframe here is 90m: 14:00, 15:30, 17:00, 18:30
-    api.save_strategy(con, "fine", GOLD.replace("timeframes: 1h, 4h", "timeframes: 1h, 90m"),
+    api.save_strategy(con, "fine", GOLD.replace('["1h", "4h"]', '["1h", "90m"]'),
                       now=h(0))
-    run = api.start_run(con, "fine", mode="live", at=h(0), now=h(0)).id
+    run = api.start_run(con, "fine", mode="live", currency="USD", at=h(0), now=h(0)).id
     fake_yahoo({"60m": SIX, "90m": [bar(1.5 * n, 100, 101, 99.5, 100.5) for n in range(4)]})
     t = enter(con, run, at=h(1), now=h(1))
     tb = api.trade_bars(con, t.id, timeframe="90m", after=1, now=h(5))  # 18:30 is still forming
@@ -107,16 +107,17 @@ def test_a_replay_trade_has_no_bars_to_serve(con):
 
 
 def test_a_live_run_refuses_a_timeframe_yahoo_lacks(con):
-    api.save_strategy(con, "odd", GOLD.replace("timeframes: 1h, 4h", "timeframes: 15m, 2h"),
+    api.save_strategy(con, "odd", GOLD.replace('["1h", "4h"]', '["15m", "2h"]'),
                       now=LATER)
-    t = enter(con, api.start_run(con, "odd", mode="live", now=LATER).id, at=LATER, now=LATER)
+    run = api.start_run(con, "odd", mode="live", currency="USD", now=LATER).id
+    t = enter(con, run, at=LATER, now=LATER)
     with pytest.raises(api.Refused, match="1m, 2m, 5m, 15m, 30m"):
         api.trade_bars(con, t.id, timeframe="2h", now=LATER)
 
 
 def test_the_default_timeframe_is_the_runs_versions_not_the_latest(con, fake_yahoo):
     t, _ = live_trade(con, fake_yahoo)
-    api.save_strategy(con, "gold", GOLD.replace("timeframes: 1h, 4h", "timeframes: 15m"),
+    api.save_strategy(con, "gold", GOLD.replace('["1h", "4h"]', '["15m"]'),
                       if_current=api.get_strategy(con, "gold").current_hash, now=LATER)
     assert api.trade_bars(con, t.id, now=h(6)).timeframe == "1h"
 

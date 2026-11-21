@@ -1,4 +1,4 @@
--- The v3 store: strategies, versions, runs, trades and an append-only log of decisions.
+-- The v4 store: strategies, versions, runs, trades and an append-only log of decisions.
 -- The database holds only the owner's decisions; everything else is derived by folding events.
 
 CREATE TABLE strategies (
@@ -12,8 +12,9 @@ CREATE TABLE versions (
     version     INTEGER NOT NULL CHECK (version >= 1),
     text        TEXT    NOT NULL,
     text_hash   TEXT    NOT NULL,                       -- sha256 of the normalised text
-    rules       TEXT    NOT NULL CHECK (json_valid(rules)),       -- {name: value}, timeframes excluded
+    rules       TEXT    NOT NULL CHECK (json_valid(rules)),       -- the TOML table, timeframes excluded
     timeframes  TEXT    NOT NULL CHECK (json_valid(timeframes)),  -- ["15m","1h"], finest first
+    checklist   TEXT    NOT NULL CHECK (json_valid(checklist)),   -- ["item", ...] in file order
     saved_at    TEXT    NOT NULL,
     PRIMARY KEY (strategy_id, version)
 ) STRICT;
@@ -24,6 +25,7 @@ CREATE TABLE runs (
     version     INTEGER NOT NULL,
     mode        TEXT    NOT NULL CHECK (mode IN ('live','replay')),
     tags        TEXT    NOT NULL CHECK (json_valid(tags)),          -- ["paper","GC 15m"], verbatim
+    currency    TEXT    NOT NULL CHECK (currency IN ('CAD','USD')),  -- a run trades in one
     FOREIGN KEY (strategy_id, version) REFERENCES versions(strategy_id, version)
 ) STRICT;
 

@@ -11,7 +11,7 @@ LATER = NOW + timedelta(hours=3)
 
 def make(prose: str = "Buy dips."):
     return (f"---\nname: Dip buyer\n---\n\n# Dip buyer\n\n{prose}\n\n"
-            "```rules\ntimeframes: 1h\nmin_reward_risk: 2\n```\n")
+            "```rules\ntimeframes = [\"1h\"]\nmin_reward_risk = 2\n```\n")
 
 
 @pytest.fixture
@@ -27,24 +27,27 @@ def test_a_live_run_starts_at_now_on_the_latest_version(con):
     v1 = api.get_strategy(con, "dip-buyer")
     api.save_strategy(con, "dip-buyer", make("Buy deeper dips."), if_current=v1.current_hash,
                       now=NOW)
-    r = api.start_run(con, "dip-buyer", mode="live", tags=["paper", "GC 15m", "paper"], now=NOW)
+    r = api.start_run(con, "dip-buyer", mode="live", currency="USD",
+                      tags=["paper", "GC 15m", "paper"], now=NOW)
     assert (r.id, r.version, r.mode, r.started, r.stopped) == ("dip-buyer-r1", 2, "live", NOW, None)
     assert r.tags == ("paper", "GC 15m")
-    assert api.start_run(con, "dip-buyer", mode="live", version=1, now=NOW).id == "dip-buyer-r2"
+    r2 = api.start_run(con, "dip-buyer", mode="live", currency="USD", version=1, now=NOW)
+    assert r2.id == "dip-buyer-r2"
     assert [x.id for x in api.list_runs(con, "dip-buyer")] == ["dip-buyer-r1", "dip-buyer-r2"]
     assert api.list_runs(con, "other") == []
 
 
 def test_starting_writes_the_row_and_the_event_together(con):
-    api.start_run(con, "dip-buyer", mode="live", now=NOW)
+    api.start_run(con, "dip-buyer", mode="live", currency="USD", now=NOW)
     assert [e["kind"] for e in store.events(con, run_id="dip-buyer-r1")] == ["run_started"]
 
 
 def test_a_replay_start_without_at_is_refused_and_writes_nothing(con):
     with pytest.raises(api.Refused, match="at"):
-        api.start_run(con, "dip-buyer", mode="replay", now=NOW)
+        api.start_run(con, "dip-buyer", mode="replay", currency="USD", now=NOW)
     assert store.runs(con) == []
-    r = api.start_run(con, "dip-buyer", mode="replay", at=NOW - timedelta(days=30), now=NOW)
+    r = api.start_run(con, "dip-buyer", mode="replay", currency="USD",
+                      at=NOW - timedelta(days=30), now=NOW)
     assert r.started == NOW - timedelta(days=30)
 
 
@@ -55,12 +58,12 @@ def test_a_replay_start_without_at_is_refused_and_writes_nothing(con):
 ])
 def test_start_refusals(con, kw, match):
     with pytest.raises(api.Refused, match=match):
-        api.start_run(con, now=NOW, **kw)
+        api.start_run(con, now=NOW, **{"currency": "USD", **kw})
     assert store.runs(con) == []
 
 
 def test_stop_live_defaults_to_now_and_a_second_stop_is_refused(con):
-    api.start_run(con, "dip-buyer", mode="live", now=NOW)
+    api.start_run(con, "dip-buyer", mode="live", currency="USD", now=NOW)
     r = api.stop_run(con, "dip-buyer-r1", now=LATER)
     assert r.stopped == LATER and r.started == NOW
     with pytest.raises(api.Refused, match="already stopped"):
@@ -69,14 +72,15 @@ def test_stop_live_defaults_to_now_and_a_second_stop_is_refused(con):
 
 
 def test_stop_before_start_is_refused(con):
-    api.start_run(con, "dip-buyer", mode="live", now=NOW)
+    api.start_run(con, "dip-buyer", mode="live", currency="USD", now=NOW)
     with pytest.raises(api.Refused, match="before"):
         api.stop_run(con, "dip-buyer-r1", at=NOW - timedelta(minutes=1), now=LATER)
     assert api.stop_run(con, "dip-buyer-r1", at=NOW, now=LATER).stopped == NOW
 
 
 def test_replay_stop_without_at_is_refused(con):
-    api.start_run(con, "dip-buyer", mode="replay", at=NOW - timedelta(days=30), now=NOW)
+    api.start_run(con, "dip-buyer", mode="replay", currency="USD",
+                  at=NOW - timedelta(days=30), now=NOW)
     with pytest.raises(api.Refused, match="at"):
         api.stop_run(con, "dip-buyer-r1", now=LATER)
     assert api.list_runs(con)[0].stopped is None
@@ -90,8 +94,8 @@ def test_unknown_run_is_refused(con):
 def test_a_naive_datetime_is_refused_for_start_and_stop(con):
     naive = datetime(2026, 3, 2, 12, 0)
     with pytest.raises(api.Refused, match="timezone"):
-        api.start_run(con, "dip-buyer", mode="replay", at=naive, now=NOW)
-    api.start_run(con, "dip-buyer", mode="live", now=NOW)
+        api.start_run(con, "dip-buyer", mode="replay", currency="USD", at=naive, now=NOW)
+    api.start_run(con, "dip-buyer", mode="live", currency="USD", now=NOW)
     with pytest.raises(api.Refused, match="timezone"):
         api.stop_run(con, "dip-buyer-r1", at=naive, now=LATER)
 
@@ -100,28 +104,43 @@ def test_a_naive_datetime_is_refused_for_start_and_stop(con):
 def test_tags_that_are_not_a_list_of_strings_are_refused(con, tags):
     """Review item 5: tags="paper" was stored as ('p', 'a', 'p', 'e', 'r'), for good."""
     with pytest.raises(api.Refused, match="tags must be a list of strings"):
-        api.start_run(con, "dip-buyer", mode="live", tags=tags, now=NOW)
+        api.start_run(con, "dip-buyer", mode="live", currency="USD", tags=tags, now=NOW)
     assert store.runs(con) == []
 
 
 def test_no_tags_may_be_given_as_none(con):
-    assert api.start_run(con, "dip-buyer", mode="live", tags=None, now=NOW).tags == ()
+    r = api.start_run(con, "dip-buyer", mode="live", currency="USD", tags=None, now=NOW)
+    assert r.tags == ()
 
 
 @pytest.mark.parametrize("finest", ["3m", "4h"])   # Ruling R10: yfinance 1.8 has no 4h interval
 def test_a_live_run_needs_a_finest_timeframe_yahoo_serves(con, finest):
-    api.save_strategy(con, "odd", make().replace("timeframes: 1h", f"timeframes: {finest}, 1d"),
+    api.save_strategy(con, "odd", make().replace('["1h"]', f'["{finest}", "1d"]'),
                       now=NOW)
     with pytest.raises(api.Refused, match=rf"no {finest} bars; give the strategy a finest "
                                           r"timeframe of 1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w,"):
-        api.start_run(con, "odd", mode="live", now=NOW)
+        api.start_run(con, "odd", mode="live", currency="USD", now=NOW)
     assert store.runs(con, "odd") == []
-    assert api.start_run(con, "odd", mode="replay", at=NOW, now=NOW).mode == "replay"
+    r = api.start_run(con, "odd", mode="replay", currency="USD", at=NOW, now=NOW)
+    assert r.mode == "replay"
 
 
 @pytest.mark.parametrize("finest", ["1d", "1w"])
 def test_a_live_run_may_have_a_daily_or_weekly_finest_timeframe(con, finest):
     """Ruling R6: allowed; a future on them reads "not judged" (test_api_outcomes)."""
-    api.save_strategy(con, "slow", make().replace("timeframes: 1h", f"timeframes: {finest}"),
+    api.save_strategy(con, "slow", make().replace('["1h"]', f'["{finest}"]'),
                       now=NOW)
-    assert api.start_run(con, "slow", mode="live", now=NOW).mode == "live"
+    assert api.start_run(con, "slow", mode="live", currency="USD", now=NOW).mode == "live"
+
+
+def test_a_run_has_one_currency(con):
+    r = api.start_run(con, "dip-buyer", mode="live", currency="CAD", now=NOW)
+    assert r.currency == "CAD" and api.list_runs(con, "dip-buyer")[-1].currency == "CAD"
+
+
+@pytest.mark.parametrize("cur", [None, "GBP", ["USD"]])
+def test_start_run_refuses_a_missing_or_unknown_currency(con, cur):
+    before = len(store.runs(con))
+    with pytest.raises(api.Refused, match="CAD, USD"):
+        api.start_run(con, "dip-buyer", mode="live", currency=cur, now=NOW)
+    assert len(store.runs(con)) == before

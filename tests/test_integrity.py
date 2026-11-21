@@ -13,7 +13,7 @@ T1, T2, T3, T4 = (NOW + timedelta(hours=h) for h in (1, 2, 3, 4))
 LATER = NOW + timedelta(days=1)
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
             size=10, currency="USD", reasons="Dip into support.")
-TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes: 1h\n```\n"
+TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes = [\"1h\"]\n```\n"
 RUN = "dip-buyer-r1"
 
 
@@ -25,7 +25,7 @@ def con(tmp_path):
     store.create(db)
     with store.open(db) as conn:
         api.save_strategy(conn, "dip-buyer", TEXT, now=NOW)
-        api.start_run(conn, "dip-buyer", mode="replay", at=NOW, now=NOW)
+        api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
         t = api.trade(conn, RUN, **BASE, at=T1, now=LATER)
         api.move_order(conn, t.id, stop=99.0, reason="Trail.", at=T2, now=LATER)
         api.correct_trade(conn, t.id, fields={"stop": 98.0}, reason="Typo.", now=LATER)
@@ -108,8 +108,8 @@ def test_a_run_with_two_starts_is_reported(con):
 
 
 def test_a_run_with_no_start_is_reported(con):
-    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags)"
-                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'live', '[]')")
+    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
+                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'live', '[]', 'USD')")
     assert only(con, "run_started_stopped") == 1
 
 
@@ -121,8 +121,8 @@ def test_a_run_with_two_stops_is_reported(con):
 
 def test_a_stop_before_the_start_is_reported_and_one_second_after_is_not(con):
     # A run with no trades, so no entry falls after the stop (decision_dates' half).
-    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags)"
-                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'replay', '[]')")
+    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
+                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'replay', '[]', 'USD')")
     ev(con, "run_started", NOW, run="dip-buyer-r2")
     ev(con, "run_stopped", NOW + timedelta(seconds=1), run="dip-buyer-r2")
     assert found(con)[0] == 0
@@ -289,7 +289,8 @@ def test_an_open_report_at_or_after_the_close_is_reported(con):
 
 def test_a_version_whose_hash_does_not_match_its_text_is_reported(con):
     con.execute("INSERT INTO versions (strategy_id, version, text, text_hash, rules, timeframes,"
-                " saved_at) VALUES ('dip-buyer', 2, ?, 'bad', '{}', '[\"1h\"]', ?)",
+                " checklist, saved_at) VALUES ('dip-buyer', 2, ?, 'bad', '{}', '[\"1h\"]',"
+                " '[]', ?)",
                 (TEXT, NOW.isoformat()))
     assert only(con, "version_text_hash") == 1
 
@@ -331,3 +332,31 @@ def test_the_checker_never_raises_on_a_damaged_log(con):
     lines: list[str] = []
     assert integrity.run(con, emit=lines.append) >= 4
     assert any("trade RAW-2: report check failed: TypeError" in ln for ln in lines)
+
+
+ENTERED = {"entry_type": "limit", "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
+           "reasons": "x", "screenshots": []}
+
+
+@pytest.mark.parametrize(("key", "value", "says"), [
+    ("checks", [{"name": 1}], "checks[0]"),
+    ("checks", 5, "checks 5"),
+    ("market", {"x": "nan"}, "market['x']"),
+    ("checklist", [{"item": "x", "verdict": "maybe", "reason": "y"}], "checklist[0]"),
+])
+def test_entered_checks_reports_a_malformed_record_and_never_raises(con, key, value, says):
+    assert found(con)[0] == 0   # the API's own entries, results kept, report nothing
+    raw_trade(con, "RAW-1", entered=False)
+    id = ev(con, "entered", T1, trade="RAW-1", payload={**ENTERED, key: value})
+    assert only(con, "entered_checks") == 1
+    assert found(con)[1][0].startswith(f"entered_checks: event {id} (trade RAW-1): {says}")
+
+
+def test_integrity_reports_a_run_currency_mismatch_written_by_hand(con):
+    assert found(con)[0] == 0
+    t = tid(con, "ACME")
+    ev(con, "corrected", T4, trade=t, corrects=con.execute(
+        "SELECT id FROM events WHERE trade_id = ? AND kind = 'entered'", (t,)).fetchone()[0],
+       payload={"fields": {"currency": "CAD"}, "reason": "by hand"})
+    count, lines = found(con)
+    assert any(f"trade {t}: in CAD, but its run {RUN} is in USD" in ln for ln in lines)

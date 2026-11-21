@@ -16,19 +16,28 @@ Enter when price turns up from the pullback. Take profit at the previous high.
 
 ## Rules
 
-The desk reads this block when the strategy is saved, and a later release checks every trade
-against it. `min_reward_risk` is the reward divided
+The desk reads this block when the strategy is saved and checks every trade against it when the
+trade is entered, showing you the results. `min_reward_risk` is the reward divided
 by the risk: 2 means the target is twice as far from the entry as the stop is.
 
 ```rules
-timeframes: 1h, 15m
-min_reward_risk: 2
-max_risk_per_trade: 100 USD
-size: computed
-stop_required: yes
-target_required: yes
-max_open_trades: 2
-cooldown_after_stop: 1 day, same ticker
-daily_loss_limit: -2R
-banned: shorts, options
+timeframes = ["15m", "1h"]
+min_reward_risk = 2
+max_risk_per_trade = { USD = 100, CAD = 130 }
+stop_required = true
+target_required = true
+sides = ["long"]
+max_open_trades = 2
+cooldown_after_loss = { minutes = 60, same_ticker = true }
+daily_loss_limit = { R = 2 }
+
+[ema]
+length = 50
+timeframe = "1h"
+long = "above"
 ```
+
+## Checklist
+
+- The pullback came on lighter volume than the move up.
+- No tier-1 news inside the next hour.

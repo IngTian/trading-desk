@@ -1,11 +1,11 @@
-"""A strategy is Markdown: front matter with `name`, prose, and exactly one rules block."""
+"""A strategy is Markdown: front matter with `name`, prose, and exactly one rules block (TOML)."""
 from __future__ import annotations
 
 import hashlib
 import re
 from dataclasses import dataclass
 
-from desk import checks, rules
+from desk import rules
 from desk.errors import Refused
 
 _TIMEFRAME = re.compile(r"[1-9]\d*[mhdw]")
@@ -18,8 +18,9 @@ class ParsedStrategy:
     text: str                       # as given
     normalised: str                 # whitespace runs collapsed, trailing space stripped, \n only
     text_hash: str                  # sha256 of `normalised`
-    rules: dict[str, str]           # every rule except timeframes, values verbatim
+    rules: dict                     # the TOML table without timeframes
     timeframes: tuple[str, ...]     # finest first, e.g. ("15m", "1h")
+    checklist: tuple[str, ...]      # the items under `## Checklist`, in order
 
 
 def minutes(timeframe: str) -> int:
@@ -50,36 +51,79 @@ def name_of(text: str) -> str:
         "'name: Your strategy name', then '---'")
 
 
+def _checklist(text: str) -> tuple[str, ...]:
+    """The top-level bullets under `## Checklist`, up to the next heading outside a fence, each
+    without a task box ("[ ] "). A Checklist heading written another way, or a section with text
+    but no bullets, is refused: either would save with its items dropped."""
+    items: list[str] = []
+    fence: tuple[str, int] | None = None
+    section = 0     # sections seen
+    inside = prose = False
+    for line in text.replace("\r\n", "\n").split("\n"):
+        stripped = line.strip()
+        if fence is not None:
+            if re.fullmatch(f"{re.escape(fence[0])}{{{fence[1]},}}", stripped):
+                fence = None
+            continue
+        heading = re.match(r" {0,3}#{1,6} +(.*)", line)
+        if opened := re.match(r"(`{3,}|~{3,})", stripped):
+            fence = (opened.group(1)[0], len(opened.group(1)))
+        elif line.rstrip().lower() == "## checklist":
+            section += 1
+            if section > 1:
+                raise Refused("strategy: there are two '## Checklist' sections; keep one")
+            inside = True
+        elif heading and heading.group(1).rstrip(" \t:#").lower() == "checklist":
+            raise Refused(f"strategy: the heading {stripped!r} is not read as the checklist; "
+                          "write it as '## Checklist'")
+        elif inside and line.startswith("#") and line[1:].lstrip("#").startswith(" "):
+            inside = False
+        elif inside and (m := re.match(r"[-*+](?: +(.*))?$", line)):
+            item = re.sub(r"^\[[ xX]\](?: +|$)", "", (m.group(1) or "").strip())
+            if not item:
+                raise Refused("strategy: a checklist item is empty; write text after the bullet "
+                              "or delete it")
+            if item in items:
+                raise Refused(f"strategy: the checklist item {item!r} is written twice; the "
+                              "answers are matched by text, so keep one")
+            items.append(item)
+        elif inside and stripped:
+            prose = True
+    if prose and not items:
+        raise Refused("strategy: the '## Checklist' section has text but no bullet items; write "
+                      "each item on a line starting '- '")
+    return tuple(items)
+
+
 def parse(text: str) -> ParsedStrategy:
     """Read a strategy, or raise Refused naming the line the checks could not apply."""
     name = name_of(text)
-    found = rules.parse_rules_block(text, "strategy")
-    for rule, value in found.items():
-        if rule in checks.RETIRED:
-            raise Refused(
-                f"strategy: {rule!r} is not a rule in this version of the desk; delete the line")
-        if rule not in checks.RULE_NAMES:
-            raise Refused(
-                f"strategy: {rule!r} is not a rule the desk knows; the rules are "
-                f"{', '.join(sorted(checks.RULE_NAMES))}")
-        if rule != "timeframes" and (why := checks.read_value(rule, value)):
-            raise Refused(f"strategy: {rule}: {why}")
+    found = rules.read_block(text, "strategy")
     if "timeframes" not in found:
         raise Refused(
-            "strategy: the rules block needs 'timeframes', the candle sizes this strategy "
-            "reads, for example 'timeframes: 1h, 15m'")
+            'strategy: the rules block needs timeframes, the candle sizes this strategy '
+            'reads, for example timeframes = ["1h", "15m"]')
+    given = found.pop("timeframes")
+    if not isinstance(given, list):
+        raise Refused(f'strategy: timeframes: {given!r} is not a list; write it as '
+                      'timeframes = ["1h", "15m"]')
+    if not given:
+        raise Refused('strategy: timeframes: needs at least one candle size, for example '
+                      'timeframes = ["1h"]')
     named: dict[int, str] = {}  # minutes -> the one name kept for that candle size
-    for f in (f.strip() for f in found["timeframes"].split(",")):
-        if not _TIMEFRAME.fullmatch(f):
+    for f in given:
+        if not isinstance(f, str) or not _TIMEFRAME.fullmatch(f):
             raise Refused(
-                f"strategy: timeframes: {f!r} is not a candle size; write a whole number and "
-                f"m, h, d or w, such as 15m, 4h, 1d")
+                f"strategy: timeframes: {f!r} is not a timeframe; write a whole number and "
+                f'm, h, d or w in quotes, such as "15m", "4h", "1d"')
         # Two names for one size would tie, and "finest first" must not depend on which.
         if (kept := named.setdefault(minutes(f), f)) != f:
             raise Refused(f"strategy: timeframes: {kept} and {f} are the same timeframe; keep one")
     chosen = tuple(named[n] for n in sorted(named))
+    rules.validate(found, chosen)
+    checklist = _checklist(text)
     norm = normalise(text)
     return ParsedStrategy(
         name=name, text=text, normalised=norm,
         text_hash=hashlib.sha256(norm.encode()).hexdigest(),
-        rules={k: v for k, v in found.items() if k != "timeframes"}, timeframes=chosen)
+        rules=found, timeframes=chosen, checklist=checklist)

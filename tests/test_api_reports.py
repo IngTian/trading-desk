@@ -14,7 +14,7 @@ T1, T2, T3, T4 = (NOW + timedelta(hours=n) for n in (1, 2, 3, 4))
 LATER = NOW + timedelta(days=1)
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
             size=10, currency="USD", reasons="Dip into support.")
-TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes: 1h\n```\n"
+TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes = [\"1h\"]\n```\n"
 
 
 @pytest.fixture
@@ -22,8 +22,9 @@ def con(tmp_path):
     store.create(tmp_path / "desk.db")
     with store.open(tmp_path / "desk.db") as conn:
         api.save_strategy(conn, "dip-buyer", TEXT, now=NOW)
-        api.start_run(conn, "dip-buyer", mode="live", now=NOW)             # dip-buyer-r1
-        api.start_run(conn, "dip-buyer", mode="replay", at=NOW, now=NOW)   # dip-buyer-r2
+        api.start_run(conn, "dip-buyer", mode="live", currency="USD", now=NOW)  # dip-buyer-r1
+        api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW,
+                      now=NOW)  # dip-buyer-r2
         yield conn
 
 

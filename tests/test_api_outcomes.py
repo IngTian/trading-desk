@@ -12,7 +12,7 @@ from desk import api, bars, judge, store, yahoo
 
 B = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
 LATER = B + timedelta(hours=24)
-GOLD = "---\nname: Gold\n---\n\n# Gold\n\n```rules\ntimeframes: 1h, 4h\n```\n"
+GOLD = "---\nname: Gold\n---\n\n# Gold\n\n```rules\ntimeframes = [\"1h\", \"4h\"]\n```\n"
 BASE = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, stop=98.0, target=104.0,
             size=10, currency="USD", reasons="Invented.")
 
@@ -30,8 +30,8 @@ def con(tmp_path):
     store.create(tmp_path / "desk.db")
     with store.open(tmp_path / "desk.db") as c:
         api.save_strategy(c, "gold", GOLD, now=h(0))
-        api.start_run(c, "gold", mode="replay", at=h(0), now=h(0))   # gold-r1
-        api.start_run(c, "gold", mode="live", at=h(0), now=h(0))     # gold-r2
+        api.start_run(c, "gold", mode="replay", currency="USD", at=h(0), now=h(0))   # gold-r1
+        api.start_run(c, "gold", mode="live", currency="USD", at=h(0), now=h(0))     # gold-r2
         yield c
 
 
@@ -243,7 +243,7 @@ def test_there_is_no_coarser_fallback(con, fake_yahoo):
 
 def test_the_runs_version_sets_the_timeframe_not_the_latest(con, fake_yahoo):
     y = fake_yahoo(STOPPED)
-    api.save_strategy(con, "gold", GOLD.replace("timeframes: 1h, 4h", "timeframes: 15m"),
+    api.save_strategy(con, "gold", GOLD.replace('["1h", "4h"]', '["15m"]'),
                       if_current=api.get_strategy(con, "gold").current_hash, now=h(0))
     o = enter(con, "gold-r2", at=h(1), now=h(4)).outcome
     assert (o.status, o.timeframe) == ("exited", "1h") and {c[1] for c in y.calls} == {"60m"}
@@ -284,9 +284,9 @@ def day(n, o, hi, lo, c):
 
 
 def slow_run(con, finest):
-    api.save_strategy(con, "slow", GOLD.replace("timeframes: 1h, 4h", f"timeframes: {finest}"),
+    api.save_strategy(con, "slow", GOLD.replace('["1h", "4h"]', f'["{finest}"]'),
                       now=h(0))
-    return api.start_run(con, "slow", mode="live", at=h(0), now=h(0)).id
+    return api.start_run(con, "slow", mode="live", currency="USD", at=h(0), now=h(0)).id
 
 
 def test_a_live_stock_on_daily_bars_is_judged(con, fake_yahoo):

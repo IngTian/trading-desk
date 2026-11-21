@@ -1,4 +1,4 @@
-"""The v3 store: strategies, versions, runs, trades and an append-only log of decisions.
+"""The v4 store: strategies, versions, runs, trades and an append-only log of decisions.
 
 This module is the only one that writes desk.db. Current state is derived by folding events.
 No updates, no deletes. A correction is a new event naming the one it corrects.
@@ -18,9 +18,9 @@ KINDS = ("run_started", "run_stopped", "entered", "order_moved", "filled", "canc
          "closed", "corrected", "voided")
 
 
-# PRAGMA user_version of a v3 desk.db. Stamped at create and required at open, so a file that
+# PRAGMA user_version of a v4 desk.db. Stamped at create and required at open, so a file that
 # is not one -- the frozen legacy book above all -- is recognised before anything touches it.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class NotADeskDatabase(ValueError):
@@ -75,7 +75,7 @@ def _probe(db: Path, *, version: int = SCHEMA_VERSION, table: str = "events",
 def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connection:
     """Open the store. Sets row_factory, PRAGMA foreign_keys = ON, and journal_mode = DELETE.
 
-    The file is probed first (see _probe), so a file that is not a v3 desk.db is refused
+    The file is probed first (see _probe), so a file that is not a v4 desk.db is refused
     unchanged, read-only or not.
 
     DELETE, not WAL: the default folder is under ~/Documents, which iCloud syncs, and a
@@ -140,16 +140,19 @@ def add_strategy(con: sqlite3.Connection, id: str, at: str) -> None:
 
 
 def add_version(con, strategy_id: str, version: int, text: str, text_hash: str,
-                rules: dict, timeframes: list, at: str) -> None:
+                rules: dict, timeframes: list, checklist: list[str], at: str) -> None:
     _insert(con, "INSERT INTO versions (strategy_id, version, text, text_hash, rules, timeframes,"
-            " saved_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            " checklist, saved_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (strategy_id, version, text, text_hash,
-             json.dumps(rules, allow_nan=False), json.dumps(timeframes), at))
+             json.dumps(rules, allow_nan=False), json.dumps(timeframes),
+             json.dumps(checklist), at))
 
 
-def add_run(con, id: str, strategy_id: str, version: int, mode: str, tags: list) -> None:
-    _insert(con, "INSERT INTO runs (id, strategy_id, version, mode, tags) VALUES (?, ?, ?, ?, ?)",
-            (id, strategy_id, version, mode, json.dumps(tags)))
+def add_run(con, id: str, strategy_id: str, version: int, mode: str, tags: list,
+            currency: str) -> None:
+    _insert(con, "INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (id, strategy_id, version, mode, json.dumps(tags), currency))
 
 
 def add_trade(con, id: str, run_id: str, ticker: str, side: str, instrument: str,

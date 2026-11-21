@@ -4,17 +4,17 @@ A record of your trades under the strategies that allowed them. You write each s
 as a short Markdown file with a rules block. Every trade belongs to one strategy, at one
 version of it, in one run. The desk stores your decisions about each trade, with your
 reasons and screenshots, in an append-only SQLite log, and works out how each trade ended
-whenever you read it. A later release reports performance per strategy, per version and per
-run.
+whenever you read it, checks each trade against its strategy's rules when you enter it, and
+reports performance per strategy, per version and per run.
 
-**Status: 0.6.0, reported states, bars and the judge — on GitHub only.** PyPI keeps 0.5.0
+**Status: 0.7.0, rule checks at entry and statistics — on GitHub only.** PyPI keeps 0.5.0
 until 1.0, so install from the repository to use this version (see [Install](#install)).
-This release stores the record and
-reads each trade's outcome. A replay trade's outcome is what you report; a live trade's is
-worked out from price bars, with your reports overriding it. It does not yet check a trade
-against its rules, report statistics, or serve the agent interface. Those come in the
-releases listed under [Roadmap](#roadmap). The Python API below is what the agent interface
-will wrap, one call per tool.
+This release stores the record, reads each trade's outcome (a replay trade's is what you
+report; a live trade's is worked out from price bars, with your reports overriding it),
+checks each trade against its strategy's rules when it is entered, and reports statistics.
+It does not yet serve the agent interface; that comes in the release listed under
+[Roadmap](#roadmap). The Python API below is what the agent interface will wrap, one call per
+tool.
 
 > **Since 0.5 this is a new tool, not an upgrade of 0.4.** 0.4 was a portfolio book with a
 > terminal UI. Both are gone, along with its commands (`desk`, `desk-migrate`, `desk-check`,
@@ -25,7 +25,7 @@ will wrap, one call per tool.
 
 | Thing | What it is |
 |---|---|
-| **Strategy** | A Markdown file you write: the idea, how you enter, where the target and the stop go, and one `rules` block the desk reads (a later release checks each trade against it). |
+| **Strategy** | A Markdown file you write: the idea, how you enter, where the target and the stop go, one `rules` block that the desk checks each trade against, and a checklist that you answer at each entry, which the desk records and shows apart, taking no part in whether the trade kept its rules. |
 | **Version** | A strategy's text at one moment. Any change to the text makes a new version, except for spacing within a line, trailing spaces, line endings and extra blank lines. A version never changes once saved, so it tells you exactly what each of its trades was taken under. |
 | **Run** | One version deployed over a period. Its mode is `live` (trading now) or `replay` (bar-by-bar replay of the past). It also carries free-text tags such as `paper`, `real` or `GC 15m`, which the desk stores and never interprets. |
 | **Trade** | One entry in one run: ticker, side, a market or limit entry, stop, target, size, currency (CAD or USD), your reasons in your own words, and screenshots. |
@@ -37,8 +37,8 @@ Two principles hold everything together:
    are decisions too. Price bars are stored as they were fetched and never changed. Exits,
    fills, statistics and whether a trade kept its rules are worked out from those two
    whenever they are read. Nothing derived is stored, so nothing can go stale. (The one
-   exception, from the release that adds checks: the rule results the desk showed you when
-   you entered a trade are kept with it, as a record of what you saw.) A correction is a new
+   exception: the rule results the desk showed you when you entered a trade, and the market
+   values and checklist answers you gave, are kept with it, as a record of what you saw.) A correction is a new
    entry that is read in place of the one it corrects. Nothing is ever edited or deleted.
 2. **One timing rule.** An entry, a move, a close and a report each have an `at`, in UTC:
    the moment a decision takes effect, or the moment whose state a report gives. In a live
@@ -62,35 +62,65 @@ Buy a shallow pullback in a stock that is already rising, with the stop under th
 ## Rules
 
 ```rules
-timeframes: 1h, 15m
-min_reward_risk: 2
-max_risk_per_trade: 100 USD
-size: computed
-stop_required: yes
-target_required: yes
-max_open_trades: 2
-cooldown_after_stop: 1 day, same ticker
-daily_loss_limit: -2R
-banned: shorts, options
+timeframes = ["1h", "15m"]
+min_reward_risk = 2
+max_risk_per_trade = { USD = 100, CAD = 130 }
+stop_required = true
+target_required = true
+sides = ["long"]
+max_open_trades = 2
+cooldown_after_loss = { minutes = 60, same_ticker = true }
+daily_loss_limit = { R = 2 }
+
+[rsi]
+timeframe = "15m"
+long = { at_most = 40 }
 ```
+
+## Checklist
+
+- The pullback came on lighter volume than the move up.
 ````
 
-A template ships with the package (`desk/strategy.example.md`). Every value is read when
-the strategy is saved: an unknown rule, an unreadable value, a value in the wrong unit, or a
-duplicate is refused, naming the rule and the fix. No rule is ever silently dropped.
+A template ships with the package (`desk/strategy.example.md`). The block is TOML. Every
+value is read when the strategy is saved: an unknown rule, an unreadable value, a value in the
+wrong unit, or a duplicate is refused, naming the rule and the fix. No rule is ever silently
+dropped, and a block in the old line format (`timeframes: 1h`) is refused with the TOML form.
+
+When you enter a trade, the desk checks it against the rules of the run's version, as of the
+trade's `at`, and shows you each result: kept, breached, or unknown, naming what is missing.
+A breach never refuses a trade, and nothing is read as kept for want of data. The results
+shown are kept with the trade. `get_trade` also works them out again now, as `checks_now`,
+and lists the rules whose answer has changed in `checks_differ`.
 
 | Rule | Meaning |
 |---|---|
-| `timeframes` | Required. The bar sizes the strategy trades on, e.g. `15m, 1h`. A live run judges exits on the finest one, which must be a size Yahoo has: 1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w. |
-| `min_reward_risk` | The smallest reward-to-risk you will take. Reward-to-risk is the distance from the entry to the target divided by the distance from the entry to the stop, so `2` means the target is twice as far as the stop. |
-| `max_risk_per_trade` | The most you will lose if the stop is hit, as an amount and a currency, e.g. `100 USD`. Risk is size × the stop's distance × the point value. |
-| `size` | `computed`: the largest size `max_risk_per_trade` allows. |
-| `stop_required`, `target_required` | `yes` or `no`. |
+| `timeframes` | Required. The bar sizes the strategy trades on, e.g. `["15m", "1h"]`. A live run judges exits on the finest one, which must be a size Yahoo has: 1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w. |
+| `min_reward_risk` | The smallest reward-to-risk you will take: the distance from the entry to the target divided by the distance from the entry to the stop. |
+| `max_risk_per_trade` | The most you will lose if the stop is hit, per currency, e.g. `{ USD = 100, CAD = 130 }`. Risk is size × the stop's distance × the point value. The result names the largest size that passes. |
+| `stop_required`, `target_required` | `true` or `false`. |
+| `sides`, `instruments` | The sides (`"long"`, `"short"`) and instruments (`"stock"`, `"etf"`, `"future"`) you will trade. |
 | `max_open_trades` | How many trades this run may hold at once. A pending limit order counts. |
-| `cooldown_after_stop` | How long to wait after a stop-out before the next trade, e.g. `1h`, optionally `same ticker`. |
-| `daily_loss_limit` | The most R the run may lose in a day, e.g. `-2R`. One R is the amount a trade risks between its entry and its stop. |
-| `banned` | What you will not trade, e.g. `shorts, options, futures`. |
-| `stop_headroom_candles` | The least distance between entry and stop, counted in median candle ranges. |
+| `max_trades_per_day` | How many trades the run may enter in a day (the system timezone's midnight to midnight). |
+| `max_consecutive_losses` | How many losses in a row the run may take within the day before the next trade. |
+| `daily_loss_limit` | The most R the run may lose in a day, e.g. `{ R = 2 }`. A day at exactly that loss is kept. One R is the amount a trade risks between its entry and its stop. |
+| `cooldown_after_loss` | How long to wait after a loss, `{ minutes = 60, same_ticker = true }`; `same_ticker` is optional. |
+| `trading_hours` | `{ start = "09:45", end = "15:30", days = ["mon", "tue"] }`, in the system timezone. It may not cross midnight; `days` is optional. |
+| `[stop_atr]` | The stop's distance in ATRs (`length`, default 14), e.g. `at_least = 1.5`. |
+| `[rsi]`, `[macd]` | An indicator's value on a `timeframe`, with `at_least`, `at_most` or `between`, at the top or under `long` and `short`. `macd` takes `fast`, `slow`, `signal` and an `output` (`histogram`, `line` or `signal`). |
+| `[ema]`, `[sma]` | The close above or below a moving average (`length`, `timeframe`, `long = "above"`). Write `[[ema]]` more than once for several. |
+| `[facts]` | Named values you supply at entry, each with a comparison, e.g. `rvol = { at_least = 2 }`. |
+
+The checklist is the top-level bullets under `## Checklist`. Each is answered at entry with
+`pass` or `fail` and a reason. The answers are shown apart from the rule results and take no
+part in whether a trade kept its rules.
+
+The desk computes an indicator from price bars it fetches (a live run) or from the `market`
+dict you give `trade`, which holds a number per key the rules read, such as `rsi_14_15m`,
+`macd_hist_12_26_9_15m`, `close_1h`, `ema_200_1h` or a fact's own name. Your value is used in
+place of the desk's, and both are kept, so the gap from your chart shows. In a replay run give
+every key; in a live one, an indicator the bars cannot give reads unknown and names the key to
+supply (a future's Yahoo feed is delayed, so supply its keys).
 
 ## Install
 
@@ -102,7 +132,7 @@ That is this version, with Yahoo's price bars (which live runs are judged on). L
 `[yahoo]` for the desk alone. `pip install trading-desk` from PyPI gives 0.5.0 until 1.0 is
 released.
 
-Install it into the Python environment you will import it from: in 0.6 the desk is used
+Install it into the Python environment you will import it from: in 0.7 the desk is used
 from Python, and its only command is `trading-desk integrity`. Python 3.11 or later, built
 with SQLite 3.38 or later, on macOS or Linux. The package has no required dependencies. The
 `yahoo` extra adds yfinance (with pandas and numpy), which live runs read their bars
@@ -124,7 +154,7 @@ api.save_strategy(con, "pullback", text)
 def utc(day, hour, minute=0):   # a moment in the replayed history
     return datetime(2026, 3, day, hour, minute, tzinfo=UTC)
 
-run = api.start_run(con, "pullback", mode="replay", tags=["paper"], at=utc(2, 14))
+run = api.start_run(con, "pullback", mode="replay", currency="USD", tags=["paper"], at=utc(2, 14))
 t = api.trade(con, run.id, ticker="ACME", side="long", entry_type="limit",
               entry=100.0, stop=98.5, target=103.0, size=10, currency="USD",
               reasons="Held the rising trend line on the hourly; a limit at the dip's low.",
@@ -143,13 +173,14 @@ wrong, such as the broker's fill.
 | Call | Does |
 |---|---|
 | `save_strategy`, `get_strategy`, `list_strategies` | Save a strategy (a new version whenever its text changes), read one, list them. Saving over an existing strategy needs `if_current`, the `current_hash` from your last read, so two sessions can never overwrite each other's edits. |
-| `start_run`, `stop_run`, `list_runs` | Deploy a version, stop it, list runs. |
-| `trade` | Enter a trade, with your reasons and screenshots. A screenshot is a local file, copied into the store under its content hash, or an `https` link. |
+| `start_run`, `stop_run`, `list_runs` | Deploy a version, stop it, list runs. A run trades in one currency, `currency="CAD"` or `"USD"`, which every trade on it uses. |
+| `trade` | Enter a trade, with your reasons and screenshots. A screenshot is a local file, copied into the store under its content hash, or an `https` link. The desk checks it against the run's version's rules and keeps the results shown (`checks_shown`, `checklist`). `market` gives the values the rules read, `checklist` the answers (`[{"item": …, "verdict": "pass", "reason": …}]`). `check_only=True` returns a `CheckView` and writes nothing. |
 | `move_order`, `close_trade` | Move the stop or target, or close by hand: the decision to get out, which the bars price on a live run. On a replay run a position's exit is reported instead, with its price (`report(state="exited", kind="hand", price=…)`). Each needs a reason. |
 | `report` | Report the trade's state as of `at`, which every report gives: `filled`, `cancelled` (with `why`), `open` or `exited` (with `kind`, and with `price` for a hand exit). The only intake on a replay run; on a live run it overrides the bars. |
-| `correct_trade`, `void_trade` | Correct a mistake (a new entry, read in place of the one it corrects): the entry, a move (`fields={"move": 0, …}`) or a report (`fields={"report": "fill", "price": …}`). Void a trade: it stays in the log, and the releases that add statistics and checks leave it out of them. Or withdraw one report (`void_trade(report="fill")`), which is then read as absent. |
-| `get_trade`, `list_trades` | Read trades back, with their decisions folded together and their `outcome`, `judged` and `differs`. `list_trades(open=True)` gives the trades still pending or open, `open=False` the rest. |
+| `correct_trade`, `void_trade` | Correct a mistake (a new entry, read in place of the one it corrects): the entry, a move (`fields={"move": 0, …}`) or a report (`fields={"report": "fill", "price": …}`). Void a trade: it stays in the log, and statistics and the checks of other trades leave it out. Or withdraw one report (`void_trade(report="fill")`), which is then read as absent. |
+| `get_trade`, `list_trades` | Read trades back, with their decisions folded together and their `outcome`, `judged` and `differs`. `get_trade` also gives `checks_now`, the rule results worked out again now, and `checks_differ`, the rules whose answer changed since entry. `list_trades(open=True)` gives the trades still pending or open, `open=False` the rest. |
 | `trade_bars` | A live trade's bars at one of its run's timeframes (the finest by default): from `before` bars ahead of the entry through `after` bars past the exit, or through the latest bar while it is open, with the ranges no fetch covered and why. |
+| `stats` | Counts, rates and averages for one scope: `strategy=…`, `version=…` with a strategy, or `run=…`. Narrow it with `mode`, `tags`, or `conforming_only=True` (the trades whose results now are all kept). It returns a `desk.stats.Stats` with the trade ids in each bucket, the win rate, average and total R, P&L per currency, and the limit orders placed, filled and cancelled. Never a verdict or a ranking. |
 
 A refusal raises `api.Refused`, whose message says what was wrong and how to fix it. A
 refused call writes nothing. On a live run, `move_order`, `close_trade` and a correction of a
@@ -268,7 +299,7 @@ attachments/   screenshots, by content hash
 config.toml    optional settings, e.g. db = "elsewhere.db"
 ```
 
-0.6 does not read a 0.5 desk.db: there is no migration.
+0.7 does not read a 0.6 desk.db (or a 0.5 one): there is no migration.
 
 `$TRADING_DESK_DB` moves only the database: it names one file in place of `desk.db`.
 Screenshots and `bars.db` still go to the root, so to keep a session apart from your real
@@ -289,9 +320,9 @@ file itself, run `sqlite3 -readonly desk.db 'PRAGMA integrity_check'`.
 | Release | Adds |
 |---|---|
 | 0.5 | The record. |
-| 0.6 | Reported states, bars and the judge (this release). |
-| next | Rule checks when you enter a trade (the results you were shown are kept with it), and statistics per run, version and strategy: win rate, average R, total R, P&L, and the limit orders placed, filled and cancelled. Each can be narrowed by mode, by tags, or to the trades that kept their rules, worked out again on read. |
-| then | The MCP server and a Claude Code plugin, so an agent records your trades and decisions for you. |
+| 0.6 | Reported states, bars and the judge. |
+| 0.7 | Rule checks when you enter a trade (the results you were shown are kept with it), and statistics per run, version and strategy (this release). |
+| next | The MCP server and a Claude Code plugin, so an agent records your trades and decisions for you. |
 | 1.0 | The release, once all of the above has landed. |
 
 ## Development

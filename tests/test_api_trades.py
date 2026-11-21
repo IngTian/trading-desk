@@ -16,7 +16,7 @@ REPLACE = os.replace
 
 def make():
     return ("---\nname: Dip buyer\n---\n\n# Dip buyer\n\nBuy dips.\n\n"
-            "```rules\ntimeframes: 1h\nmin_reward_risk: 2\n```\n")
+            "```rules\ntimeframes = [\"1h\"]\nmin_reward_risk = 2\n```\n")
 
 
 @pytest.fixture
@@ -25,8 +25,8 @@ def con(tmp_path):
     store.create(db)
     with store.open(db) as conn:
         api.save_strategy(conn, "dip-buyer", make(), now=NOW)
-        api.start_run(conn, "dip-buyer", mode="live", now=NOW)
-        api.start_run(conn, "dip-buyer", mode="replay", at=NOW, now=NOW)
+        api.start_run(conn, "dip-buyer", mode="live", currency="USD", now=NOW)
+        api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
         yield conn
 
 
@@ -260,4 +260,10 @@ def test_screenshots_that_are_not_a_list_of_strings_are_refused(con, shots):
 def test_text_arguments_that_are_not_text_are_refused(con, kw, name):
     with pytest.raises(api.Refused, match=f"{name} must be text"):
         enter(con, **kw)
+    assert store.trades(con) == []
+
+
+def test_a_trade_in_another_currency_is_refused_and_writes_nothing(con):
+    with pytest.raises(api.Refused, match="is in USD; this trade is in CAD"):
+        enter(con, currency="CAD")
     assert store.trades(con) == []
