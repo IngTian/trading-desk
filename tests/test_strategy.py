@@ -108,6 +108,26 @@ def test_a_duplicate_or_empty_item_or_a_second_checklist_is_refused(body, match)
         strategy.parse(with_checklist(body))
 
 
+@pytest.mark.parametrize("heading", ["### Checklist", "## Checklist:", "# checklist",
+                                     "###### CHECKLIST :", " ## Checklist", "## Checklist ##"])
+def test_a_checklist_heading_written_another_way_is_refused(heading):
+    with pytest.raises(Refused, match="write it as '## Checklist'"):
+        strategy.parse(with_checklist(f"{heading}\n- a\n"))
+
+
+@pytest.mark.parametrize("body", ["1. a\n2. b\n", "The trend is up.\n", "a\n```\n- b\n```\n"])
+def test_a_checklist_with_text_but_no_bullet_items_is_refused(body):
+    with pytest.raises(Refused, match="no bullet items; write each item on a line starting '- '"):
+        strategy.parse(with_checklist(f"## Checklist\n{body}"))
+
+
+def test_a_task_box_is_not_part_of_the_item_and_prose_beside_items_is_kept_out():
+    text = with_checklist("## Checklist\nAnswer each.\n- [ ] a\n- [x] b\n* [X] c\n- [ ]\n")
+    with pytest.raises(Refused, match="empty"):
+        strategy.parse(text)
+    assert strategy.parse(text.replace("- [ ]\n", "")).checklist == ("a", "b", "c")
+
+
 def test_no_checklist_section_is_an_empty_checklist():
     assert strategy.parse(make()).checklist == ()
     assert strategy.parse(with_checklist("## Checklist\n")).checklist == ()

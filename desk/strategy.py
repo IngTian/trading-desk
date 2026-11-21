@@ -52,17 +52,20 @@ def name_of(text: str) -> str:
 
 
 def _checklist(text: str) -> tuple[str, ...]:
-    """The top-level bullets under `## Checklist`, up to the next heading outside a fence."""
+    """The top-level bullets under `## Checklist`, up to the next heading outside a fence, each
+    without a task box ("[ ] "). A Checklist heading written another way, or a section with text
+    but no bullets, is refused: either would save with its items dropped."""
     items: list[str] = []
     fence: tuple[str, int] | None = None
     section = 0     # sections seen
-    inside = False
+    inside = prose = False
     for line in text.replace("\r\n", "\n").split("\n"):
         stripped = line.strip()
         if fence is not None:
             if re.fullmatch(f"{re.escape(fence[0])}{{{fence[1]},}}", stripped):
                 fence = None
             continue
+        heading = re.match(r" {0,3}#{1,6} +(.*)", line)
         if opened := re.match(r"(`{3,}|~{3,})", stripped):
             fence = (opened.group(1)[0], len(opened.group(1)))
         elif line.rstrip().lower() == "## checklist":
@@ -70,10 +73,13 @@ def _checklist(text: str) -> tuple[str, ...]:
             if section > 1:
                 raise Refused("strategy: there are two '## Checklist' sections; keep one")
             inside = True
+        elif heading and heading.group(1).rstrip(" \t:#").lower() == "checklist":
+            raise Refused(f"strategy: the heading {stripped!r} is not read as the checklist; "
+                          "write it as '## Checklist'")
         elif inside and line.startswith("#") and line[1:].lstrip("#").startswith(" "):
             inside = False
         elif inside and (m := re.match(r"[-*+](?: +(.*))?$", line)):
-            item = (m.group(1) or "").strip()
+            item = re.sub(r"^\[[ xX]\](?: +|$)", "", (m.group(1) or "").strip())
             if not item:
                 raise Refused("strategy: a checklist item is empty; write text after the bullet "
                               "or delete it")
@@ -81,6 +87,11 @@ def _checklist(text: str) -> tuple[str, ...]:
                 raise Refused(f"strategy: the checklist item {item!r} is written twice; the "
                               "answers are matched by text, so keep one")
             items.append(item)
+        elif inside and stripped:
+            prose = True
+    if prose and not items:
+        raise Refused("strategy: the '## Checklist' section has text but no bullet items; write "
+                      "each item on a line starting '- '")
     return tuple(items)
 
 
