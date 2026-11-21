@@ -56,7 +56,7 @@ def canonical_ticker(typed: str) -> tuple[str, str | None]:
     so it is taken as typed.
 
     Here rather than in the api because every comparison of tickers needs it: the api on what
-    was typed, and cooldown_after_stop's same-ticker scope on the tickers it compares.
+    was typed, and cooldown_after_loss's same-ticker scope on the tickers it compares.
     """
     upper = typed.strip().upper()
     continuous = _CONTINUOUS.match(upper)
