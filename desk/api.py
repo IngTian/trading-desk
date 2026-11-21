@@ -523,6 +523,45 @@ def _close_order(trade: str, d: model.Decisions, when: datetime) -> None:
                       "later `at`.")
 
 
+def _not_ended(trade: str, o: judge.Outcome, minutes: int, when: datetime, what: str) -> None:
+    """Refuse a `what` ("move" or "close") at `when` that the judged end overtook: an exit in a bar
+    that opened before `when` (Q31), or a cancellation at or before it. A reported end is in the
+    record, where plan 2's checks and report_problem already order decisions against it."""
+    if {"exit", "cancel"} & set(o.reported):
+        return
+    if o.status == "exited" and o.exited_at - timedelta(minutes=minutes) < when:
+        out = o.exited_at.isoformat()
+        if what == "move":
+            fix = (f"If it is in fact still open at the broker, report it open at or after {out}, "
+                   "the close of the bar that ended it (report(trade, state='open', at=…, "
+                   "reason=…)); an open report inside that bar leaves its exit standing. The judge "
+                   "then goes on from that report, so this move meets only an end the bars find "
+                   "after it.")
+        elif when > o.exited_at:
+            fix = (f"If the trade was in fact still open then, report it open at or after {out} "
+                   "and before this close (report(trade, state='open', at=…, reason=…)), then "
+                   "close again; or report the exit the broker made, with its price "
+                   "(report(trade, state='exited', price=…, at=…, reason=…)): a report is not "
+                   "refused by the bars.")
+        else:  # rule 12 puts an open report before the close; the restart needs it at or after out
+            fix = (f"This close is not after the bar that exited the trade at {out}, so an open "
+                   "report cannot set that exit aside (it would have to come before the close and "
+                   "at or after the exit); report the exit the broker made, with its price "
+                   "(report(trade, state='exited', price=…, at=…, reason=…)): a report is not "
+                   "refused by the bars.")
+        raise Refused(f"Trade {trade!r} already exited at {out}, at {o.exit} ({o.exit_reason}), in "
+                      f"a bar that opened before the {what} at {when.isoformat()}, so the {what} "
+                      f"has nothing to act on. {fix}")
+    if o.status == "cancelled" and o.cancelled_at <= when:
+        raise Refused(f"Trade {trade!r}'s limit order was cancelled at "
+                      f"{o.cancelled_at.isoformat()}; there is no order to {what}.")
+
+
+def _finest(con, row: sqlite3.Row) -> int:
+    """The minutes of the trade's run's finest timeframe, the one it is judged on."""
+    return next(iter(_timeframes(con, store.run(con, row["run_id"]))))
+
+
 def _consistent(con, row: sqlite3.Row) -> None:
     """Refuse when the trade's reports, as the record now stands, do not fit it. Called after
     the append, inside the transaction, so a refusal rolls the append back."""
@@ -545,10 +584,14 @@ def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float 
         raise Refused("A move names a new stop, a new target, or both; give at least one.")
     _price("stop", stop, required=False)
     _price("target", target, required=False)
+    _outcomes(con, row, model.decisions_of(con, trade), now)  # the fetch, before the write lock
     with store.transaction(con):
         d = _not_void(con, trade)[0]
         _after_entry(trade, d, when)
         _before_close(trade, d, when)
+        # judged without the move: it takes effect from the first bar opening at or after `at`
+        _not_ended(trade, _outcomes(con, row, d, now, fetch=False)[0], _finest(con, row), when,
+                   "move")
         moved ={k: float(v) for k, v in (("stop", stop), ("target", target)) if v is not None}
         store.append(con, kind="order_moved", run_id=row["run_id"], trade_id=trade, at=_at(when),
                      recorded_at=_at(now), payload={**moved, "reason": reason})
@@ -565,10 +608,20 @@ def close_trade(con: sqlite3.Connection, trade: str, *, reason: str, at: datetim
     now = _aware(now)
     row = _decision(con, trade, reason)
     when = _decision_time(store.run(con, row["run_id"])["mode"], at, now, "close a trade")
+
+    def closed(d: model.Decisions) -> model.Decisions:
+        return replace(d, close_at=when, close_reason=reason, close_kind="hand", close_price=None)
+    _outcomes(con, row, closed(model.decisions_of(con, trade)), now)  # the fetch, before the lock
     with store.transaction(con):
         d = _not_void(con, trade)[0]
         _not_closed(trade, d)
         _close_order(trade, d, when)
+        # Judged with the close, which changes what counts in the last bar opening before `at`
+        # (the author's ruling, Option A, 2026-11-20): a bar finished at `at` is judged in full,
+        # one still forming at it counts only the stop. The close's own result is not refused.
+        o = _outcomes(con, row, closed(d), now, fetch=False)[0]
+        if o.exit_reason != "hand" and not (o.status == "cancelled" and o.cancelled_at == when):
+            _not_ended(trade, o, _finest(con, row), when, "close")
         store.append(con, kind="closed", run_id=row["run_id"], trade_id=trade, at=_at(when),
                      recorded_at=_at(now), payload={"reason": reason})
         _consistent(con, row)
@@ -714,6 +767,11 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
     when = _aware(fields["at"], "at") if "at" in fields else None
     if which is not None and when is not None:
         _not_after_now(when, now)
+
+    def unmoved(d: model.Decisions) -> model.Decisions:  # as move_order judges, before its move
+        return replace(d, moves=tuple(mv for i, mv in enumerate(d.moves) if i != index))
+    if index is not None and when is not None:  # a move's `at` (Q32): the fetch, before the lock
+        _outcomes(con, row, unmoved(model.decisions_of(con, trade)), now)
     with store.transaction(con):  # the decisions the correction is checked against, under the lock
         d, entered, move_ids, reports = _not_void(con, trade)
         if which is not None:
@@ -746,6 +804,8 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
             if when is not None:
                 _after_entry(trade, d, when)
                 _before_close(trade, d, when)
+                _not_ended(trade, _outcomes(con, row, unmoved(d), now, fetch=False)[0],
+                           _finest(con, row), when, "move")
             corrects = move_ids[index]
         stored = {**fields, **{k: float(fields[k]) for k in ("entry", "stop", "target",
                                                              "point_value", "price")

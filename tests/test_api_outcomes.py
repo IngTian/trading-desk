@@ -1,5 +1,6 @@
 """Every trade read carries its outcome: a replay trade's from its reports alone, a live trade's
 judged from Yahoo bars (a stub here) with the reports laid over it. Every figure is invented."""
+import re
 import sqlite3
 from collections import Counter
 from contextlib import closing
@@ -7,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, bars, judge, store
+from desk import api, bars, judge, store, yahoo
 
 B = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
 LATER = B + timedelta(hours=24)
@@ -314,9 +315,10 @@ def test_reads_refuse_a_naive_now_and_arguments_of_the_wrong_type(con, call, say
                                now=h(4)), False),          # a report: the author decided no close
     (lambda con, t: api.close_trade(con, t, reason="Out.", at=h(3.5), now=h(4)), True)])
 def test_the_judged_side_names_no_close_the_author_did_not_decide(con, fake_yahoo, ends, kept):
+    t = enter(con, "gold-r2", at=h(1), now=h(1))
+    ends(con, t.id)            # the network is off: a close the bars would refuse is accepted
     fake_yahoo(STOPPED)
-    t = enter(con, "gold-r2", at=h(1), now=h(4))                  # the bars: out at 98 at h(2)
-    v = ends(con, t.id)
+    v = api.get_trade(con, t.id, now=h(4))                         # the bars: out at 98 at h(2)
     assert v.judged.exit_reason == "stop"
     assert any(n.startswith("the close at") for n in v.judged.notes) is kept
 
@@ -347,3 +349,169 @@ def test_a_replay_read_that_fails_keeps_its_reports_and_carries_no_judged_outcom
     other = enter(con, "gold-r1", at=h(1), now=LATER).outcome     # nothing reported: not judged
     assert other.status == "not judged"
     assert other.notes == ("bars could not be read: ValueError: invented failure",)
+
+
+BOTH = [STOPPED[0], bar(1, 100, 104.5, 97.5, 101), *STOPPED[2:]]   # h(1) reaches 98 and 104
+TOUCHED = [bar(0, 100, 101, 99, 100.5), bar(1, 100, 101, 99, 100.5),
+           bar(2, 100.5, 104.5, 100, 103), bar(3, 103, 103.5, 102.5, 103)]   # h(2) touches 104
+STOP = re.escape(f"exited at {h(2).isoformat()}, at 98.0 (stop)")
+
+
+def live_trade(con, fake_yahoo, rows, **kw):
+    fake_yahoo(rows)
+    return enter(con, "gold-r2", **{"at": h(1), "now": h(1), **kw})
+
+
+def test_a_move_after_the_judged_exit_is_refused_naming_when_and_at_what_price(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED)
+    with pytest.raises(api.Refused, match=STOP):
+        api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(2), now=h(4))
+    assert [e["kind"] for e in store.events(con, trade_id=t.id)] == ["entered"]
+
+
+def test_a_move_at_the_exit_bars_open_is_in_force_in_that_bar(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED)
+    assert api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(1),
+                          now=h(4)).outcome.status == "open"
+
+
+@pytest.mark.parametrize("rows", [STOPPED, BOTH], ids=["stop", "stop and target"])
+def test_a_close_after_the_judged_exit_is_refused(con, fake_yahoo, rows):
+    t = live_trade(con, fake_yahoo, rows)
+    for at in (h(3), h(2)):   # the exit before the last bar; in it (h(1), finished at h(2))
+        with pytest.raises(api.Refused, match=STOP):
+            api.close_trade(con, t.id, reason="Out.", at=at, now=h(4))
+    assert [e["kind"] for e in store.events(con, trade_id=t.id)] == ["entered"]
+
+
+def test_a_close_after_a_finished_bar_that_touched_the_target_is_refused(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, TOUCHED)
+    target = re.escape(f"exited at {h(3).isoformat()}, at 104.0 (target)")
+    with pytest.raises(api.Refused, match=target):   # the h(2) bar is judged in full
+        api.close_trade(con, t.id, reason="Out.", at=h(3), now=h(4))
+    assert [e["kind"] for e in store.events(con, trade_id=t.id)] == ["entered"]
+    o = api.close_trade(con, t.id, reason="Out.", at=h(2), now=h(4)).outcome   # before that bar
+    assert (o.status, o.exit, o.exited_at, o.exit_reason) == ("exited", 100.5, h(2), "hand")
+
+
+def test_a_live_close_made_mid_bar_ignores_that_bars_target(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, [bar(0, 100, 101, 99, 100.5), bar(1, 100, 104.5, 99.5, 103),
+                                     bar(2, 103, 103.5, 102.5, 103)])
+    # bar 1 forming at h(1.5)
+    o = api.close_trade(con, t.id, reason="Out.", at=h(1.5), now=h(3)).outcome
+    assert (o.status, o.exit, o.exited_at, o.exit_reason) == ("exited", 103.0, h(2), "hand")
+
+
+def test_a_live_close_recorded_after_its_bar_reached_the_stop_is_refused(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED[:3])
+    with pytest.raises(api.Refused, match=STOP) as err:   # bar 1 forming at h(1.5): its stop counts
+        api.close_trade(con, t.id, reason="Out.", at=h(1.5), now=h(3))
+    assert "cannot set that exit aside" in str(err.value) and "state='open'" not in str(err.value)
+    assert [e["kind"] for e in store.events(con, trade_id=t.id)] == ["entered"]
+
+
+def test_a_reported_exit_after_the_judged_exit_is_accepted_and_a_move_before_it_stands(con,
+                                                                                      fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED)
+    with pytest.raises(api.Refused, match=re.escape("state='exited'")):   # the fix it names
+        api.close_trade(con, t.id, reason="Out.", at=h(3), now=h(4))
+    v = api.report(con, t.id, state="exited", reason="The broker's fill.", price=99.25, at=h(3),
+                   now=h(4))
+    assert (v.outcome.exit, v.outcome.reported, v.judged.exit) == (99.25, ("exit",), 98.0)
+    assert api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(2.5),
+                          now=h(4)).decisions.moves
+
+
+def test_after_an_open_report_a_move_and_a_close_are_judged_from_it(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED)
+    with pytest.raises(api.Refused, match=re.escape("state='open'")):     # the fix it names
+        api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(3), now=h(4))
+    api.report(con, t.id, state="open", reason="Still in at the broker.", at=h(2.5), now=h(4))
+    assert api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(3), now=h(4)).decisions.moves
+    o = api.close_trade(con, t.id, reason="Out.", at=h(4), now=h(5)).outcome
+    assert (o.status, o.exit, o.exited_at, o.exit_reason) == ("exited", 99.5, h(4), "hand")
+
+
+def test_an_open_report_inside_the_exit_bar_does_not_reopen_it(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED)
+    o = api.report(con, t.id, state="open", reason="Still in.", at=h(1.5), now=h(4)).outcome
+    assert (o.status, o.exited_at) == ("exited", h(2))         # the stop in that bar stands
+    assert any("inside the bar" in n for n in o.notes)
+    fix = re.escape(f"report it open at or after {h(2).isoformat()}")
+    with pytest.raises(api.Refused, match=fix):
+        api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(1.5), now=h(4))
+    api.report(con, t.id, state="open", reason="Still in.", at=h(2), now=h(4))   # its bar's close
+    v = api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(1.5), now=h(4))
+    assert v.decisions.moves and v.outcome.status == "open"
+
+
+def test_a_corrected_move_after_the_judged_exit_is_refused(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED)
+    api.move_order(con, t.id, stop=97.0, reason="Wider.", at=h(1), now=h(4))
+    with pytest.raises(api.Refused, match="already exited"):
+        api.correct_trade(con, t.id, fields={"move": 0, "at": h(2)}, reason="Typo.", now=h(4))
+    assert api.correct_trade(con, t.id, fields={"stop": 98.5}, reason="Typo.",
+                             now=h(4)).decisions.entry.stop == 98.5   # an entry fix: never refused
+
+
+@pytest.mark.parametrize("run", ["gold-r1", "gold-r2"], ids=["replay", "live"])
+def test_a_move_on_a_limit_the_run_stop_cancelled_is_refused(con, fake_yahoo, run):
+    fake_yahoo(STOPPED)
+    t = enter(con, run, entry_type="limit", entry=90.0, stop=88.0, target=94.0, at=h(1), now=h(1))
+    api.stop_run(con, run, at=h(2), now=h(4))
+    with pytest.raises(api.Refused, match=re.escape(f"cancelled at {h(2).isoformat()}")):
+        api.move_order(con, t.id, stop=89.0, reason="Tighter.", at=h(3), now=h(4))
+    assert api.move_order(con, t.id, stop=89.0, reason="Tighter.", at=h(1.5),
+                          now=h(4)).outcome.status == "cancelled"
+
+
+def test_a_move_on_a_trade_not_judged_is_accepted(con):
+    t = enter(con, "gold-r2", at=h(1), now=h(1))
+    assert api.move_order(con, t.id, stop=99.0, reason="Tighter.", at=h(5),
+                          now=h(6)).decisions.moves
+
+
+def test_the_fetch_happens_before_the_write_lock(con, fake_yahoo, monkeypatch):
+    fake_yahoo([bar(n, 100, 101, 99.5, 100.5) for n in range(4)])
+    seen, real = [], yahoo.fetch
+    monkeypatch.setattr(yahoo, "fetch",
+                        lambda *a, **k: (seen.append(con.in_transaction), real(*a, **k))[1])
+    t = enter(con, "gold-r2", at=h(1), now=h(1))
+    api.move_order(con, t.id, stop=99.0, reason="Tighter.", at=h(4), now=h(4))
+    assert seen and not any(seen)
+
+
+def test_a_live_move_in_the_bar_the_trade_then_exits_in_reads_no_effect(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED[:3])
+    # bar 1 still forming at h(1.5)
+    api.move_order(con, t.id, stop=99.5, reason="Tighter.", at=h(1.5), now=h(1.5))
+    o = api.get_trade(con, t.id, now=h(3)).outcome
+    assert (o.exit, o.exited_at) == (98.0, h(2)) and any("no effect" in n for n in o.notes)
+
+
+def test_a_close_at_the_exit_bars_close_names_only_the_exit_report(con, fake_yahoo):
+    t = live_trade(con, fake_yahoo, STOPPED)
+    with pytest.raises(api.Refused, match="cannot set that exit aside") as err:   # at h(2) itself
+        api.close_trade(con, t.id, reason="Out.", at=h(2), now=h(4))
+    assert "state='open'" not in str(err.value)
+
+
+def test_a_move_at_the_moment_the_run_stop_cancelled_the_limit_is_refused(con):
+    t = enter(con, "gold-r1", entry_type="limit", at=h(1), now=LATER)
+    api.stop_run(con, "gold-r1", at=h(2), now=LATER)
+    with pytest.raises(api.Refused, match="no order to move"):
+        api.move_order(con, t.id, stop=97.0, reason="Tighter.", at=h(2), now=LATER)
+
+
+def test_a_failed_fetch_is_not_tried_again_under_the_write_lock(con, monkeypatch):
+    seen = []
+
+    def down(*a, **k):
+        seen.append(con.in_transaction)
+        raise OSError("invented outage")
+    monkeypatch.setattr(yahoo, "fetch", down)
+    t = enter(con, "gold-r2", at=h(1), now=h(1))
+    api.move_order(con, t.id, stop=99.0, reason="Tighter.", at=h(2), now=h(4))
+    api.correct_trade(con, t.id, fields={"move": 0, "at": h(3)}, reason="Typo.", now=h(4))
+    api.close_trade(con, t.id, reason="Out.", at=h(4), now=h(4))
+    assert seen and not any(seen)
