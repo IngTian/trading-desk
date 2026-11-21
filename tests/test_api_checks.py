@@ -153,6 +153,21 @@ def test_a_damaged_stored_checklist_reads_not_answered(con, stored):
     assert t.checks_shown is None
 
 
+@pytest.mark.parametrize("stored", [*({"rvol": v} for v in ("2", True, None, [2], 10 ** 400)),
+                                    "rvol", ["rvol"]])
+def test_a_damaged_stored_market_value_reads_not_supplied(con, stored):
+    _, replay = version(con, RULES + "[facts]\nrvol = { at_least = 2 }\n")
+    store.add_trade(con, "raw-1", replay, "ACME", "long", "stock", 1.0, "USD")
+    store.append(con, kind="entered", run_id=replay, trade_id="raw-1", at=NOW.isoformat(),
+                 recorded_at=NOW.isoformat(),
+                 payload={"entry_type": "market", "entry": 100.0, "stop": 98.0, "target": 104.0,
+                          "size": 10, "reasons": "Written by hand.", "screenshots": [],
+                          "market": stored})
+    r = now_of(api.get_trade(con, "raw-1", now=NOW), "rvol")
+    assert (r.ok, r.says) == (None, "supply rvol")
+    assert "rvol" in api.stats(con, run=replay, conforming_only=True, now=NOW).left_out["unknown"]
+
+
 @pytest.mark.parametrize("v", ["yes", 1, [True]])
 def test_check_only_must_be_true_false_or_left_out(con, v):
     with pytest.raises(api.Refused, match="check_only must be true, false or left out"):

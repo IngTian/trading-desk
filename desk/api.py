@@ -492,8 +492,11 @@ def _results_now(con, row: sqlite3.Row, d: model.Decisions, others: tuple[checks
     run = store.run(con, row["run_id"])
     rules = _version(con, run)[0]
     seq = next(i for i, t in enumerate(store.trades(con, run["id"])) if t["id"] == row["id"])
+    # a damaged stored value reads not supplied (integrity reports it), as a checklist does (R5)
+    market = {k: v for k, v in (d.market.items() if isinstance(d.market, dict) else ())
+              if isinstance(v, int | float) and not isinstance(v, bool) and _finite(v)}
     return tuple(checks.run_checks(_plan(row, d), rules, checks.Context(
-        at=d.entry.at, seq=seq, currency=run["currency"], others=others, market=d.market,
+        at=d.entry.at, seq=seq, currency=run["currency"], others=others, market=market,
         computed=_figures(con, run, row["ticker"], row["instrument"], d.currency, rules,
                           d.entry.at, now))))
 
