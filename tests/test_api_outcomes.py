@@ -218,6 +218,16 @@ def test_a_trade_not_judged_for_want_of_the_network_is_judged_once_bars_come(con
     assert [e["kind"] for e in store.events(con, trade_id=t.id)] == ["entered"]
 
 
+def test_a_reported_end_bounds_the_fetch_while_the_judged_side_cannot_finish(con, fake_yahoo):
+    t = enter(con, "gold-r2", at=h(1), now=h(1))                    # the network is off
+    api.report(con, t.id, state="exited", reason="The broker's fill.", price=101.0, at=h(6),
+               now=h(6))
+    y = fake_yahoo([])                  # Yahoo gives nothing, so the judged side never finishes
+    for n in (100, 200):
+        assert api.get_trade(con, t.id, now=h(n)).judged.status == "closing"
+    assert [c[3] for c in y.calls] == [h(7), h(7)]   # through the bar holding the end, not now
+
+
 def test_a_live_read_after_the_close_reads_open_through_the_last_complete_bar(con, fake_yahoo):
     fake_yahoo([bar(n, 100, 101, 99.5, 100.5) for n in range(4)], market_time=h(3.5))
     t = enter(con, "gold-r2", at=h(1), now=h(1))

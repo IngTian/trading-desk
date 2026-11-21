@@ -67,6 +67,14 @@ def test_a_clipped_start_already_kept_says_nothing(con, fake_yahoo):
     assert y.calls == [("ACME", "15m", h(0), h(1))]
 
 
+def test_a_window_kept_and_ending_before_the_clip_says_nothing(con, fake_yahoo):
+    e = h(0) - timedelta(days=65)       # before the 59 days 15m bars are kept
+    bars.add(con, "yahoo", "ACME", 15, [], e - timedelta(days=5), e, AT)   # read before
+    y = fake_yahoo([])
+    assert yahoo.ensure(con, "ACME", 15, e - timedelta(days=5), h(0), end=e) is None
+    assert y.calls == []
+
+
 def test_a_daily_fetch_is_not_clipped(con, fake_yahoo):
     y = fake_yahoo([])
     assert yahoo.ensure(con, "ACME", 1440, h(0) - timedelta(days=800), h(0)) is None

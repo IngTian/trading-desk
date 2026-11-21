@@ -49,7 +49,14 @@ def test_by_default_the_trades_own_bars_from_the_entry_bar_through_the_exit_bar(
     t, _ = live_trade(con, fake_yahoo)
     tb = api.trade_bars(con, t.id, now=h(6))
     assert tb.timeframe == "1h" and [b.open_time for b in tb.bars] == [h(1), h(2), h(3)]
-    assert tb.missing == ()
+    assert (tb.missing, tb.notes) == ((), ())
+
+
+def test_bars_that_cannot_be_fetched_say_why(con):
+    t = enter(con, "gold-r2", at=h(1), now=h(1))                    # the network is off
+    tb = api.trade_bars(con, t.id, now=h(4))
+    assert (tb.bars, tb.missing) == ((), ((h(1), h(4)),))
+    assert len(tb.notes) == 1 and "the network is off in tests" in tb.notes[0]
 
 
 def test_before_and_after_add_bars_either_side(con, fake_yahoo):

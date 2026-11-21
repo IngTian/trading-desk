@@ -143,7 +143,7 @@ wrong, such as the broker's fill.
 | `report` | Report the trade's state as of `at`, which every report gives: `filled`, `cancelled` (with `why`), `open` or `exited` (with `kind`, and with `price` for a hand exit). The only intake on a replay run; on a live run it overrides the bars. |
 | `correct_trade`, `void_trade` | Correct a mistake (a new entry, read in place of the one it corrects): the entry, a move (`fields={"move": 0, …}`) or a report (`fields={"report": "fill", "price": …}`). Void a trade: it stays in the log, and the releases that add statistics and checks leave it out of them. Or withdraw one report (`void_trade(report="fill")`), which is then read as absent. |
 | `get_trade`, `list_trades` | Read trades back, with their decisions folded together and their `outcome`, `judged` and `differs`. `list_trades(open=True)` gives the trades still pending or open, `open=False` the rest. |
-| `trade_bars` | A live trade's bars at one of its run's timeframes (the finest by default): from `before` bars ahead of the entry through `after` bars past the exit, or through the latest bar while it is open, with the ranges no fetch covered. |
+| `trade_bars` | A live trade's bars at one of its run's timeframes (the finest by default): from `before` bars ahead of the entry through `after` bars past the exit, or through the latest bar while it is open, with the ranges no fetch covered and why. |
 
 A refusal raises `api.Refused`, whose message says what was wrong and how to fix it. A
 refused call writes nothing. On a live run, `move_order`, `close_trade` and a correction of a

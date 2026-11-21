@@ -96,15 +96,16 @@ def ensure(con: sqlite3.Connection, symbol: str, minutes: int, start: datetime, 
     complete bars, with one span per gap filled. Returns why part of the range is still missing,
     or None. `now` alone sets the retention clip."""
     name, bar = INTERVALS[minutes], timedelta(minutes=minutes)
+    until = now if end is None else min(end, now)
     covered = bars.covered(con, SOURCE, symbol, minutes)
     why = []
     if (days := RETENTION_DAYS.get(minutes)) is not None and start < (
             limit := now - timedelta(days=days)):
-        if _gaps(covered, start, limit):   # a range read before is kept, so it is not missing
+        if _gaps(covered, start, min(limit, until)):   # a range kept from before is not missing
             why.append(f"Yahoo keeps {name} bars for about {days} days, so bars before "
                        f"{limit:%Y-%m-%d} cannot be fetched")
         start = limit
-    for a, b in _gaps(covered, start, now if end is None else min(end, now)):
+    for a, b in _gaps(covered, start, until):
         if b - a < bar:   # no complete bar fits in it
             continue
         rows: list[judge.Bar] = []

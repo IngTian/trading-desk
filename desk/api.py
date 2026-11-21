@@ -276,7 +276,8 @@ def _outcomes(con, row: sqlite3.Row, d: model.Decisions, now: datetime, *, fetch
               ) -> tuple[judge.Outcome, judge.Outcome | None]:
     """(outcome, judged). Replay: the reports alone, and no bars.db. Live: judged on the run's
     version's finest timeframe from the Yahoo bars kept, fetching more only while the trade has
-    not ended (an end in complete, insert-only bars moves only with a decision). Never raises."""
+    not ended (an end in complete, insert-only bars moves only with a decision), and never past
+    the bar holding its end. Never raises."""
     run = store.run(con, row["run_id"])
     mode = run["mode"]
     try:
@@ -301,7 +302,9 @@ def _outcomes(con, row: sqlite3.Row, d: model.Decisions, now: datetime, *, fetch
                                   now=now, stopped=stopped, unavailable=unavailable)
             o, j = judged(None)
             if fetch and not {o.status, j.status} <= {"exited", "cancelled"}:
-                o, j = judged(yahoo.ensure(bcon, symbol, m, start, now))
+                ended = o.exited_at or o.cancelled_at   # the judged walk closes there too
+                o, j = judged(yahoo.ensure(bcon, symbol, m, start, now,
+                                           end=ended and ended + timedelta(minutes=m)))
         if d.cancel or d.close_price is not None or d.close_kind in ("stop", "target"):
             # a reported end reaches the judge as a hand close the author never decided
             j = replace(j, notes=tuple(n for n in j.notes if not n.startswith("the close at ")))
@@ -880,6 +883,7 @@ class TradeBars:
     bars: tuple[judge.Bar, ...]
     # the uncovered ranges between the entry and the end anchor
     missing: tuple[tuple[datetime, datetime | None], ...]
+    notes: tuple[str, ...]   # why bars are still missing (no yfinance, a failed fetch), if known
 
 
 def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = None,
@@ -888,7 +892,7 @@ def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = N
     """A live trade's bars at one of its run's version's timeframes (default: the finest): from
     `before` bars ahead of the bar holding the entry through `after` bars past the last bar
     opening before the exit or cancellation, or through the latest bar while it has not ended.
-    `missing`: what no fetch covered from the entry to that end (or now)."""
+    `missing`: what no fetch covered from the entry to that end (or now); `notes`: why."""
     now = _aware(now)
     row = _trade_row(con, _text("trade", trade))
     run = store.run(con, row["run_id"])
@@ -923,11 +927,12 @@ def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = N
     # an ended trade's window is fetched, never the time since
     end = None if ended is None else min(now, ended + (after + 1) * bar + timedelta(days=4))
     with closing(bars.open()) as bcon:
-        yahoo.ensure(bcon, symbol, m, start, now, end=end)
+        why = yahoo.ensure(bcon, symbol, m, start, now, end=end)
         got = bars.read(bcon, yahoo.SOURCE, symbol, m, start, end)
         missing = yahoo._gaps(bars.covered(bcon, yahoo.SOURCE, symbol, m), d.entry.at,
                               ended or now)
     times = [b.open_time for b in got]
     first = max(bisect_right(times, d.entry.at) - 1 - before, 0)   # the entry anchor, less `before`
     last = len(got) if ended is None else bisect_left(times, ended) + after
-    return TradeBars(trade, timeframe, tuple(got[first:last]), tuple(missing))
+    return TradeBars(trade, timeframe, tuple(got[first:last]), tuple(missing),
+                     () if why is None else (why,))
