@@ -2,6 +2,7 @@
 trades back. Every figure is invented."""
 import json
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -459,7 +460,7 @@ def test_corrections_and_voids_end_to_end(con):
 
 def test_get_trade_reads_what_trade_returned(con):
     t = enter(con)
-    assert api.get_trade(con, t.id) == t
+    assert replace(api.get_trade(con, t.id), checks_now=None, checks_differ=()) == t
 
 
 def test_list_trades_by_run_and_by_strategy(con):

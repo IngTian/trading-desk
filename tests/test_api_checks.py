@@ -392,3 +392,75 @@ def test_the_day_is_the_system_timezones_midnight_to_midnight(con, fake_yahoo, m
                    (datetime(2026, 11, 2, 14, 45, tzinfo=UTC), True)):    # 09:45 EST
         cv = enter(con, replay, at=at, now=datetime(2026, 11, 3, tzinfo=UTC), check_only=True)
         assert result(cv, "trading_hours").ok is ok
+
+
+# --- the results now, on get_trade ---------------------------------------------------------
+
+def now_of(view, name):
+    return next(r for r in view.checks_now if r.name == name)
+
+
+def test_get_trade_shows_both_sets_and_names_what_differs(con):
+    _, replay = version(con, 'timeframes = ["15m"]\nmax_open_trades = 1\n')
+    a = enter(con, replay, at=NOW - timedelta(hours=2))
+    b = enter(con, replay, at=NOW - timedelta(hours=1))
+    assert result(b, "max_open_trades").ok is False
+    api.void_trade(con, a.id, reason="Invented.", now=NOW)
+    v = api.get_trade(con, b.id, now=NOW)
+    assert now_of(v, "max_open_trades").ok is True
+    assert result(v, "max_open_trades").ok is False
+    assert v.checks_differ == ("max_open_trades",)
+
+
+def test_a_correction_changes_the_results_now_never_the_shown(con):
+    t = enter(con, target=103.0)
+    assert result(t, "min_reward_risk").ok is False
+    before = payload(con, t.id)["checks"]
+    api.correct_trade(con, t.id, fields={"target": 104.0}, reason="Invented.", now=NOW)
+    v = api.get_trade(con, t.id, now=NOW)
+    assert now_of(v, "min_reward_risk").ok is True
+    assert result(v, "min_reward_risk").ok is False
+    assert v.checks_differ == ("min_reward_risk",)
+    assert payload(con, t.id)["checks"] == before
+
+
+def test_an_earlier_entry_recorded_later_changes_the_results_now(con):
+    b = enter(con, at=NOW - timedelta(hours=1))
+    assert result(b, "max_open_trades").ok is True
+    enter(con, at=NOW - timedelta(hours=2))   # recorded after B, dated before it, still open
+    v = api.get_trade(con, b.id, now=NOW)
+    assert now_of(v, "max_open_trades").ok is False
+    assert v.checks_differ == ("max_open_trades",)
+
+
+def test_an_entered_event_without_results_reads_none_shown(con):
+    store.add_trade(con, "raw-1", REPLAY, "ACME", "long", "stock", 1.0, "USD")
+    store.append(con, kind="entered", run_id=REPLAY, trade_id="raw-1", at=NOW.isoformat(),
+                 recorded_at=NOW.isoformat(),
+                 payload={"entry_type": "market", "entry": 100.0, "stop": 98.0, "target": 104.0,
+                          "size": 10, "reasons": "Written by hand.", "screenshots": []})
+    v = api.get_trade(con, "raw-1", now=NOW)
+    assert v.checks_shown is None and v.checks_differ == ()
+    assert [r.name for r in v.checks_now] == [
+        "min_reward_risk", "max_risk_per_trade", "max_open_trades"]
+
+
+def test_reads_other_than_get_trade_do_not_recompute(con):
+    t = enter(con)
+    assert t.checks_now is None
+    u = enter(con, at=NOW - timedelta(minutes=1))
+    for v in (*api.list_trades(con, now=NOW),
+              api.report(con, t.id, state="open", at=NOW, reason="Invented.", now=NOW),
+              api.move_order(con, t.id, reason="Invented.", stop=99.0, at=NOW, now=NOW),
+              api.correct_trade(con, t.id, fields={"size": 11}, reason="Invented.", now=NOW),
+              api.report(con, u.id, state="exited", kind="hand", price=101.0, at=NOW,
+                         reason="Invented.", now=NOW),
+              api.void_trade(con, t.id, reason="Invented.", now=NOW)):
+        assert v.checks_now is None and v.checks_differ == ()
+
+
+def test_a_void_trade_has_no_results_now(con):
+    t = enter(con)
+    api.void_trade(con, t.id, reason="Invented.", now=NOW)
+    v = api.get_trade(con, t.id, now=NOW)
+    assert v.checks_now is None and v.checks_differ == ()

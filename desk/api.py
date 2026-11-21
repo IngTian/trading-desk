@@ -470,6 +470,37 @@ def _others(con, run_row: sqlite3.Row, now: datetime, *, fetch: bool,
     return tuple(out)
 
 
+def _plan(row: sqlite3.Row, d: model.Decisions) -> model.Plan:
+    """The trade's plan as recorded: the identity row and the entry as corrected."""
+    e = d.entry
+    return model.Plan(row["ticker"], row["side"], row["instrument"], d.point_value, d.currency,
+                      e.price, e.stop, e.target, e.size)
+
+
+def _results_now(con, row: sqlite3.Row, d: model.Decisions, others: tuple[checks.Other, ...],
+                 now: datetime) -> tuple[checks.Result, ...]:
+    """The run's version's rules on the record as it stands, as of the entry's `at`. `others` never
+    holds this trade. It fetches, so it is never called under the write lock."""
+    run = store.run(con, row["run_id"])
+    rules = _version(con, run)[0]
+    seq = next(i for i, t in enumerate(store.trades(con, run["id"])) if t["id"] == row["id"])
+    return tuple(checks.run_checks(_plan(row, d), rules, checks.Context(
+        at=d.entry.at, seq=seq, currency=run["currency"], others=others, market=d.market,
+        computed=_figures(con, run, row["ticker"], row["instrument"], d.currency, rules,
+                          d.entry.at, now))))
+
+
+def _differ(shown: tuple[checks.Result, ...] | None, now: tuple[checks.Result, ...]
+            ) -> tuple[str, ...]:
+    """The names whose (ok, figure) differ between the results shown and now, or are in one only."""
+    if shown is None:
+        return ()
+    then = {r.name: (r.ok, r.figure) for r in shown}
+    here = {r.name: (r.ok, r.figure) for r in now}
+    return tuple(dict.fromkeys(n for n in [*here, *then]
+                               if n not in then or n not in here or then[n] != here[n]))
+
+
 def _span(w: int, m: int) -> timedelta:
     """How far back `w` bars of `m` minutes reach, nights, weekends and holidays included."""
     # shortcut: a calendar estimate of W bars; widen it if a strategy reads unknown for want of
@@ -1137,7 +1168,14 @@ def void_trade(con: sqlite3.Connection, trade: str, *, reason: str, report: str 
 
 def get_trade(con: sqlite3.Connection, trade: str, *, now: datetime | None = None) -> TradeView:
     now = _aware(now)
-    return _trade_view(con, _trade_row(con, _text("trade", trade)), now)
+    row = _trade_row(con, _text("trade", trade))
+    view = _trade_view(con, row, now)
+    d = view.decisions
+    if d.voided:
+        return view
+    others = _others(con, store.run(con, row["run_id"]), now, fetch=True, skip=row["id"])
+    here = _results_now(con, row, d, others, now)
+    return replace(view, checks_now=here, checks_differ=_differ(view.checks_shown, here))
 
 
 def _open(v: TradeView) -> bool:
