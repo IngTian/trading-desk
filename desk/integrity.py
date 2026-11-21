@@ -192,6 +192,24 @@ def _version_text_hash(con: sqlite3.Connection) -> list[str]:
             if v["text_hash"] != hashlib.sha256(strategy.normalise(v["text"]).encode()).hexdigest()]
 
 
+def _run_currency(con: sqlite3.Connection) -> list[str]:
+    """Every non-void trade is in its run's currency, as corrected (a hand-written correction
+    can change it). An unfoldable trade is skipped."""
+    failures = []
+    for t in store.trades(con):
+        if _unfoldable(store.events(con, trade_id=t["id"])):
+            continue
+        try:
+            d = model.decisions_of(con, t["id"])
+        except Exception:  # noqa: BLE001 -- decision_dates reports a fold that fails
+            continue
+        rc = store.run(con, t["run_id"])["currency"]
+        if not d.voided and d.currency != rc:
+            failures.append(f"trade {t['id']}: in {d.currency}, but its run {t['run_id']} is in "
+                            f"{rc}")
+    return failures
+
+
 INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "event_times": _event_times,
     "trade_entered_once": _trade_entered_once,
@@ -202,6 +220,7 @@ INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "nothing_after_void": _nothing_after_void,
     "one_report": _one_report,
     "version_text_hash": _version_text_hash,
+    "run_currency": _run_currency,
 }
 
 

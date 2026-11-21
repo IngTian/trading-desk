@@ -43,7 +43,7 @@ now = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 store.create(config.db_path())
 with store.open() as con:
     saved = api.save_strategy(con, "example", config.example_strategy().read_text(), now=now)
-    run = api.start_run(con, "example", mode="live", at=now, now=now)
+    run = api.start_run(con, "example", mode="live", currency="USD", at=now, now=now)
     # Invented figures: a market buy of 10 shares of a made-up ticker.
     t = api.trade(con, run.id, ticker="ACME", side="long", entry_type="market", entry=100.0,
                   stop=98.5, target=103.0, size=10, currency="USD", reasons="Smoke test.",
@@ -54,7 +54,7 @@ with store.open() as con:
     later = now + timedelta(hours=1)   # a report may not be dated after its `now`
 
     # Replay: the outcome is what is reported, and no bars are read.
-    replay = api.start_run(con, "example", mode="replay", at=now, now=now)
+    replay = api.start_run(con, "example", mode="replay", currency="USD", at=now, now=now)
     r = api.trade(con, replay.id, ticker="ACME", side="long", entry_type="limit", entry=100.0,
                   stop=98.5, target=104.0, size=10, currency="USD", reasons="Smoke test.",
                   at=now, now=now)

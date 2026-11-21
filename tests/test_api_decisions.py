@@ -29,9 +29,9 @@ def con(tmp_path):
     with store.open(db) as conn:
         api.save_strategy(conn, "dip-buyer", strategy("Dip buyer"), now=NOW)
         api.save_strategy(conn, "trend", strategy("Trend"), now=NOW)
-        api.start_run(conn, "dip-buyer", mode="live", now=NOW)
-        api.start_run(conn, "dip-buyer", mode="replay", at=NOW, now=NOW)
-        api.start_run(conn, "trend", mode="replay", at=NOW, now=NOW)
+        api.start_run(conn, "dip-buyer", mode="live", currency="USD", now=NOW)
+        api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
+        api.start_run(conn, "trend", mode="replay", currency="USD", at=NOW, now=NOW)
         yield conn
 
 
@@ -292,11 +292,11 @@ def test_a_correction_of_a_correction_resolves_to_the_last(con):
 def test_a_correction_may_change_each_entry_field(con):
     t = enter(con, ticker="GC1!", point_value=100.0)
     v = correct(con, t.id, fields={"entry": 101, "stop": 99.0, "target": 105.0, "size": 2,
-                                   "at": T2, "point_value": 50.0, "currency": "CAD"})
+                                   "at": T2, "point_value": 50.0})
     e = v.decisions.entry
     assert (e.price, e.stop, e.target, e.size, e.at) == (101.0, 99.0, 105.0, 2, T2)
-    assert (v.point_value, v.currency) == (50.0, "CAD")
-    assert (v.decisions.point_value, v.decisions.currency) == (50.0, "CAD")
+    assert (v.point_value, v.currency) == (50.0, "USD")
+    assert (v.decisions.point_value, v.decisions.currency) == (50.0, "USD")
     assert events(con, t.id)[-1][3]["fields"]["at"] == T2.isoformat()
 
 
@@ -473,3 +473,9 @@ def test_list_trades_by_run_and_by_strategy(con):
     assert [t.id for t in api.list_trades(con, strategy="trend")] == [c.id]
     assert api.list_trades(con, run="dip-buyer-r1", strategy="trend") == []
     assert api.list_trades(con)[1].decisions.voided
+
+
+def test_a_correction_cannot_move_a_trade_to_another_currency(con):
+    t = enter(con)
+    with pytest.raises(api.Refused, match="its currency stays USD"):
+        api.correct_trade(con, t.id, fields={"currency": "CAD"}, reason="typo", now=T1)

@@ -148,9 +148,11 @@ def add_version(con, strategy_id: str, version: int, text: str, text_hash: str,
              json.dumps(checklist), at))
 
 
-def add_run(con, id: str, strategy_id: str, version: int, mode: str, tags: list) -> None:
-    _insert(con, "INSERT INTO runs (id, strategy_id, version, mode, tags) VALUES (?, ?, ?, ?, ?)",
-            (id, strategy_id, version, mode, json.dumps(tags)))
+def add_run(con, id: str, strategy_id: str, version: int, mode: str, tags: list,
+            currency: str) -> None:
+    _insert(con, "INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (id, strategy_id, version, mode, json.dumps(tags), currency))
 
 
 def add_trade(con, id: str, run_id: str, ticker: str, side: str, instrument: str,

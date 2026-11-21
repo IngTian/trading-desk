@@ -30,8 +30,8 @@ def con(tmp_path):
     store.create(tmp_path / "desk.db")
     with store.open(tmp_path / "desk.db") as c:
         api.save_strategy(c, "gold", GOLD, now=h(0))
-        api.start_run(c, "gold", mode="replay", at=h(0), now=h(0))   # gold-r1
-        api.start_run(c, "gold", mode="live", at=h(0), now=h(0))     # gold-r2
+        api.start_run(c, "gold", mode="replay", currency="USD", at=h(0), now=h(0))   # gold-r1
+        api.start_run(c, "gold", mode="live", currency="USD", at=h(0), now=h(0))     # gold-r2
         yield c
 
 
@@ -286,7 +286,7 @@ def day(n, o, hi, lo, c):
 def slow_run(con, finest):
     api.save_strategy(con, "slow", GOLD.replace('["1h", "4h"]', f'["{finest}"]'),
                       now=h(0))
-    return api.start_run(con, "slow", mode="live", at=h(0), now=h(0)).id
+    return api.start_run(con, "slow", mode="live", currency="USD", at=h(0), now=h(0)).id
 
 
 def test_a_live_stock_on_daily_bars_is_judged(con, fake_yahoo):

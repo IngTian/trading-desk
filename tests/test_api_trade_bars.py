@@ -27,8 +27,8 @@ def con(tmp_path):
     store.create(tmp_path / "desk.db")
     with store.open(tmp_path / "desk.db") as c:
         api.save_strategy(c, "gold", GOLD, now=h(0))
-        api.start_run(c, "gold", mode="replay", at=h(0), now=h(0))   # gold-r1
-        api.start_run(c, "gold", mode="live", at=h(0), now=h(0))     # gold-r2
+        api.start_run(c, "gold", mode="replay", currency="USD", at=h(0), now=h(0))   # gold-r1
+        api.start_run(c, "gold", mode="live", currency="USD", at=h(0), now=h(0))     # gold-r2
         yield c
 
 
@@ -80,7 +80,7 @@ def test_a_coarser_timeframe_reads_its_own_bars(con, fake_yahoo):
     # Yahoo has no 4h (ruling R10), so the coarser timeframe here is 90m: 14:00, 15:30, 17:00, 18:30
     api.save_strategy(con, "fine", GOLD.replace('["1h", "4h"]', '["1h", "90m"]'),
                       now=h(0))
-    run = api.start_run(con, "fine", mode="live", at=h(0), now=h(0)).id
+    run = api.start_run(con, "fine", mode="live", currency="USD", at=h(0), now=h(0)).id
     fake_yahoo({"60m": SIX, "90m": [bar(1.5 * n, 100, 101, 99.5, 100.5) for n in range(4)]})
     t = enter(con, run, at=h(1), now=h(1))
     tb = api.trade_bars(con, t.id, timeframe="90m", after=1, now=h(5))  # 18:30 is still forming
@@ -109,7 +109,8 @@ def test_a_replay_trade_has_no_bars_to_serve(con):
 def test_a_live_run_refuses_a_timeframe_yahoo_lacks(con):
     api.save_strategy(con, "odd", GOLD.replace('["1h", "4h"]', '["15m", "2h"]'),
                       now=LATER)
-    t = enter(con, api.start_run(con, "odd", mode="live", now=LATER).id, at=LATER, now=LATER)
+    run = api.start_run(con, "odd", mode="live", currency="USD", now=LATER).id
+    t = enter(con, run, at=LATER, now=LATER)
     with pytest.raises(api.Refused, match="1m, 2m, 5m, 15m, 30m"):
         api.trade_bars(con, t.id, timeframe="2h", now=LATER)
 

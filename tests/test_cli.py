@@ -11,7 +11,7 @@ def _store_with_a_trade():
     store.create(config.db_path())
     with store.open() as con:
         api.save_strategy(con, "dip-buyer", TEXT, now=NOW)
-        api.start_run(con, "dip-buyer", mode="replay", at=NOW, now=NOW)
+        api.start_run(con, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
         api.trade(con, "dip-buyer-r1", ticker="ACME", side="long", entry_type="limit",
                   entry=100.0, stop=98.5, target=103.0, size=10, currency="USD",
                   reasons="Dip into support.", at=NOW, now=NOW)

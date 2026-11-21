@@ -24,7 +24,7 @@ def con(tmp_path):
     with store.open(db) as c:
         store.add_strategy(c, "dip-buyer", T0.isoformat())
         store.add_version(c, "dip-buyer", 1, "text", "hash", {}, ["1h"], [], T0.isoformat())
-        store.add_run(c, "dip-buyer-r1", "dip-buyer", 1, "replay", [])
+        store.add_run(c, "dip-buyer-r1", "dip-buyer", 1, "replay", [], "USD")
         store.add_trade(c, "gc-1", "dip-buyer-r1", "GC", "long", "future", 100.0, "USD")
         yield c
 

@@ -22,8 +22,9 @@ def con(tmp_path):
     store.create(tmp_path / "desk.db")
     with store.open(tmp_path / "desk.db") as conn:
         api.save_strategy(conn, "dip-buyer", TEXT, now=NOW)
-        api.start_run(conn, "dip-buyer", mode="live", now=NOW)             # dip-buyer-r1
-        api.start_run(conn, "dip-buyer", mode="replay", at=NOW, now=NOW)   # dip-buyer-r2
+        api.start_run(conn, "dip-buyer", mode="live", currency="USD", now=NOW)  # dip-buyer-r1
+        api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW,
+                      now=NOW)  # dip-buyer-r2
         yield conn
 
 

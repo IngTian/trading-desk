@@ -17,7 +17,7 @@ def con(tmp_path):
     with store.open(db) as conn:
         store.add_strategy(conn, "alpha", AT)
         store.add_version(conn, "alpha", 1, "text", "h1", {"size": 1}, ["15m"], [], AT)
-        store.add_run(conn, "alpha-r1", "alpha", 1, "live", ["paper"])
+        store.add_run(conn, "alpha-r1", "alpha", 1, "live", ["paper"], "USD")
         store.add_trade(conn, "ACME-20261110", "alpha-r1", "ACME", "long", "stock", 1.0, "USD")
         yield conn
 
@@ -78,7 +78,7 @@ def test_an_unknown_kind_is_refused(con):
 
 def test_a_run_naming_a_missing_version_is_refused(con):
     with pytest.raises(sqlite3.IntegrityError):
-        store.add_run(con, "alpha-r2", "alpha", 7, "live", [])
+        store.add_run(con, "alpha-r2", "alpha", 7, "live", [], "USD")
 
 
 def test_versions_and_runs_read_back(con):

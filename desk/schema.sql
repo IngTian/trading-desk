@@ -25,6 +25,7 @@ CREATE TABLE runs (
     version     INTEGER NOT NULL,
     mode        TEXT    NOT NULL CHECK (mode IN ('live','replay')),
     tags        TEXT    NOT NULL CHECK (json_valid(tags)),          -- ["paper","GC 15m"], verbatim
+    currency    TEXT    NOT NULL CHECK (currency IN ('CAD','USD')),  -- a run trades in one
     FOREIGN KEY (strategy_id, version) REFERENCES versions(strategy_id, version)
 ) STRICT;
 

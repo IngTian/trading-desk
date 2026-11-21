@@ -143,6 +143,7 @@ class RunView:
     tags: tuple[str, ...]
     started: datetime
     stopped: datetime | None
+    currency: str
 
 
 def _run_view(con, row: sqlite3.Row) -> RunView:
@@ -150,7 +151,8 @@ def _run_view(con, row: sqlite3.Row) -> RunView:
             for e in store.events(con, run_id=row["id"]) if e["kind"].startswith("run_")}
     return RunView(id=row["id"], strategy=row["strategy_id"], version=row["version"],
                    mode=row["mode"], tags=tuple(json.loads(row["tags"])),
-                   started=when["run_started"], stopped=when.get("run_stopped"))
+                   started=when["run_started"], stopped=when.get("run_stopped"),
+                   currency=row["currency"])
 
 
 def _decision_time(mode: str, at: datetime | None, now: datetime | None, what: str) -> datetime:
@@ -165,11 +167,12 @@ def _decision_time(mode: str, at: datetime | None, now: datetime | None, what: s
     return _aware(now)
 
 
-def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
+def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, currency=None, tags=(),
               version: int | None = None, at: datetime | None = None,
               now: datetime | None = None) -> RunView:
     """Deploy a strategy version as run `<strategy>-r<N>`. Tags are kept verbatim (deduplicated,
-    order kept) and never interpreted."""
+    order kept) and never interpreted. The run trades in one currency, CAD or USD."""
+    _currency(currency)
     tags = _strings("tags", tags)
     if mode not in ("live", "replay"):
         raise Refused(f"mode {mode!r} is not known; use 'live' (real time) or 'replay' "
@@ -189,7 +192,8 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
             raise Refused(f"Live runs read Yahoo, which has no {finest} bars; give the strategy a "
                           f"finest timeframe of {_YAHOO_HAS}, or start a replay run.")
         id = f"{strategy}-r{len(store.runs(con, strategy)) + 1}"
-        store.add_run(con, id, strategy, v, mode, list(dict.fromkeys(tags)))
+        store.add_run(con, id, strategy, v, mode, list(dict.fromkeys(tags)),
+                      currency)
         store.append(con, kind="run_started", run_id=id, at=_at(start), payload={},
                      recorded_at=_at(now))
     return _run_view(con, store.run(con, id))
@@ -427,6 +431,10 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                       "no reward-to-risk can be measured; put the stop away from the entry.")
     _size(size)
     _currency(currency)
+    if currency != row["currency"]:  # a run's currency never changes, so no lock is needed
+        raise Refused(f"Run {run!r} is in {row['currency']}; this trade is in {currency}. A run "
+                      f"is in one currency: enter it on a {currency} run, or give "
+                      f"currency={row['currency']!r}.")
     if not _text("reasons", reasons).strip():
         raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
     shots = [_screenshot(s) for s in _strings("screenshots", screenshots)]
@@ -769,6 +777,11 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
         _size(fields["size"])
     if "currency" in fields:
         _currency(fields["currency"])
+        run_currency = store.run(con, row["run_id"])["currency"]
+        if fields["currency"] != run_currency:
+            raise Refused(f"Trade {trade!r} is in a {run_currency} run, so its currency stays "
+                          f"{run_currency}. A trade in another currency belongs on another run: "
+                          "void it and enter it there.")
     if "point_value" in fields and row["instrument"] != "future":
         raise Refused(f"Trade {trade!r} is a {row['instrument']}, whose point value is 1; only a "
                       "future's point value can be corrected.")

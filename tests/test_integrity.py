@@ -25,7 +25,7 @@ def con(tmp_path):
     store.create(db)
     with store.open(db) as conn:
         api.save_strategy(conn, "dip-buyer", TEXT, now=NOW)
-        api.start_run(conn, "dip-buyer", mode="replay", at=NOW, now=NOW)
+        api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
         t = api.trade(conn, RUN, **BASE, at=T1, now=LATER)
         api.move_order(conn, t.id, stop=99.0, reason="Trail.", at=T2, now=LATER)
         api.correct_trade(conn, t.id, fields={"stop": 98.0}, reason="Typo.", now=LATER)
@@ -108,8 +108,8 @@ def test_a_run_with_two_starts_is_reported(con):
 
 
 def test_a_run_with_no_start_is_reported(con):
-    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags)"
-                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'live', '[]')")
+    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
+                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'live', '[]', 'USD')")
     assert only(con, "run_started_stopped") == 1
 
 
@@ -121,8 +121,8 @@ def test_a_run_with_two_stops_is_reported(con):
 
 def test_a_stop_before_the_start_is_reported_and_one_second_after_is_not(con):
     # A run with no trades, so no entry falls after the stop (decision_dates' half).
-    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags)"
-                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'replay', '[]')")
+    con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
+                " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'replay', '[]', 'USD')")
     ev(con, "run_started", NOW, run="dip-buyer-r2")
     ev(con, "run_stopped", NOW + timedelta(seconds=1), run="dip-buyer-r2")
     assert found(con)[0] == 0
@@ -332,3 +332,13 @@ def test_the_checker_never_raises_on_a_damaged_log(con):
     lines: list[str] = []
     assert integrity.run(con, emit=lines.append) >= 4
     assert any("trade RAW-2: report check failed: TypeError" in ln for ln in lines)
+
+
+def test_integrity_reports_a_run_currency_mismatch_written_by_hand(con):
+    assert found(con)[0] == 0
+    t = tid(con, "ACME")
+    ev(con, "corrected", T4, trade=t, corrects=con.execute(
+        "SELECT id FROM events WHERE trade_id = ? AND kind = 'entered'", (t,)).fetchone()[0],
+       payload={"fields": {"currency": "CAD"}, "reason": "by hand"})
+    count, lines = found(con)
+    assert any(f"trade {t}: in CAD, but its run {RUN} is in USD" in ln for ln in lines)
