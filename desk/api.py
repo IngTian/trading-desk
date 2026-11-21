@@ -562,9 +562,14 @@ def _figures(con, run_row: sqlite3.Row, ticker: str, instrument: str, currency: 
             figures.update({k: checks.Figure(None, f"Yahoo has no {tf} bars: supply {k}")
                             for k in keys})
         else:
-            with closing(bars.open()) as bcon:
-                figures.update(_computed(bcon, yahoo.ticker_symbol(ticker, instrument, currency),
-                                         instrument, tf, group, at, now))
+            symbol = yahoo.ticker_symbol(ticker, instrument, currency)
+            try:
+                with closing(bars.open()) as bcon:
+                    figures.update(_computed(bcon, symbol, instrument, tf, group, at, now))
+            except Exception as e:  # bars.db locked, corrupt or foreign: a check never refuses
+                figures.update({k: checks.Figure(None, f"bars could not be read: "
+                                                       f"{type(e).__name__}: {e}; supply {k}")
+                                for k in keys})
     return figures
 
 

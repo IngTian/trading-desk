@@ -1,13 +1,14 @@
 """trade() runs the run's version's rules as of `at`, keeps the results it shows, and with
 check_only writes nothing. Every figure is invented."""
 import json
+import sqlite3
 import time
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, config, indicators, judge, model, store, yahoo
+from desk import api, bars, config, indicators, judge, model, store, yahoo
 
 NOW = datetime(2026, 3, 2, 15, 5, tzinfo=UTC)    # Monday; 5 minutes into a 15m bar
 START = NOW - timedelta(days=30)
@@ -265,6 +266,19 @@ def test_the_warm_up_fetch_stops_at_yahoos_retention(con, fake_yahoo):
     closes = [b.close for b in rows]
     assert r.ok is not None and "59 days" not in r.says
     assert r.figure == closes[-1] - indicators.ema(closes[-891:], 200)
+
+
+def test_bars_db_failing_reads_unknown_and_never_refuses_the_trade(con, monkeypatch):
+    def broken(path=None):
+        raise sqlite3.OperationalError("an invented locked database")
+    monkeypatch.setattr(bars, "open", broken)
+    live, _ = version(con, RSI)
+    cv = enter(con, live, at=None, check_only=True)
+    t = enter(con, live, at=None)
+    for r in (result(cv, "rsi_14_15m"), result(t, "rsi_14_15m")):
+        assert r.ok is None and r.says == ("bars could not be read: OperationalError: an invented "
+                                           "locked database; supply rsi_14_15m")
+    assert [x["id"] for x in store.trades(con)] == [t.id] and t.outcome.status == "not judged"
 
 
 def test_too_few_bars_name_the_shortfall(con, fake_yahoo):
