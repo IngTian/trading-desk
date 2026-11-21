@@ -6,10 +6,11 @@ network. It runs on live runs only (§14), so the wall clock `now` is always giv
 The timing rule (§3): a decision is in force from the first bar opening at or after its `at`, so
 the bar holding the entry's `at` is never judged, and every fill and exit is dated at its bar's
 close. A pending limit fills at the limit, never better. In the bar it fills, its stop counts,
-at the stop price, and its target does not. An open trade's stop exits at the stop, or at the
-bar's open when the bar opened beyond it; its target exits at the target. A bar reaching both
-exits at the stop. In the last bar before a hand close, the author's ruling (2026-11-20): a bar
-finished at the close is judged in full, and in one still forming at it only the stop counts.
+at the stop price (at the fill when the stop is at or beyond it, already passed: ruling R7), and
+its target does not. An open trade's stop exits at the stop, or at the bar's open when the bar
+opened beyond it; its target exits at the target. A bar reaching both exits at the stop. In the
+last bar before a hand close, the author's ruling (2026-11-20): a bar finished at the close is
+judged in full, and in one still forming at it only the stop counts.
 
 Missing bars make the trade "not judged" for the range they leave out; nothing past them is
 claimed.
@@ -158,7 +159,9 @@ def judge(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
                 continue
             pending, fill, filled_at = False, e.price, t
             if hit_stop:  # price passed the limit before the stop, so never at the open
-                end = dict(status="exited", exit=stop, exit_reason="stop")
+                # R7: a stop at or beyond the fill fired as it filled, so never better than the fill
+                end = dict(status="exited", exit=stop if u(stop) < u(e.price) else e.price,
+                           exit_reason="stop")
             elif final:  # the target never counts in the fill bar
                 end = dict(status="exited", exit=b.close, exit_reason="hand")
         elif hit_stop:
