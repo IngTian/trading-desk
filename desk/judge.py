@@ -6,11 +6,13 @@ network. It runs on live runs only (§14), so the wall clock `now` is always giv
 The timing rule (§3): a decision is in force from the first bar opening at or after its `at`, so
 the bar holding the entry's `at` is never judged, and every fill and exit is dated at its bar's
 close. A pending limit fills at the limit, never better. In the bar it fills, its stop counts,
-at the stop price (at the fill when the stop is at or beyond it, already passed: ruling R7), and
-its target does not. An open trade's stop exits at the stop, or at the bar's open when the bar
-opened beyond it; its target exits at the target. A bar reaching both exits at the stop. In the
-last bar before a hand close, the author's ruling (2026-11-20): a bar finished at the close is
-judged in full, and in one still forming at it only the stop counts.
+at the stop price, and its target does not. A position opening (a fill, a market entry) with its
+stop then in force at or beyond its price has fired as it opened: out at once at that price, never
+better, dated the close of the bar it opened in (rulings R7, R8). An open trade's stop exits at
+the stop, or at the bar's open when the bar opened beyond it; its target exits at the target. A
+bar reaching both exits at the stop. In the last bar before a hand close, the author's ruling
+(2026-11-20): a bar finished at the close is judged in full, and in one still forming at it only
+the stop counts.
 
 Missing bars make the trade "not judged" for the range they leave out; nothing past them is
 claimed.
@@ -79,13 +81,33 @@ def _why(close_at: dt.datetime | None, stopped: dt.datetime | None) -> str:
             else "pulled")
 
 
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.UTC)
+
+
+def _opened(d: model.Decisions, side: str, price: float, at: dt.datetime, m: dt.timedelta,
+            bars: Sequence[Bar]) -> dict | None:
+    """Ruling R8, the one check for every way a position opens: at `price` at `at`, with the stop
+    then in force at or beyond that price, the stop fired as it opened, so it is out at once at the
+    price, never better, dated the close of the bar holding `at`. That bar's close is found on the
+    bars' grid (the epoch's when there are none) if the bar is missing. None otherwise."""
+    stop = model.in_force(d, at)[0]
+    if stop is None or model._signed(side, price, stop) < 0:
+        return None
+    grid = next((b.open_time for b in bars if b.open_time <= at < b.open_time + m),
+                bars[0].open_time if bars else _EPOCH)
+    return dict(status="exited", exit=price, exit_reason="stop", exited_at=at + m - (at - grid) % m)
+
+
 def judge(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
           covered: Sequence[tuple[dt.datetime, dt.datetime]], now: dt.datetime,
-          stopped: dt.datetime | None = None, unavailable: str | None = None) -> Outcome:
+          stopped: dt.datetime | None = None, unavailable: str | None = None,
+          opens: bool = True) -> Outcome:
     """What `d` led to on `bars`: complete bars of one `minutes` timeframe, sorted, one per
     open_time. `covered` holds the sorted, merged [from, to) ranges the bars were fetched for, so
     a gap inside one is a closed market and a gap between two is missing bars. `stopped` is the
-    run's stop; `unavailable` says why bars past the covered range could not be had.
+    run's stop; `unavailable` says why bars past the covered range could not be had. `opens` is
+    False when a market entry stands for a position reported open at its `at` (judge.live), not one
+    opening there: its stop is then a level to walk, not one fired as it opened (R8).
 
     Reads only d.entry, d.moves and d.close_at (a hand close)."""
     e, close_at = d.entry, d.close_at
@@ -135,8 +157,9 @@ def judge(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
     fill, filled_at = (None, None) if pending else (e.price, e.at)
     due = min((x for x in (close_at, stopped) if x is not None), default=None)  # settles a limit
     t = e.at
-    end: dict | None = None
-    walked = [b for b in bars if b.open_time >= e.at]
+    end = None if pending or not opens else _opened(d, side, e.price, e.at, m, bars)
+    at_once = end is not None  # out as it opened (R8): no bar is walked
+    walked = [] if at_once else [b for b in bars if b.open_time >= e.at]
     for i, b in enumerate(walked):
         s = due if pending else close_at
         if s is not None and s <= b.open_time and reaches(t, s):
@@ -162,9 +185,9 @@ def judge(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
                 continue
             pending, fill, filled_at = False, e.price, t
             if hit_stop:  # price passed the limit before the stop, so never at the open
-                # R7: a stop at or beyond the fill fired as it filled, so never better than the fill
-                end = dict(status="exited", exit=stop if u(stop) < u(e.price) else e.price,
-                           exit_reason="stop")
+                # (a stop at or beyond the fill is always reached here, and is R8's)
+                end = (_opened(d, side, e.price, b.open_time, m, bars)
+                       or dict(status="exited", exit=stop, exit_reason="stop"))
             elif final:  # the target never counts in the fill bar
                 end = dict(status="exited", exit=b.close, exit_reason="hand")
         elif hit_stop:
@@ -198,7 +221,9 @@ def judge(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
         r, cash = _money(side, e.price, e.stop, end["exit"], e.size, d.point_value)
         if e.stop is not None and r is None:
             notes.append(NO_1R)
-        out_at, opened = end["exited_at"], end["exited_at"] - m  # the exit bar's open
+        # when the exit was read: the exit bar's open, or the entry's `at` when out at once
+        out_at = end["exited_at"]
+        opened = e.at if at_once else out_at - m
         notes += [f"the move at {mv.at.isoformat()} had no effect: the trade exited at "
                   f"{out_at.isoformat()}" for mv in d.moves if mv.at > opened]
         if close_at is not None and close_at > opened and end["exit_reason"] != "hand":
@@ -274,8 +299,9 @@ def live(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
          ) -> tuple[Outcome, Outcome]:
     """(effective, judged): the judge on `bars`, and the outcome with d's reports laid over it.
     The judge continues from the latest report: from a reported fill as a market entry there (its
-    own bar unjudged, Q27, ruling R4), and from an open report at h at the open of the bar holding
-    h, every bar before it set aside, ends and holes alike."""
+    own bar unjudged, Q27, ruling R4; out at once at or beyond its stop, R8), and from an open
+    report at h at the open of the bar holding h, every bar before it set aside, ends and holes
+    alike."""
     kw = dict(side=side, minutes=minutes, bars=bars, covered=covered, now=now, stopped=stopped,
               unavailable=unavailable)
     decided = _decided(d)
@@ -289,7 +315,7 @@ def live(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
             t0 = max(at, next((b.open_time for b in bars if b.open_time <= h < b.open_time + m),
                               h))
         base = judge(replace(decided, entry=replace(d.entry, type="market", price=price, at=t0)),
-                     **kw)
+                     opens=t0 == at, **kw)  # from a later open report nothing opens: it walks on
         base = replace(base, fill=price, filled_at=at)
         if (d.held is not None and base.exit_reason in ("stop", "target")
                 and base.exited_at - m <= h < base.exited_at):
