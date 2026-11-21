@@ -161,7 +161,7 @@ def test_trading_hours_in_the_system_timezone(monkeypatch):
         return datetime(2026, 3, d, h, m, s, tzinfo=UTC)
 
     for when, ok in ((at(15, 0), True), (at(16, 30), False), (at(14, 44, 59), False),
-                     (at(15, 0, d=7), False)):
+                     (at(15, 0, d=7), False), (at(14, 45), True)):          # at start: inside
         assert checks.run_checks(P, rules.Rules(hours, ("15m",)), Context(at=when))[0].ok is ok
 
 
@@ -195,6 +195,61 @@ def test_a_stored_rule_the_library_does_not_know_reads_unknown():
     rs = run({"sides": ["long"], "feels_right": "strongly"})
     assert [(r.name, r.ok) for r in rs] == [("sides", True), ("feels_right", None)]
     assert "no rule named feels_right" in rs[1].says
+
+
+def test_a_decided_record_result_says_known_and_names_what_it_leaves_out():
+    u = other("u1", unknown_from=AT - timedelta(hours=1))
+    r = one({"max_open_trades": 2}, others=(u,))
+    assert r.ok is True and r.figure == 0.0
+    assert "0 known open" in r.says and "u1: not judged from" in r.says and "1 to 2" in r.says
+    n = other("n", ended=AT - timedelta(hours=1), exited=True, r=None, cash=40.0)
+    r = one({"daily_loss_limit": {"R": 2}}, others=(exit_(timedelta(hours=2), -1.0, "a"), n))
+    assert r.ok is True and r.figure == -1.0
+    assert "known realised R" in r.says and "n exited with no R and +40 in cash" in r.says
+    assert "the day's total is at least -1.00" in r.says
+    r = one({"max_consecutive_losses": 2}, others=(u,))
+    assert r.ok is True and "0 known losing exits" in r.says and "u1" in r.says
+    r = one({"cooldown_after_loss": {"minutes": 30}},
+            others=(exit_(timedelta(minutes=10), -1.0, "a"), u))
+    assert r.ok is False and "last known loss" in r.says and "u1" in r.says
+    assert "known" not in one({"max_open_trades": 2}, others=(other(),)).says   # none left out
+
+
+def test_each_rule_applies_at_its_edges():
+    atr = {"stop_atr": {"between": [1.0, 3.0]}}
+    assert one(atr, market={"atr_14_15m": 1.0}).ok is True                 # 2.0 inside
+    assert one(atr, market={"atr_14_15m": 0.5}).ok is False                # 4.0 above
+    assert one(atr, market={"atr_14_15m": 2.1}).ok is False                # under 1 below
+    assert one(atr, market={"atr_14_15m": -1.0}).ok is None
+    facts = {"facts": {"rvol": {"at_least": 2}}}
+    assert one(facts, market={"rvol": float("nan")}).ok is None
+    rsi = {"rsi": {"length": 14, "at_most": 30}}
+    r = one(rsi, computed={"rsi_14_15m": Figure(float("nan"), "bar")})
+    assert (r.ok, r.computed) == (None, {})
+    ema = {"ema": {"length": 200, "timeframe": "1h", "short": "below"}}
+    flat = {"ema_200_1h": 101.0, "close_1h": 101.0}
+    assert one(ema, replace(P, side="short"), market=flat).ok is False        # strict
+    assert one({"max_trades_per_day": 2}, others=(other("a"),)).ok is True    # at the limit
+
+
+def test_record_rules_read_order_scope_and_kind():
+    mcl = {"max_consecutive_losses": 2}
+    old_win = exit_(timedelta(hours=3), 1.0, "w")
+    losses = (exit_(timedelta(hours=2), -1.0, "a"), exit_(timedelta(hours=1), -1.0, "b"))
+    assert one(mcl, others=(old_win, *losses)).ok is False          # newest first: win is older
+    u = other("u1", unknown_from=AT - timedelta(hours=1))
+    assert one(mcl, others=(*losses, u)).ok is None                 # a win could end it (Q8)
+    cancelled = other("c", ended=AT - timedelta(minutes=30))
+    assert (one(mcl, others=(cancelled,)).ok, one(mcl, others=(cancelled,)).figure) == (True, 0.0)
+    assert one({"daily_loss_limit": {"R": 2}}, others=(cancelled,)).figure == 0.0
+    cool = {"cooldown_after_loss": {"minutes": 30}}
+    two = (exit_(timedelta(minutes=50), -1.0, "a"), exit_(timedelta(minutes=10), -1.0, "b"))
+    assert (one(cool, others=two).ok, one(cool, others=two).figure) == (False, 10.0)
+    later = other("z", ended=AT + timedelta(minutes=10), exited=True, r=-1.0, cash=-20.0)
+    assert (one(cool, others=(later,)).ok, one(cool, others=(later,)).figure) == (True, None)
+    same = {"cooldown_after_loss": {"minutes": 30, "same_ticker": True}}
+    elsewhere = other("u9", unknown_from=AT - timedelta(hours=1), ticker="WXYZ")
+    assert one(same, others=(elsewhere,)).ok is True
 
 
 def test_results_come_in_library_order_and_round_trip_through_json():

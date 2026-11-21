@@ -14,7 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from desk.model import Plan, _signed, canonical_ticker
@@ -262,11 +262,10 @@ def _day_exits(ctx: Context) -> list[Other]:
             if o.exited and _ended(o, ctx.at) and o.ended.astimezone().date() == day]
 
 
-def _withheld(fact: str, trades: list[Other], missing: Sequence[str] = ()) -> str:
-    """The fact, then every unknown that could change it, each with what settles it."""
-    items = [*missing, *(f"{o.id}: not judged from {o.unknown_from.isoformat()}; {o.settles}"
-                         for o in trades)]
-    return f"{fact}; unknown, as it could change with {'; '.join(items)}"
+def _unsettled(trades: list[Other]) -> list[str]:
+    """Each unknown trade, with the report that settles it. A figure that leaves one out says
+    "known" and names it, decided or not: a partial figure is never stated as the whole."""
+    return [f"{o.id}: not judged from {o.unknown_from.isoformat()}; {o.settles}" for o in trades]
 
 
 def _max_open_trades(plan: Plan, limit: int, ctx: Context) -> Result:
@@ -279,9 +278,12 @@ def _max_open_trades(plan: Plan, limit: int, ctx: Context) -> Result:
     # against a limit of 1" would read as a pass beside ok=False.
     fact = (f"{_units(known, 'trades')} open; this would make {known + 1} against a limit of "
             f"{limit}")
+    if unknown:
+        fact = (f"{known} known open, and {len(unknown)} unknown ({'; '.join(_unsettled(unknown))})"
+                f"; this would make {known + 1} to {known + len(unknown) + 1} against a limit of "
+                f"{limit}")
     ok = (True if known + len(unknown) + 1 <= limit else False if known + 1 > limit else None)
-    return Result("max_open_trades", ok, float(known), str(limit),
-                  fact if ok is not None else _withheld(fact, unknown), "trades")
+    return Result("max_open_trades", ok, float(known), str(limit), fact, "trades")
 
 
 def _max_trades_per_day(plan: Plan, limit: int, ctx: Context) -> Result:
@@ -300,10 +302,13 @@ def _max_consecutive_losses(plan: Plan, limit: int, ctx: Context) -> Result:
     unknown = _unknowns(ctx)
     # An unknown trade could add a loss or, as a win, end the streak: it withholds either way.
     ok = streak < limit if not unknown else True if streak + len(unknown) < limit else None
-    fact = (f"{_units(streak, 'losing exits')} in a row on "
-            f"{ctx.at.astimezone().date().isoformat()} against a limit of {limit}")
-    return Result("max_consecutive_losses", ok, float(streak), str(limit),
-                  fact if ok is not None else _withheld(fact, unknown), "losses")
+    day = ctx.at.astimezone().date().isoformat()
+    fact = f"{_units(streak, 'losing exits')} in a row on {day} against a limit of {limit}"
+    if unknown:
+        fact = (f"{_units(streak, 'known losing exits')} in a row on {day}, and {len(unknown)} "
+                f"unknown ({'; '.join(_unsettled(unknown))}) that could add a loss or end the "
+                f"streak, against a limit of {limit}")
+    return Result("max_consecutive_losses", ok, float(streak), str(limit), fact, "losses")
 
 
 def _daily_loss_limit(plan: Plan, v: dict, ctx: Context) -> Result:
@@ -315,11 +320,19 @@ def _daily_loss_limit(plan: Plan, v: dict, ctx: Context) -> Result:
     # An exit without R could only move the total its cash's way; an unknown trade either way.
     could = [o for o in no_r if (o.cash < 0 if kept else o.cash > 0)]
     ok = None if could or unknown else kept
-    fact = (f"the realised R of {ctx.at.astimezone().date().isoformat()} is "
-            f"{_shown(known, -x, at_least=True, signed=True)} against a floor of -{x} R")
-    missing = [f"{o.id} exited with no R and {o.cash:+g} in cash" for o in could]
-    return Result("daily_loss_limit", ok, known, f"{x} R",
-                  fact if ok is not None else _withheld(fact, unknown, missing), "R")
+    day = ctx.at.astimezone().date().isoformat()
+    shown = _shown(known, -x, at_least=True, signed=True)
+    fact = f"the realised R of {day} is {shown} against a floor of -{x} R"
+    if no_r or unknown:
+        lower = bool(unknown) or any(o.cash < 0 for o in no_r)
+        higher = bool(unknown) or any(o.cash > 0 for o in no_r)
+        total = ("not known" if lower and higher else f"at most {shown}" if lower
+                 else f"at least {shown}" if higher else shown)
+        left_out = [*(f"{o.id} exited with no R and {o.cash:+g} in cash" for o in no_r),
+                    *_unsettled(unknown)]
+        fact = (f"the known realised R of {day} is {shown}; {'; '.join(left_out)}; so the "
+                f"day's total is {total}, against a floor of -{x} R")
+    return Result("daily_loss_limit", ok, known, f"{x} R", fact, "R")
 
 
 def _cooldown_after_loss(plan: Plan, v: dict, ctx: Context) -> Result:
@@ -335,19 +348,21 @@ def _cooldown_after_loss(plan: Plan, v: dict, ctx: Context) -> Result:
     unknown = [o for o in prior if _unknown(o, ctx.at) and in_scope(o)]
     scope = f" on {mine}" if same else ""
     limit = f"{minutes} min" + (" on the same ticker" if same else "")
+    known = "known " if unknown else ""
     figure = None
-    fact = f"no loss{scope} before this trade"
+    fact = f"no {known}loss{scope} before this trade"
     if losses:
         last = max(losses, key=lambda o: (o.ended, o.seq))
         figure = (ctx.at - last.ended).total_seconds() / 60
-        fact = (f"the last loss{scope}, {last.id}, exited "
+        fact = (f"the last {known}loss{scope}, {last.id}, exited "
                 f"{_shown(figure, minutes, at_least=True, places=1)} min before, against a "
                 f"cooldown of {minutes} min")
+    if unknown:
+        fact += (f"; {len(unknown)} unknown ({'; '.join(_unsettled(unknown))}) could hold a "
+                 f"later loss")
     if figure is not None and not _within(figure, minutes, at_least=True):
         return Result("cooldown_after_loss", False, figure, limit, fact, "min")
-    if unknown:
-        return Result("cooldown_after_loss", None, figure, limit, _withheld(fact, unknown), "min")
-    return Result("cooldown_after_loss", True, figure, limit, fact, "min")
+    return Result("cooldown_after_loss", None if unknown else True, figure, limit, fact, "min")
 
 
 # --------------------------------------------------- indicators and facts ---
