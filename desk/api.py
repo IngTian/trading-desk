@@ -20,12 +20,13 @@ from desk import bars, checks, config, indicators, judge, model, store, strategy
 from desk.errors import Refused
 from desk.rules import Indicator, Rules, _finite, market_keys
 from desk.rules import indicators as indicator_checks  # `indicators` is the formulas' module
+from desk.stats import Row, Stats, summarise  # `stats` below shadows the module's name
 from desk.strategy import minutes  # start_run's `strategy` parameter shadows the module
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "CheckView", "trade",
            "move_order", "close_trade", "report", "correct_trade", "void_trade", "get_trade",
-           "list_trades", "TradeBars", "trade_bars"]
+           "list_trades", "TradeBars", "trade_bars", "Stats", "stats"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
 _YAHOO_HAS = "1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w"   # yahoo.INTERVALS, as a refusal names them
@@ -1261,3 +1262,74 @@ def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = N
     last = len(got) if ended is None else bisect_left(times, ended) + after
     return TradeBars(trade, timeframe, tuple(got[first:last]), tuple(missing),
                      () if why is None else (why,))
+
+
+_NO_SCOPE = ("stats needs one scope: a run, a strategy, or a strategy with a version; every "
+             "strategy pooled would be account-level P&L, which the desk does not report")
+
+
+def stats(con: sqlite3.Connection, *, strategy: str | None = None, version: int | None = None,
+          run: str | None = None, mode: str | None = None, tags=None, conforming_only=None,
+          now: datetime | None = None) -> Stats:
+    """Counts, rates and averages over one scope's non-void trades, from their effective outcomes
+    (design §8): a run, a strategy's version, or a strategy. Narrowed by mode, by tags (every one
+    given held by the run, exactly) and, with conforming_only, to the trades whose results now are
+    all kept. Never a verdict or a ranking; a trade that cannot be judged reads "not judged"."""
+    now = _aware(now)
+    for name, value in (("strategy", strategy), ("run", run)):
+        if value is not None:
+            _text(name, value)
+    if version is not None and (isinstance(version, bool) or not isinstance(version, int)):
+        raise Refused(f"version must be a whole number, e.g. 2, or left out; got {version!r}.")
+    if mode not in (None, "live", "replay"):
+        raise Refused(f"mode {mode!r} is not known; use 'live' or 'replay', or leave it out.")
+    tags = _strings("tags", tags)
+    if conforming_only is not None and not isinstance(conforming_only, bool):
+        raise Refused(f"conforming_only must be true, false or left out; got {conforming_only!r}.")
+    if run is not None:
+        if strategy is not None or version is not None:
+            raise Refused("Give one scope: a run alone, a strategy, or a strategy with a version; "
+                          "a run already names its strategy and its version.")
+        row = store.run(con, run)
+        if row is None:
+            raise Refused(f"There is no run {run!r}; list_runs to see the ones that exist.")
+        runs, strategy, version = [row], row["strategy_id"], row["version"]
+    elif strategy is None:
+        raise Refused(_NO_SCOPE if version is None else "A version is named with its strategy: "
+                      "give strategy=… beside version=…, or give a run.")
+    else:
+        _view(con, strategy, version, "unchanged")   # refuses an unknown strategy or version
+        runs = [r for r in store.runs(con, strategy) if version in (None, r["version"])]
+    scope = [(r, held) for r in runs if mode in (None, r["mode"])
+             and set(tags) <= set(held := tuple(json.loads(r["tags"])))]
+    # Narrowed before any trade is read; a void is left out before its bars are fetched.
+    read = [(r, held, t, _trade_view(con, t, now), seq) for r, held in scope
+            for seq, t in enumerate(store.trades(con, r["id"]))
+            if not model.decisions_of(con, t["id"]).voided]
+    left_out: dict = {}
+    if conforming_only:
+        others: dict[str, list[checks.Other]] = {}   # each run's, built once (B6)
+        for r, _, t, v, seq in read:
+            others.setdefault(r["id"], []).append(_other(t, v.decisions, v.outcome, seq))
+        breached, unknown, kept = [], {}, []
+        for r, held, t, v, seq in read:
+            results = _results_now(con, t, v.decisions,
+                                   tuple(o for o in others[r["id"]] if o.id != v.id), now)
+            if any(x.ok is False for x in results):
+                breached.append(v.id)
+            elif all(x.ok is True for x in results):   # no rules: kept
+                kept.append((r, held, t, v, seq))
+            else:
+                for x in results:
+                    if x.ok is None:
+                        unknown.setdefault(x.name, []).append(v.id)
+        read = kept
+        left_out = {"breached": tuple(breached),
+                    "unknown": {name: tuple(ids) for name, ids in unknown.items()}}
+    rows = [Row(id=v.id, run=v.run, version=v.version, mode=r["mode"], tags=held,
+                entry_type=v.decisions.entry.type, currency=v.currency, outcome=v.outcome,
+                planned_rr=checks.reward_risk(_plan(t, v.decisions))[0],
+                settles=_settles(v.outcome))
+            for r, held, t, v, _ in read]
+    return summarise(rows, strategy=strategy, version=version, run=run, mode=mode, tags=tags,
+                     conforming_only=bool(conforming_only), left_out=left_out)
