@@ -36,9 +36,9 @@ class Fetched:
 
 def ticker_symbol(ticker: str, instrument: str, currency: str) -> str:
     """The desk's ticker as Yahoo spells it: GC -> GC=F, TSX:WXYZ.B -> WXYZ-B.TO."""
+    symbol = ticker.rpartition(":")[2]   # Yahoo names no exchange prefix: COMEX:GC -> GC=F
     if instrument == "future":
-        return f"{ticker}=F"
-    symbol = ticker.rpartition(":")[2]
+        return f"{symbol}=F"
     if currency == "CAD":
         return symbol if symbol.endswith(".TO") else symbol.replace(".", "-") + ".TO"
     return symbol.replace(".", "-")
@@ -49,13 +49,19 @@ def _yfinance(symbol: str, interval: str, start: datetime, end: datetime) -> Fet
         import yfinance
     except ImportError as e:
         raise RuntimeError(_INSTALL) from e
-    yfinance.config.debug.hide_exceptions = False   # a bad symbol raises, not an empty frame
-    ticker = yfinance.Ticker(symbol)
+    # A bad symbol raises, not an empty frame; put back after, as the author's own code uses it.
+    debug = yfinance.config.debug
+    hidden, debug.hide_exceptions = debug.hide_exceptions, False
     try:
-        frame = ticker.history(interval=interval, start=start, end=end, auto_adjust=False,
-                               actions=False, rounding=True, prepost=False)
-    except yfinance.exceptions.YFPricesMissingError:
-        return Fetched((), None)
+        ticker = yfinance.Ticker(symbol)
+        try:
+            frame = ticker.history(interval=interval, start=start, end=end, auto_adjust=False,
+                                   actions=False, rounding=True, prepost=False)
+        except yfinance.exceptions.YFPricesMissingError:
+            return Fetched((), None)
+        market = ticker.get_history_metadata().get("regularMarketTime")
+    finally:
+        debug.hide_exceptions = hidden
     frame = frame.dropna(subset=["Open", "High", "Low", "Close"])
     frame.index = frame.index.tz_convert("UTC")
     # float() throughout: sqlite3 cannot bind numpy's int64 volume.
@@ -64,7 +70,6 @@ def _yfinance(symbol: str, interval: str, start: datetime, end: datetime) -> Fet
                            None if math.isnan(r.Volume) else float(r.Volume))
                  for t, r in frame.iterrows())
     # yfinance 1.8 gives a pandas.Timestamp when the meta names the exchange's zone, else seconds.
-    market = ticker.get_history_metadata().get("regularMarketTime")
     if isinstance(market, datetime):
         market = market.timestamp()
     return Fetched(rows, None if market is None else datetime.fromtimestamp(market, UTC))

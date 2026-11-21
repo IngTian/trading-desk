@@ -103,7 +103,8 @@ def test_a_row_whose_close_lies_outside_its_range_is_widened_to_hold_it(con, fak
 
 
 @pytest.mark.parametrize(("ticker", "instrument", "currency", "symbol"), [
-    ("GC", "future", "USD", "GC=F"), ("ACME", "stock", "USD", "ACME"),
+    ("GC", "future", "USD", "GC=F"), ("COMEX:GC", "future", "USD", "GC=F"),
+    ("ACME", "stock", "USD", "ACME"),
     ("ACME.B", "stock", "USD", "ACME-B"), ("NASDAQ:ACME", "stock", "USD", "ACME"),
     ("WXYZ", "stock", "CAD", "WXYZ.TO"), ("TSX:WXYZ", "etf", "CAD", "WXYZ.TO"),
     ("WXYZ.B", "stock", "CAD", "WXYZ-B.TO"), ("WXYZ.TO", "stock", "CAD", "WXYZ.TO")])
@@ -159,6 +160,25 @@ def test_prices_missing_from_yahoo_read_as_no_rows(monkeypatch):
 
     monkeypatch.setattr(yfinance, "Ticker", Ticker)
     assert yahoo._yfinance("ACME", "60m", h(0), h(3)).rows == ()
+
+
+def test_a_fetch_puts_yfinances_hide_exceptions_back_as_it_found_it(monkeypatch):
+    import yfinance
+    seen = []
+
+    class Ticker:
+        def __init__(self, symbol):
+            pass
+
+        def history(self, **kw):
+            seen.append(yfinance.config.debug.hide_exceptions)
+            raise OSError("Yahoo refused")
+
+    monkeypatch.setattr(yfinance, "Ticker", Ticker)
+    monkeypatch.setattr(yfinance.config.debug, "hide_exceptions", True)   # yfinance 1.8's default
+    with pytest.raises(OSError, match="Yahoo refused"):
+        yahoo._yfinance("ACME", "60m", h(0), h(3))
+    assert (seen, yfinance.config.debug.hide_exceptions) == ([False], True)
 
 
 def test_without_yfinance_a_live_read_says_how_to_install_it(con, monkeypatch):
