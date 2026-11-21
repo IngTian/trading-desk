@@ -11,6 +11,7 @@ import math
 import os
 import re
 import sqlite3
+from bisect import bisect_left, bisect_right
 from contextlib import closing
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -22,9 +23,11 @@ from desk.strategy import minutes  # start_run's `strategy` parameter shadows th
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade", "move_order",
-           "close_trade", "report", "correct_trade", "void_trade", "get_trade", "list_trades"]
+           "close_trade", "report", "correct_trade", "void_trade", "get_trade", "list_trades",
+           "TradeBars", "trade_bars"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
+_YAHOO_HAS = "1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w"   # yahoo.INTERVALS, as a refusal names them
 
 
 def _aware(when: datetime | None, name: str = "now") -> datetime:
@@ -181,8 +184,7 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
         finest = json.loads(next(r for r in rows if r["version"] == v)["timeframes"])[0]
         if mode == "live" and minutes(finest) not in yahoo.INTERVALS:
             raise Refused(f"Live runs read Yahoo, which has no {finest} bars; give the strategy a "
-                          "finest timeframe of 1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w, or "
-                          "start a replay run.")
+                          f"finest timeframe of {_YAHOO_HAS}, or start a replay run.")
         id = f"{strategy}-r{len(store.runs(con, strategy)) + 1}"
         store.add_run(con, id, strategy, v, mode, list(dict.fromkeys(tags)))
         store.append(con, kind="run_started", run_id=id, at=_at(start), payload={},
@@ -869,3 +871,63 @@ def list_trades(con: sqlite3.Connection, run: str | None = None, strategy: str |
     rows = [r for r in store.trades(con, run)  # narrowed first: a view may fetch bars
             if strategy in (None, store.run(con, r["run_id"])["strategy_id"])]
     return [v for v in (_trade_view(con, r, now) for r in rows) if open in (None, _open(v))]
+
+
+@dataclass(frozen=True)
+class TradeBars:
+    trade: str
+    timeframe: str
+    bars: tuple[judge.Bar, ...]
+    # the uncovered ranges between the entry and the end anchor
+    missing: tuple[tuple[datetime, datetime | None], ...]
+
+
+def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = None,
+               before: int | None = 0, after: int | None = 0,
+               now: datetime | None = None) -> TradeBars:
+    """A live trade's bars at one of its run's version's timeframes (default: the finest): from
+    `before` bars ahead of the bar holding the entry through `after` bars past the last bar
+    opening before the exit or cancellation, or through the latest bar while it has not ended.
+    `missing`: what no fetch covered from the entry to that end (or now)."""
+    now = _aware(now)
+    row = _trade_row(con, _text("trade", trade))
+    run = store.run(con, row["run_id"])
+    if run["mode"] == "replay":
+        raise Refused(f"Trade {trade!r} is on replay run {row['run_id']!r}, which keeps no bars: "
+                      "a replay trade is read from what is reported. trade_bars serves live "
+                      "trades.")
+    names = tuple(_timeframes(con, run).values())
+    if timeframe is None:
+        timeframe = names[0]
+    elif timeframe not in names:
+        raise Refused(f"timeframe {timeframe!r} is not one of run {row['run_id']!r}'s timeframes; "
+                      f"use one of {', '.join(names)}, or leave it out for the finest.")
+    m = minutes(timeframe)
+    if m not in yahoo.INTERVALS:
+        raise Refused(f"Live runs read Yahoo, which has no {timeframe} bars; ask for another of "
+                      f"run {row['run_id']!r}'s timeframes ({', '.join(names)}) that Yahoo has: "
+                      f"{_YAHOO_HAS}.")
+    for name, v in (("before", before), ("after", after)):
+        if v is not None and (isinstance(v, bool) or not isinstance(v, int) or v < 0):
+            raise Refused(f"{name} must be a whole number of bars, 0 or more, e.g. 3, or left "
+                          f"out for 0; got {v!r}.")
+    before, after = before or 0, after or 0
+    d = model.decisions_of(con, row["id"])
+    o = _outcomes(con, row, d, now)[0]   # the effective end; fetches only until the trade ends
+    ended = o.exited_at or o.cancelled_at
+    bar = timedelta(minutes=m)
+    symbol = yahoo.ticker_symbol(row["ticker"], row["instrument"], d.currency)
+    # shortcut: 4 days spans a long weekend; a longer market closure returns fewer than `before`
+    # bars, so count back in sessions if that bites
+    start = d.entry.at - (before + 1) * bar - timedelta(days=4)
+    # an ended trade's window is fetched, never the time since
+    end = None if ended is None else min(now, ended + (after + 1) * bar + timedelta(days=4))
+    with closing(bars.open()) as bcon:
+        yahoo.ensure(bcon, symbol, m, start, now, end=end)
+        got = bars.read(bcon, yahoo.SOURCE, symbol, m, start, end)
+        missing = yahoo._gaps(bars.covered(bcon, yahoo.SOURCE, symbol, m), d.entry.at,
+                              ended or now)
+    times = [b.open_time for b in got]
+    first = max(bisect_right(times, d.entry.at) - 1 - before, 0)   # the entry anchor, less `before`
+    last = len(got) if ended is None else bisect_left(times, ended) + after
+    return TradeBars(trade, timeframe, tuple(got[first:last]), tuple(missing))
