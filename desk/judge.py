@@ -329,10 +329,14 @@ def live(d: model.Decisions, *, side: str, minutes: int, bars: Sequence[Bar],
 
 def differs(o: Outcome, judged: Outcome | None, minutes: int) -> tuple[str, ...]:
     """The fields among _COMPARED whose values differ between `o` and `judged`, in that order; ()
-    when there is nothing to compare. A time given in both is the same when `o`'s lies in the
-    judged one's bar: the bars date an end at the bar's close, a report at its instant.
-    cancelled_why is not compared: the cause is the record's, never the bars'."""
-    if judged is None or judged.status == "not judged":
+    when there is nothing to compare: no judged outcome, or one whose bars have not yet reached
+    the report (a close not reached, a fill reported after the last bar walked), which the next
+    read compares. A time given in both is the same when `o`'s lies in the judged one's bar: the
+    bars date an end at the bar's close, a report at its instant. cancelled_why is not compared:
+    the cause is the record's, never the bars'."""
+    if judged is None or judged.status in ("not judged", "closing") or (
+            judged.status == "pending" and o.filled_at is not None
+            and judged.judged_through < o.filled_at):
         return ()
     m = dt.timedelta(minutes=minutes)
 
