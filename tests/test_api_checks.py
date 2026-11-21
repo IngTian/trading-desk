@@ -3,7 +3,7 @@ check_only writes nothing. Every figure is invented."""
 import json
 import sqlite3
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -392,8 +392,8 @@ def lagged(con, fake_yahoo, *, current: bool, **a):
     return live, enter(con, live, **{**a, "at": T14, "now": T15})
 
 
-def record(con, live, minutes):
-    cv = enter(con, live, at=T14 + timedelta(minutes=minutes), now=T15, check_only=True)
+def record(con, live, minutes, now=T15):
+    cv = enter(con, live, at=T14 + timedelta(minutes=minutes), now=now, check_only=True)
     return [result(cv, n) for n in RECORD]
 
 
@@ -409,6 +409,23 @@ def test_a_live_futures_exit_the_feed_has_not_delivered_reads_unknown(con, fake_
     b = enter(con, live, at=T15, now=T15)
     left = api.stats(con, run=live, conforming_only=True, now=T15).left_out
     assert left == {"breached": (), "unknown": {n: (b.id,) for n in RECORD}}
+
+
+def test_a_futures_open_report_inside_an_undelivered_bar_is_unknown_from_that_bars_close(
+        con, fake_yahoo):
+    live, a = lagged(con, fake_yahoo, current=False, **GOLD)
+    h = T15 + timedelta(minutes=7)
+    held = api.report(con, a.id, state="open", at=h, reason="Invented.", now=h)
+    assert held.outcome.judged_through == h   # the 15:00 bar, holding h, is not in the feed yet
+    at = T15 + timedelta(minutes=10)
+    assert [r.ok for r in record(con, live, 70, now=at)] == [False, True, True]
+    for r in record(con, live, 75, now=T15 + timedelta(minutes=15)):
+        assert r.ok is None and a.id in r.says, r
+    # the feed catches up: the 15:00 bar stops A out, dated its close, 15:15
+    fake_yahoo(QUIET + [replace(QUIET[0], open_time=T14 + timedelta(minutes=15 * i))
+                        for i in (2, 3)] + [replace(STOPPED, open_time=T15)])
+    out = api.get_trade(con, a.id, now=T15 + timedelta(minutes=50)).outcome
+    assert (out.exited_at, out.r) == (T15 + timedelta(minutes=15), -1.0)
 
 
 @pytest.mark.parametrize("a, current, ok", [

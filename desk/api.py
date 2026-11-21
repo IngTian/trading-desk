@@ -453,9 +453,11 @@ def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int, *, 
         settles = ("report its exit with the broker's price (report(trade, state='exited', "
                    "price=…, at=…))")
     elif live and row["instrument"] == "future" and o.status in ("open", "pending"):
-        # Yahoo delays futures (Notes 5): an exit in the bar after judged_through is dated at its
-        # close, so it is unknown from there; checks._unknown's `<` is strict, hence the 1 µs.
-        unknown_from = o.judged_through + timedelta(minutes=minutes, microseconds=-1)
+        # Yahoo delays futures (Notes 5): an exit in the bar holding judged_through (a bar close,
+        # or a mid-bar report or entry) is dated at that bar's close, on judge._opened's grid, so
+        # it is unknown from there; checks._unknown's `<` is strict, hence the 1 µs.
+        jt, bar = o.judged_through, timedelta(minutes=minutes)
+        unknown_from = jt + bar - (jt - judge._EPOCH) % bar - timedelta(microseconds=1)
     return checks.Other(id=row["id"], ticker=row["ticker"], entered=d.entry.at, seq=seq,
                         ended=o.exited_at or o.cancelled_at, exited=o.status == "exited",
                         r=o.r, cash=o.cash, unknown_from=unknown_from, closed_at=closed_at,
