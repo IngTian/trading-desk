@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from desk import api, cli, config, store
 
 NOW = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
-TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes: 1h\n```\n"
+TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes = [\"1h\"]\n```\n"
 
 
 def _store_with_a_trade():

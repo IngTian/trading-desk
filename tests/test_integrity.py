@@ -13,7 +13,7 @@ T1, T2, T3, T4 = (NOW + timedelta(hours=h) for h in (1, 2, 3, 4))
 LATER = NOW + timedelta(days=1)
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
             size=10, currency="USD", reasons="Dip into support.")
-TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes: 1h\n```\n"
+TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes = [\"1h\"]\n```\n"
 RUN = "dip-buyer-r1"
 
 
@@ -289,7 +289,8 @@ def test_an_open_report_at_or_after_the_close_is_reported(con):
 
 def test_a_version_whose_hash_does_not_match_its_text_is_reported(con):
     con.execute("INSERT INTO versions (strategy_id, version, text, text_hash, rules, timeframes,"
-                " saved_at) VALUES ('dip-buyer', 2, ?, 'bad', '{}', '[\"1h\"]', ?)",
+                " checklist, saved_at) VALUES ('dip-buyer', 2, ?, 'bad', '{}', '[\"1h\"]',"
+                " '[]', ?)",
                 (TEXT, NOW.isoformat()))
     assert only(con, "version_text_hash") == 1
 

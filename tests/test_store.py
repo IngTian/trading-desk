@@ -11,12 +11,12 @@ AT = "2026-11-10T10:00:00+00:00"
 
 @pytest.fixture
 def con(tmp_path):
-    """A fresh v3 store with one strategy, one version, one run and one trade."""
+    """A fresh v4 store with one strategy, one version, one run and one trade."""
     db = tmp_path / "test.db"
     store.create(db)
     with store.open(db) as conn:
         store.add_strategy(conn, "alpha", AT)
-        store.add_version(conn, "alpha", 1, "text", "h1", {"size": 1}, ["15m"], AT)
+        store.add_version(conn, "alpha", 1, "text", "h1", {"size": 1}, ["15m"], [], AT)
         store.add_run(conn, "alpha-r1", "alpha", 1, "live", ["paper"])
         store.add_trade(conn, "ACME-20261110", "alpha-r1", "ACME", "long", "stock", 1.0, "USD")
         yield conn
@@ -82,7 +82,7 @@ def test_a_run_naming_a_missing_version_is_refused(con):
 
 
 def test_versions_and_runs_read_back(con):
-    store.add_version(con, "alpha", 2, "text2", "h2", {}, ["1h"], AT)
+    store.add_version(con, "alpha", 2, "text2", "h2", {}, ["1h"], [], AT)
     assert [v["version"] for v in store.versions(con, "alpha")] == [1, 2]
     assert store.run(con, "alpha-r1")["mode"] == "live" and store.run(con, "x") is None
     assert [r["id"] for r in store.runs(con)] == ["alpha-r1"]
@@ -101,7 +101,7 @@ def test_a_refused_second_write_rolls_back_the_group(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         with store.transaction(con):
             store.add_strategy(con, "beta", AT)
-            store.add_version(con, "beta", 0, "t", "h", {}, [], AT)  # version >= 1
+            store.add_version(con, "beta", 0, "t", "h", {}, [], [], AT)  # version >= 1
     assert con.execute("SELECT count(*) FROM strategies").fetchone()[0] == 0
 
 
@@ -111,7 +111,7 @@ def test_a_successful_group_commits_both_rows(tmp_path):
     con = store.open(db)
     with store.transaction(con):
         store.add_strategy(con, "beta", AT)
-        store.add_version(con, "beta", 1, "t", "h", {}, [], AT)
+        store.add_version(con, "beta", 1, "t", "h", {}, [], [], AT)
     other = store.open(db, read_only=True)
     assert len(store.versions(other, "beta")) == 1
 
@@ -160,7 +160,7 @@ def test_a_v1_file_is_refused_as_the_wrong_schema_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 3"):
+    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 4"):
         store.open(old)
     assert _md5(old) == before
 
@@ -174,14 +174,27 @@ def test_a_0_5_desk_db_is_refused_untouched_naming_its_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 2, expected 3") as e:
+    with pytest.raises(store.NotADeskDatabase, match="schema version 2, expected 4") as e:
         store.open(old)
     # F11: the tmp path may hold "v2", so the old wording is matched with what followed it
     assert "no migration" in str(e.value) and "v2 desk.db" not in str(e.value)
     assert _md5(old) == before
 
 
-def test_the_v3_schema_has_no_trackers_table(con):
+def test_a_0_6_desk_db_is_refused_untouched_naming_its_version(tmp_path):
+    old = tmp_path / "desk.db"
+    store.create(old)
+    c = sqlite3.connect(old)
+    c.execute("PRAGMA user_version = 3")
+    c.commit()
+    c.close()
+    before = _md5(old)
+    with pytest.raises(store.NotADeskDatabase, match="schema version 3, expected 4"):
+        store.open(old)
+    assert _md5(old) == before
+
+
+def test_the_v4_schema_has_no_trackers_table(con):
     names = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
     assert not {n for n in names if "tracker" in n}
 

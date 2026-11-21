@@ -16,7 +16,7 @@ REPLACE = os.replace
 
 def make():
     return ("---\nname: Dip buyer\n---\n\n# Dip buyer\n\nBuy dips.\n\n"
-            "```rules\ntimeframes: 1h\nmin_reward_risk: 2\n```\n")
+            "```rules\ntimeframes = [\"1h\"]\nmin_reward_risk = 2\n```\n")
 
 
 @pytest.fixture

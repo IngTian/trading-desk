@@ -14,7 +14,7 @@ T1, T2, T3, T4 = (NOW + timedelta(hours=n) for n in (1, 2, 3, 4))
 LATER = NOW + timedelta(days=1)
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
             size=10, currency="USD", reasons="Dip into support.")
-TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes: 1h\n```\n"
+TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes = [\"1h\"]\n```\n"
 
 
 @pytest.fixture

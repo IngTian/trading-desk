@@ -69,8 +69,9 @@ class StrategyView:
     version: int
     versions: int
     text: str
-    rules: dict[str, str]
+    rules: dict
     timeframes: tuple[str, ...]
+    checklist: tuple[str, ...]
     current_hash: str   # the latest version's text_hash: pass it back as `if_current`
     saved: str          # "version 3 created" | "unchanged"
 
@@ -88,6 +89,7 @@ def _view(con, id: str, version: int | None, saved: str) -> StrategyView:
     return StrategyView(
         id=id, name=strategy.name_of(text), version=row["version"], versions=len(rows),
         text=text, rules=json.loads(row["rules"]), timeframes=tuple(json.loads(row["timeframes"])),
+        checklist=tuple(json.loads(row["checklist"])),
         current_hash=rows[-1]["text_hash"], saved=saved)
 
 
@@ -118,7 +120,8 @@ def save_strategy(con: sqlite3.Connection, id: str, markdown: str, *,
             store.add_strategy(con, id, at)
         if new_text:
             store.add_version(con, id, len(rows) + 1, parsed.text, parsed.text_hash,
-                              dict(parsed.rules), list(parsed.timeframes), at)
+                              dict(parsed.rules), list(parsed.timeframes),
+                              list(parsed.checklist), at)
     return _view(con, id, None, f"version {len(rows) + 1} created" if new_text else "unchanged")
 
 

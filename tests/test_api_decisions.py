@@ -15,7 +15,7 @@ T3 = NOW + timedelta(hours=3)
 LATER = NOW + timedelta(days=1)  # the wall clock when a record-keeping event is written
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
             size=10, currency="USD", reasons="Dip into support.")
-RULES = "```rules\ntimeframes: 1h\nmin_reward_risk: 2\n```\n"
+RULES = "```rules\ntimeframes = [\"1h\"]\nmin_reward_risk = 2\n```\n"
 
 
 def strategy(name):
