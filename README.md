@@ -7,7 +7,9 @@ reasons and screenshots, in an append-only SQLite log, and works out how each tr
 whenever you read it. A later release reports performance per strategy, per version and per
 run.
 
-**Status: 0.6.0, reported states, bars and the judge.** This release stores the record and
+**Status: 0.6.0, reported states, bars and the judge — on GitHub only.** PyPI keeps 0.5.0
+until 1.0, so install from the repository to use this version (see [Install](#install)).
+This release stores the record and
 reads each trade's outcome. A replay trade's outcome is what you report; a live trade's is
 worked out from price bars, with your reports overriding it. It does not yet check a trade
 against its rules, report statistics, or serve the agent interface. Those come in the
@@ -93,9 +95,12 @@ duplicate is refused, naming the rule and the fix. No rule is ever silently drop
 ## Install
 
 ```bash
-pip install trading-desk             # or, in a uv project: uv add trading-desk
-pip install 'trading-desk[yahoo]'    # with Yahoo's price bars, which live runs are judged on
+pip install 'trading-desk[yahoo] @ git+https://github.com/IngTian/trading-desk'
 ```
+
+That is this version, with Yahoo's price bars (which live runs are judged on). Leave out
+`[yahoo]` for the desk alone. `pip install trading-desk` from PyPI gives 0.5.0 until 1.0 is
+released.
 
 Install it into the Python environment you will import it from: in 0.6 the desk is used
 from Python, and its only command is `trading-desk integrity`. Python 3.11 or later, built
