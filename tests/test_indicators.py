@@ -40,6 +40,7 @@ def test_macd_line_signal_histogram():
 @pytest.mark.parametrize("rule, settings, n", [
     ("rsi", {"length": 14}, 250), ("stop_atr", {"length": 14}, 250),
     ("macd", {"fast": 12, "slow": 26, "signal": 9}, 250), ("ema", {"length": 20}, 250),
+    ("macd", {"fast": 200, "slow": 12, "signal": 9}, 200 + 691 + 9 + 31),   # EMA(200)'s 891
     ("ema", {"length": 50}, 250), ("ema", {"length": 100}, 446), ("ema", {"length": 200}, 891),
     ("sma", {"length": 200}, 200), ("rsi", {"length": 1}, 250)])
 def test_warmup(rule, settings, n):

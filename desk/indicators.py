@@ -75,8 +75,9 @@ def warmup(rule: str, settings: dict) -> int:
     if rule == "sma":
         return settings["length"]
     if rule == "macd":
-        slow, sig = settings["slow"], settings["signal"]
-        return max(250, slow + _term(2 / (slow + 1)) + sig + _term(2 / (sig + 1)))
+        # the longer EMA, whichever it is called: fast = 200, slow = 12 is accepted
+        longer, sig = max(settings["fast"], settings["slow"]), settings["signal"]
+        return max(250, longer + _term(2 / (longer + 1)) + sig + _term(2 / (sig + 1)))
     length = settings["length"]
     if rule == "ema":
         return max(250, length + _term(2 / (length + 1)))
