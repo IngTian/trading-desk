@@ -57,6 +57,19 @@ def test_max_risk_per_trade_names_the_largest_size():
     assert "up to 1 contract" in one({"max_risk_per_trade": {"USD": 250}}, fut).says
 
 
+def test_a_figure_too_large_to_state_reads_unknown():
+    r = one({"max_risk_per_trade": {"USD": 20}}, replace(P, size=10 ** 308))   # risk is inf
+    assert (r.ok, r.figure, r.limit) == (None, None, "20 USD")
+    assert "too large to state" in r.says
+    # a vanishing risk per contract: the size that passes overflows on the way
+    tiny = replace(P, instrument="future", point_value=1e-308)
+    r = one({"max_risk_per_trade": {"USD": 20}}, tiny)
+    assert (r.name, r.ok, r.figure) == ("max_risk_per_trade", None, None)
+    assert "too large to state" in r.says and json.loads(r.limit) == {"USD": 20}
+    assert json.dumps(asdict(r), allow_nan=False)
+    assert one({"max_risk_per_trade": {"USD": 20}}).figure == 20.0   # a finite one is untouched
+
+
 def test_required_orders_and_allow_lists():
     assert one({"stop_required": True}, replace(P, stop=None)).ok is False
     assert one({"stop_required": False}, replace(P, stop=None)).ok is True

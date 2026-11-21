@@ -120,6 +120,38 @@ def test_check_only_validates_as_an_entry_and_writes_nothing(con, tmp_path):
         enter(con, check_only=True, at=NOW + timedelta(hours=2))
 
 
+def test_a_size_or_price_past_a_floats_range_is_refused_or_reads_unknown(con):
+    for kw, says in ((dict(size=10 ** 400), "size must be"), (dict(entry=10 ** 400), "entry must"),
+                     (dict(stop=10 ** 400), "stop must"), (dict(target=10 ** 400), "target must"),
+                     ({**GOLD, "at": NOW, "point_value": 10 ** 400}, "point_value must")):
+        with pytest.raises(api.Refused, match=says):
+            enter(con, **kw)
+    assert store.trades(con) == [] and len(store.events(con)) == 2
+    t = enter(con, size=10 ** 308)   # a float, but its risk is not: recorded, that rule unknown
+    r = result(t, "max_risk_per_trade")
+    assert (r.ok, r.figure) == (None, None) and "too large to state" in r.says
+    assert payload(con, t.id)["checks"] == [asdict(x) for x in t.checks_shown]
+    with pytest.raises(api.Refused, match="size must be"):
+        api.correct_trade(con, t.id, fields={"size": 10 ** 400}, reason="Invented.", now=NOW)
+    assert len(store.events(con, trade_id=t.id)) == 1
+
+
+@pytest.mark.parametrize("stored", [
+    [{"item": "The trend is up.", "verdict": "maybe", "reason": "x"}, 5,
+     {"item": ["No news within the hour."], "verdict": "pass", "reason": "x"}],
+    "not a list"])
+def test_a_damaged_stored_checklist_reads_not_answered(con, stored):
+    store.add_trade(con, "raw-1", REPLAY, "ACME", "long", "stock", 1.0, "USD")
+    store.append(con, kind="entered", run_id=REPLAY, trade_id="raw-1", at=NOW.isoformat(),
+                 recorded_at=NOW.isoformat(),
+                 payload={"entry_type": "market", "entry": 100.0, "stop": 98.0, "target": 104.0,
+                          "size": 10, "reasons": "Written by hand.", "screenshots": [],
+                          "checklist": stored})
+    t = api.get_trade(con, "raw-1", now=NOW)
+    assert [a["verdict"] for a in t.checklist] == ["not answered", "not answered"]
+    assert t.checks_shown is None
+
+
 @pytest.mark.parametrize("v", ["yes", 1, [True]])
 def test_check_only_must_be_true_false_or_left_out(con, v):
     with pytest.raises(api.Refused, match="check_only must be true, false or left out"):

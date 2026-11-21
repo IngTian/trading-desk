@@ -254,10 +254,7 @@ def _shown_problems(p: dict) -> list[str]:
         if not isinstance(c, list):
             out.append(f"checklist {c!r} is not a list of answers")
         out += [f"checklist[{i}] {a!r} is not {{item, verdict pass or fail, reason}}, as text"
-                for i, a in enumerate(c if isinstance(c, list) else ())
-                if not (isinstance(a, dict) and set(a) == {"item", "verdict", "reason"}
-                        and isinstance(a["item"], str) and a["verdict"] in ("pass", "fail")
-                        and isinstance(a["reason"], str))]
+                for i, a in enumerate(c if isinstance(c, list) else ()) if not model.is_answer(a)]
     return out
 
 

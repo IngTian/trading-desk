@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import os
 import re
 import sqlite3
@@ -400,12 +399,13 @@ def _generate_trade_id(ticker: str, local_date: str, existing_ids) -> str:
 def _price(name: str, v, *, required: bool = True) -> None:
     if v is None and not required:
         return
-    if isinstance(v, bool) or not isinstance(v, int | float) or not math.isfinite(v) or v <= 0:
+    if isinstance(v, bool) or not isinstance(v, int | float) or not _finite(v) or v <= 0:
         raise Refused(f"{name} must be a number above zero, e.g. 101.5; got {v!r}.")
 
 
 def _size(v) -> None:
-    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+    # a size past a float's range would overflow the checks' arithmetic
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0 or not _finite(v):
         raise Refused(f"size must be a whole number above zero, e.g. 10; got {v!r}.")
 
 
@@ -615,8 +615,11 @@ def _answers(items: tuple[str, ...], checklist) -> tuple[dict, ...]:
 
 
 def _checklist_view(items: tuple[str, ...], answers) -> tuple[dict, ...]:
-    """One answer per item of the version, in its order; an unanswered one reads so."""
-    given = {a["item"]: a for a in answers}
+    """One answer per item of the version, in its order. An unanswered item reads "not answered",
+    as does one whose stored answer trade() would not write (integrity's entered_checks reports
+    that one), so a damaged record never fails a read."""
+    given = {a["item"]: a for a in (answers if isinstance(answers, tuple | list) else ())
+             if model.is_answer(a)}
     return tuple(given.get(i, {"item": i, "verdict": "not answered", "reason": None})
                  for i in items)
 

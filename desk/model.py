@@ -140,6 +140,14 @@ class Decisions:
     checklist: tuple[dict, ...] = ()
 
 
+def is_answer(a) -> bool:
+    """A checklist answer in the shape trade() stores: exactly `item`, `verdict` (`pass` or
+    `fail`) and `reason`, with text item and reason."""
+    return (isinstance(a, dict) and set(a) == {"item", "verdict", "reason"}
+            and isinstance(a["item"], str) and a["verdict"] in ("pass", "fail")
+            and isinstance(a["reason"], str))
+
+
 def decisions_of(con: sqlite3.Connection, trade_id: str) -> Decisions:
     """What was decided on a trade. Each correction is read in place of the event it names,
     only its named fields changing; a correction of a correction is read at the original's

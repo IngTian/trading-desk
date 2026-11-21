@@ -14,11 +14,12 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
+from functools import partial
 
 from desk.model import Plan, _signed, canonical_ticker
-from desk.rules import _DAYS, INDICATORS, ORDER, Rules, indicators
+from desk.rules import _DAYS, INDICATORS, ORDER, Rules, _finite, indicators
 
 
 @dataclass(frozen=True)
@@ -456,6 +457,20 @@ _RULES = {
 }
 
 
+def _stated(name: str, limit: str, compute: Callable[[], Result]) -> Result:
+    """compute()'s result, read unknown when its figure is not a finite number or overflows on the
+    way (a risk past a float's range, the size that passes on a vanishing one): every figure kept
+    is finite, and a stored one is JSON, which holds no inf."""
+    try:
+        r = compute()
+    except OverflowError:
+        r = Result(name, None, math.inf, limit, "", None)
+    if r.figure is None or _finite(r.figure):
+        return r
+    return replace(r, ok=None, figure=None,
+                   says=f"its figure is too large to state, so {name} cannot be checked")
+
+
 def run_checks(plan: Plan, rules: Rules, ctx: Context) -> list[Result]:
     """Every rule the version names, in the library's ORDER (an array in file order, facts in file
     order), then any stored key the library does not know, which reads unknown: never skipped."""
@@ -466,13 +481,16 @@ def run_checks(plan: Plan, rules: Rules, ctx: Context) -> list[Result]:
         if rule not in values:
             continue
         if rule in INDICATORS:
-            results += [_indicator(plan, i.rule, i.label, i.keys, i.compare, ctx)
-                        for i in found if i.rule == rule]
+            results += [_stated(i.label, json.dumps(i.compare), partial(
+                _indicator, plan, i.rule, i.label, i.keys, i.compare, ctx))
+                for i in found if i.rule == rule]
         elif rule == "facts":
-            results += [_indicator(plan, name, name, (name,), cmp, ctx)
-                        for name, cmp in values["facts"].items()]
+            results += [_stated(name, json.dumps(cmp), partial(
+                _indicator, plan, name, name, (name,), cmp, ctx))
+                for name, cmp in values["facts"].items()]
         else:
-            results.append(_RULES[rule](plan, values[rule], ctx))
+            results.append(_stated(rule, json.dumps(values[rule]),
+                                   partial(_RULES[rule], plan, values[rule], ctx)))
     return results + [Result(name, None, None, json.dumps(v),
                              f"this desk checks no rule named {name}", None)
                       for name, v in values.items() if name not in ORDER]
