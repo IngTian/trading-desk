@@ -22,6 +22,13 @@ class ParsedStrategy:
     timeframes: tuple[str, ...]     # finest first, e.g. ("15m", "1h")
 
 
+def minutes(timeframe: str) -> int:
+    """A timeframe in whole minutes: "15m" -> 15, "1h" -> 60, "1d" -> 1440, "1w" -> 10080."""
+    if not _TIMEFRAME.fullmatch(timeframe):
+        raise ValueError(f"{timeframe!r} is not a timeframe such as 15m, 4h or 1d")
+    return int(timeframe[:-1]) * _MINUTES[timeframe[-1]]
+
+
 def normalise(text: str) -> str:
     lines = [re.sub(r"[ \t]+", " ", ln).rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
     return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
@@ -68,7 +75,7 @@ def parse(text: str) -> ParsedStrategy:
                 f"strategy: timeframes: {f!r} is not a candle size; write a whole number and "
                 f"m, h, d or w, such as 15m, 4h, 1d")
         # Two names for one size would tie, and "finest first" must not depend on which.
-        if (kept := named.setdefault(int(f[:-1]) * _MINUTES[f[-1]], f)) != f:
+        if (kept := named.setdefault(minutes(f), f)) != f:
             raise Refused(f"strategy: timeframes: {kept} and {f} are the same timeframe; keep one")
     chosen = tuple(named[n] for n in sorted(named))
     norm = normalise(text)

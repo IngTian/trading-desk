@@ -100,3 +100,7 @@ def test_a_value_the_check_would_never_apply_is_refused_at_save(rule):
 def test_the_shipped_example_strategy_parses():
     s = strategy.parse(config.example_strategy().read_text())
     assert s.timeframes == ("15m", "1h") and "min_reward_risk" in s.rules
+
+
+def test_a_timeframe_in_minutes():
+    assert [strategy.minutes(t) for t in ("15m", "1h", "1d", "1w")] == [15, 60, 1440, 10080]

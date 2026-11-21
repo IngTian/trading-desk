@@ -1,4 +1,4 @@
-"""Tests for the v2 store: strategies, versions, runs, trades and an append-only log."""
+"""Tests for the v3 store: strategies, versions, runs, trades and an append-only log."""
 import json
 import sqlite3
 
@@ -11,7 +11,7 @@ AT = "2026-11-10T10:00:00+00:00"
 
 @pytest.fixture
 def con(tmp_path):
-    """A fresh v2 store with one strategy, one version, one run and one trade."""
+    """A fresh v3 store with one strategy, one version, one run and one trade."""
     db = tmp_path / "test.db"
     store.create(db)
     with store.open(db) as conn:
@@ -43,10 +43,8 @@ def test_the_log_refuses_an_update_and_a_delete(con):
         con.execute("DELETE FROM events WHERE id=?", (eid,))
 
 
-def test_versions_and_trackers_refuse_an_update_and_a_delete(con):
-    store.add_tracker(con, "alpha", "script", "sh", "40 bars after exit", AT)
-    for sql in ("UPDATE versions SET text='x'", "DELETE FROM versions",
-                "UPDATE trackers SET script='x'", "DELETE FROM trackers"):
+def test_versions_refuse_an_update_and_a_delete(con):
+    for sql in ("UPDATE versions SET text='x'", "DELETE FROM versions"):
         with pytest.raises(sqlite3.IntegrityError):
             con.execute(sql)
 
@@ -74,8 +72,8 @@ def test_a_payload_that_is_not_json_is_refused(con):
 def test_an_unknown_kind_is_refused(con):
     with pytest.raises(sqlite3.IntegrityError):
         _append(con, kind="unknown_kind")
-    assert store.KINDS == ("run_started", "run_stopped", "entered", "order_moved",
-                           "closed", "corrected", "voided")
+    assert store.KINDS == ("run_started", "run_stopped", "entered", "order_moved", "filled",
+                           "cancelled", "held", "closed", "corrected", "voided")
 
 
 def test_a_run_naming_a_missing_version_is_refused(con):
@@ -83,13 +81,9 @@ def test_a_run_naming_a_missing_version_is_refused(con):
         store.add_run(con, "alpha-r2", "alpha", 7, "live", [])
 
 
-def test_versions_trackers_and_runs_read_back(con):
+def test_versions_and_runs_read_back(con):
     store.add_version(con, "alpha", 2, "text2", "h2", {}, ["1h"], AT)
     assert [v["version"] for v in store.versions(con, "alpha")] == [1, 2]
-    assert store.latest_tracker(con, "alpha") is None
-    store.add_tracker(con, "alpha", "a", "ha", None, AT)
-    store.add_tracker(con, "alpha", None, None, None, AT)
-    assert store.latest_tracker(con, "alpha")["script"] is None
     assert store.run(con, "alpha-r1")["mode"] == "live" and store.run(con, "x") is None
     assert [r["id"] for r in store.runs(con)] == ["alpha-r1"]
     assert store.runs(con, "beta") == []
@@ -166,9 +160,30 @@ def test_a_v1_file_is_refused_as_the_wrong_schema_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 2"):
+    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 3"):
         store.open(old)
     assert _md5(old) == before
+
+
+def test_a_0_5_desk_db_is_refused_untouched_naming_its_version(tmp_path):
+    old = tmp_path / "desk.db"
+    c = sqlite3.connect(old)
+    c.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, recorded_at TEXT, kind TEXT,"
+              " payload TEXT)")
+    c.execute("PRAGMA user_version = 2")
+    c.commit()
+    c.close()
+    before = _md5(old)
+    with pytest.raises(store.NotADeskDatabase, match="schema version 2, expected 3") as e:
+        store.open(old)
+    # F11: the tmp path may hold "v2", so the old wording is matched with what followed it
+    assert "no migration" in str(e.value) and "v2 desk.db" not in str(e.value)
+    assert _md5(old) == before
+
+
+def test_the_v3_schema_has_no_trackers_table(con):
+    names = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
+    assert not {n for n in names if "tracker" in n}
 
 
 def test_open_raises_on_missing_database_when_not_read_only(tmp_path):

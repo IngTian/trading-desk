@@ -106,3 +106,22 @@ def test_tags_that_are_not_a_list_of_strings_are_refused(con, tags):
 
 def test_no_tags_may_be_given_as_none(con):
     assert api.start_run(con, "dip-buyer", mode="live", tags=None, now=NOW).tags == ()
+
+
+@pytest.mark.parametrize("finest", ["3m", "4h"])   # Ruling R10: yfinance 1.8 has no 4h interval
+def test_a_live_run_needs_a_finest_timeframe_yahoo_serves(con, finest):
+    api.save_strategy(con, "odd", make().replace("timeframes: 1h", f"timeframes: {finest}, 1d"),
+                      now=NOW)
+    with pytest.raises(api.Refused, match=rf"no {finest} bars; give the strategy a finest "
+                                          r"timeframe of 1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w,"):
+        api.start_run(con, "odd", mode="live", now=NOW)
+    assert store.runs(con, "odd") == []
+    assert api.start_run(con, "odd", mode="replay", at=NOW, now=NOW).mode == "replay"
+
+
+@pytest.mark.parametrize("finest", ["1d", "1w"])
+def test_a_live_run_may_have_a_daily_or_weekly_finest_timeframe(con, finest):
+    """Ruling R6: allowed; a future on them reads "not judged" (test_api_outcomes)."""
+    api.save_strategy(con, "slow", make().replace("timeframes: 1h", f"timeframes: {finest}"),
+                      now=NOW)
+    assert api.start_run(con, "slow", mode="live", now=NOW).mode == "live"

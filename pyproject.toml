@@ -8,21 +8,17 @@ build-backend = "setuptools.build_meta"
 # nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
-version = "0.5.0"
+version = "0.6.0"
 description = "Record your trades under versioned strategies: reasons, screenshots and every later decision, in an append-only SQLite log"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["trading", "strategy", "trade-journal", "replay", "sqlite", "event-sourcing"]
-# No runtime dependencies, and that is a property worth keeping. Every import under `desk/`
-# is standard library — `sqlite3`, `argparse`, `tomllib`, `dataclasses`, `datetime`, `json`,
-# `hashlib`, `math`, `re` — so `pip install trading-desk` pulls nothing else in.
-#
-# `textual>=8.2,<9` was here until 2026-11-11 and nothing under `desk/` imported it: the TUI
-# it supported was deleted with the rest of the portfolio-era surface. The only remaining
-# importer was `tools/screenshots.py`, which also imported `desk.book` and `desk.tui.app` and
-# so could not run at all; it was deleted with the dependency.
+# No required runtime dependencies, and that is a property worth keeping. Every import under
+# `desk/` is standard library except `yfinance`, which only `desk/yahoo.py` imports, inside the
+# call, behind the `yahoo` extra: `pip install trading-desk` pulls nothing else in, and
+# `pip install 'trading-desk[yahoo]'` adds what live runs read their bars through.
 dependencies = []
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -38,6 +34,8 @@ classifiers = [
     "Topic :: Utilities",
 ]
 
+[project.optional-dependencies]
+yahoo = ["yfinance>=1.8,<2"]
 
 [project.urls]
 Homepage = "https://github.com/IngTian/trading-desk"
@@ -54,7 +52,8 @@ trading-desk = "desk.cli:main"
 # first time this project was made installable. CI therefore uses `uv sync` rather than
 # daylogs' `pip install -e '.[dev]'`; one declaration that cannot drift from a second.
 [dependency-groups]
-dev = ["pytest>=8.0", "ruff>=0.6"]
+# yfinance too, so that the tests drive the Yahoo adapter on a recorded DataFrame.
+dev = ["pytest>=8.0", "ruff>=0.6", "yfinance>=1.8,<2"]
 
 
 [tool.setuptools.packages.find]
@@ -67,7 +66,7 @@ include = ["desk*"]
 # a real built wheel, because an editable install reads the source tree and so cannot
 # catch a missing declaration.
 [tool.setuptools.package-data]
-"desk" = ["schema.sql", "strategy.example.md"]
+"desk" = ["schema.sql", "bars.sql", "strategy.example.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

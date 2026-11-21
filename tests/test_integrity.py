@@ -1,4 +1,4 @@
-"""Tests for the v2 integrity checker. Violations are written as raw SQL with foreign keys OFF,
+"""Tests for the v3 integrity checker. Violations are written as raw SQL with foreign keys OFF,
 the way a damaged or hand-edited file would hold them; the healthy log goes through the API.
 Every figure is invented."""
 import json
@@ -208,11 +208,17 @@ def test_a_correction_naming_another_trades_event_is_reported(con):
     assert only(con, "correction_target") == 1
 
 
-@pytest.mark.parametrize("kind", ["closed", "corrected"])
-def test_a_correction_naming_a_close_or_a_correction_is_reported(con, kind):
+@pytest.mark.parametrize("kind", ["corrected"])
+def test_a_correction_naming_a_correction_is_reported(con, kind):
     named = [e["id"] for e in store.events(con, trade_id=tid(con, "ACME")) if e["kind"] == kind]
     ev(con, "corrected", LATER, trade=tid(con, "ACME"), corrects=named[0],
        payload={"fields": {"stop": 97.0}, "reason": "x"})
+    assert only(con, "correction_target") == 1
+
+
+def test_a_withdrawal_naming_an_entry_is_reported(con):
+    entered = store.events(con, trade_id=tid(con, "ACME"))[0]["id"]
+    ev(con, "voided", LATER, trade=tid(con, "ACME"), corrects=entered, payload={"reason": "x"})
     assert only(con, "correction_target") == 1
 
 
@@ -233,7 +239,50 @@ def test_an_event_after_a_void_is_reported(con):
 
 def test_two_closes_are_reported(con):
     ev(con, "closed", T4, trade=tid(con, "ACME"), payload={"reason": "again"})
-    assert only(con, "one_close") == 1
+    assert only(con, "one_report") == 1
+
+
+def test_two_standing_fills_are_reported(con):
+    raw_trade(con, "RAW-1")
+    for _ in range(2):
+        ev(con, "filled", T2, trade="RAW-1", payload={"reason": "x"})
+    assert only(con, "one_report") == 1
+
+
+# --- reports -----------------------------------------------------------------------------------
+
+def test_a_log_with_reports_a_withdrawal_and_a_corrected_report_reports_nothing(con):
+    raw_trade(con, "RAW-1")
+    first = ev(con, "filled", T2, trade="RAW-1", payload={"reason": "x"})
+    ev(con, "voided", LATER, trade="RAW-1", corrects=first, payload={"reason": "x"})
+    second = ev(con, "filled", T2, trade="RAW-1", payload={"reason": "x", "price": 99.5})
+    ev(con, "corrected", LATER, trade="RAW-1", corrects=second,
+       payload={"fields": {"price": 99.75}, "reason": "x"})
+    # A move after a withdrawal: not after a void. Then still open at T3.
+    ev(con, "order_moved", T3, trade="RAW-1", payload={"stop": 99.0, "reason": "x"})
+    ev(con, "held", T3, trade="RAW-1", payload={"reason": "x"})
+    ev(con, "closed", T4, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    assert found(con) == (0, [])
+
+
+def test_an_exit_with_no_position_is_reported(con):
+    raw_trade(con, "RAW-1")
+    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    assert only(con, "reports") == 1
+
+
+def test_an_exit_kind_that_is_not_known_is_reported(con):
+    raw_trade(con, "RAW-1")
+    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "trailing"})
+    assert only(con, "reports") == 1
+
+
+def test_an_open_report_at_or_after_the_close_is_reported(con):
+    raw_trade(con, "RAW-1")
+    ev(con, "filled", T2, trade="RAW-1", payload={"reason": "x"})
+    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    ev(con, "held", T4, trade="RAW-1", payload={"reason": "x"})
+    assert only(con, "reports") == 1
 
 
 # --- versions ----------------------------------------------------------------------------------
@@ -277,4 +326,8 @@ def test_the_checker_never_raises_on_a_damaged_log(con):
     entered = store.events(con, trade_id="RAW-1")[0]["id"]
     ev(con, "corrected", LATER, trade="RAW-1", corrects=entered,
        payload={"fields": "not a dict", "reason": "x"})
-    assert integrity.run(con, emit=lambda _line: None) >= 3
+    raw_trade(con, "RAW-2")  # its report folds, but its price breaks the report check
+    ev(con, "filled", T2, trade="RAW-2", payload={"reason": "x", "price": "abc"})
+    lines: list[str] = []
+    assert integrity.run(con, emit=lines.append) >= 4
+    assert any("trade RAW-2: report check failed: TypeError" in ln for ln in lines)

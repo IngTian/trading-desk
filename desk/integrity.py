@@ -1,11 +1,11 @@
-"""Integrity checker for the v2 log.
+"""Integrity checker for the v3 log.
 
 Each invariant is a named check returning failure lines (empty when healthy). The log is
 append-only, so a damaged row cannot be repaired in place; these checks find what the API
 refuses to write but a file written with foreign keys off, or by hand, can hold.
 
-Shape-of-the-log invariants read the raw rows; the date invariant reads the fold, because it is
-about effective (corrected) times.
+Shape-of-the-log invariants read the raw rows; the date and report invariants read the fold,
+because they are about effective (corrected, withdrawn) decisions.
 """
 from __future__ import annotations
 
@@ -60,27 +60,37 @@ def _run_started_stopped(con: sqlite3.Connection) -> list[str]:
     return failures
 
 
+def _unfoldable(own: list[sqlite3.Row]) -> bool:
+    """True when another invariant already reports why the trade whose events are `own` cannot be
+    folded: not one `entered`, a correction naming nothing in the trade, an unreadable event
+    time."""
+    ids = {e["id"] for e in own}
+    return (sum(e["kind"] == "entered" for e in own) != 1
+            or any(e["kind"] == "corrected" and e["corrects"] not in ids for e in own)
+            or any(_aware(e["at"]) is None for e in own))
+
+
+def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime], ...]:
+    """The aware `at`s of the run's run_started events, and of its run_stopped events."""
+    run = store.events(con, run_id=run_id)
+    return tuple([s for e in run if e["kind"] == kind and (s := _aware(e["at"]))]
+                 for kind in ("run_started", "run_stopped"))
+
+
 def _decision_dates(con: sqlite3.Connection) -> list[str]:
     """By effective time: an entry is not before its run's start, nor (unless the trade is void)
-    at or after its run's stop; a move is not before the entry and is strictly before the hand
+    at or after its run's stop; a move is not before the entry and is strictly before the
     close; a close is strictly after the entry.
 
-    A trade is skipped when another invariant already reports why it cannot be folded (not one
-    `entered`, a correction naming nothing in the trade, an unreadable event time). A fold that
-    fails for any other reason, such as a malformed correction payload, is reported here."""
+    A trade is skipped when it is `_unfoldable`. A fold that fails for any other reason, such as
+    a malformed correction payload, is reported here."""
     failures = []
     for t in store.trades(con):
-        own = store.events(con, trade_id=t["id"])
-        ids = {e["id"] for e in own}
-        if (sum(e["kind"] == "entered" for e in own) != 1
-                or any(e["kind"] == "corrected" and e["corrects"] not in ids for e in own)
-                or any(_aware(e["at"]) is None for e in own)):
+        if _unfoldable(store.events(con, trade_id=t["id"])):
             continue
         who = f"trade {t['id']}"
         try:
-            run = store.events(con, run_id=t["run_id"])
-            started, stopped = ([s for e in run if e["kind"] == kind and (s := _aware(e["at"]))]
-                                for kind in ("run_started", "run_stopped"))
+            started, stopped = _run_times(con, t["run_id"])
             d = model.decisions_of(con, t["id"])
             if started and d.entry.at < min(started):
                 failures.append(f"{who}: entered at {d.entry.at.isoformat()}, before its run "
@@ -92,8 +102,7 @@ def _decision_dates(con: sqlite3.Connection) -> list[str]:
                 if m.at < d.entry.at:
                     failures.append(f"{who}: move at {m.at.isoformat()} is before the entry")
                 if d.close_at is not None and m.at >= d.close_at:
-                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the hand "
-                                    "close")
+                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the close")
             if d.close_at is not None and d.close_at <= d.entry.at:
                 failures.append(f"{who}: closed at {d.close_at.isoformat()}, not after the entry")
         except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
@@ -101,11 +110,44 @@ def _decision_dates(con: sqlite3.Connection) -> list[str]:
     return failures
 
 
+def _reports(con: sqlite3.Connection) -> list[str]:
+    """Every non-void trade's reports fit its record, by `model.report_problem`, the api's own
+    rules. A trade decision_dates skips or fails to fold is its to report, so it is skipped here;
+    a report check that raises on a payload that folds (a price that is not a number) is
+    reported, so integrity still never raises."""
+    failures = []
+    for t in store.trades(con):
+        if _unfoldable(store.events(con, trade_id=t["id"])):
+            continue
+        d = None
+        try:
+            d = model.decisions_of(con, t["id"])
+            if d.voided:
+                continue
+            problem = model.report_problem(
+                t["id"], d, side=t["side"], mode=store.run(con, t["run_id"])["mode"],
+                stopped=min(_run_times(con, t["run_id"])[1], default=None))
+        except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
+            if d is not None:  # a fold that fails is decision_dates' to report
+                failures.append(f"trade {t['id']}: report check failed: "
+                                f"{type(exc).__name__}: {exc}")
+            continue
+        if problem:
+            failures.append(f"trade {t['id']}: {problem}")
+    return failures
+
+
 def _correction_target(con: sqlite3.Connection) -> list[str]:
-    """A `corrected` names an earlier event of the same trade, an `entered` or `order_moved`."""
+    """A `corrected` names an earlier event of the same trade: an `entered`, an `order_moved` or
+    a report. A `voided` that names an event withdraws it, so it names an earlier report of the
+    same trade."""
     failures = []
     for e in store.events(con):
-        if e["kind"] != "corrected":
+        if e["kind"] == "corrected":
+            what, kinds = "correction", ("entered", "order_moved", *model._REPORTS)
+        elif e["kind"] == "voided" and e["corrects"] is not None:
+            what, kinds = "withdrawal", model._REPORTS
+        else:
             continue
         named = con.execute("SELECT * FROM events WHERE id = ?", (e["corrects"],)).fetchone()
         if e["corrects"] is None or named is None:
@@ -114,25 +156,34 @@ def _correction_target(con: sqlite3.Connection) -> list[str]:
             why = f"names event {named['id']}, which is not earlier"
         elif named["trade_id"] != e["trade_id"]:
             why = f"names event {named['id']}, which belongs to trade {named['trade_id']}"
-        elif named["kind"] not in ("entered", "order_moved"):
-            why = f"names event {named['id']}, a {named['kind']} (only entered or order_moved)"
+        elif named["kind"] not in kinds:
+            listed = ", ".join(kinds[:-1]) + f" or {kinds[-1]}"
+            why = f"names event {named['id']}, a {named['kind']} (only {listed})"
         else:
             continue
-        failures.append(f"event {e['id']} (trade {e['trade_id']}): correction {why}")
+        failures.append(f"event {e['id']} (trade {e['trade_id']}): {what} {why}")
     return failures
 
 
 def _nothing_after_void(con: sqlite3.Connection) -> list[str]:
+    """Nothing follows a trade's own void (`corrects` NULL); a withdrawal ends nothing."""
     return [f"trade {r['trade_id']}: event {r['id']} ({r['kind']}) follows the void"
             for r in con.execute(
                 "SELECT e.id, e.kind, e.trade_id FROM events e JOIN events v ON v.trade_id ="
-                " e.trade_id AND v.kind = 'voided' AND e.id > v.id ORDER BY e.id")]
+                " e.trade_id AND v.kind = 'voided' AND v.corrects IS NULL AND e.id > v.id"
+                " ORDER BY e.id")]
 
 
-def _one_close(con: sqlite3.Connection) -> list[str]:
-    return [f"trade {r['trade_id']}: has {r['n']} closed events, expected at most 1"
-            for r in con.execute("SELECT trade_id, COUNT(*) AS n FROM events WHERE kind ="
-                                 " 'closed' GROUP BY trade_id HAVING n > 1")]
+def _one_report(con: sqlite3.Connection) -> list[str]:
+    """At most one standing (not withdrawn) fill, cancellation and close per trade. Not `held`:
+    several open reports may stand."""
+    return [f"trade {r['trade_id']}: has {r['n']} standing {r['kind']} events, expected at most 1"
+            for r in con.execute(
+                "SELECT trade_id, kind, COUNT(*) AS n FROM events e"
+                " WHERE kind IN ('filled', 'cancelled', 'closed') AND NOT EXISTS ("
+                "SELECT 1 FROM events v WHERE v.kind = 'voided' AND v.corrects = e.id"
+                " AND v.trade_id = e.trade_id)"
+                " GROUP BY trade_id, kind HAVING n > 1 ORDER BY trade_id, kind")]
 
 
 def _version_text_hash(con: sqlite3.Connection) -> list[str]:
@@ -146,9 +197,10 @@ INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "trade_entered_once": _trade_entered_once,
     "run_started_stopped": _run_started_stopped,
     "decision_dates": _decision_dates,
+    "reports": _reports,
     "correction_target": _correction_target,
     "nothing_after_void": _nothing_after_void,
-    "one_close": _one_close,
+    "one_report": _one_report,
     "version_text_hash": _version_text_hash,
 }
 

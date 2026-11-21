@@ -7,9 +7,8 @@ from desk import config
 def test_the_data_folder_layout_is_one_place(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADING_DESK_HOME", str(tmp_path))
     assert config.db_path() == (tmp_path / "desk.db").resolve()
-    assert config.bars_dir() == (tmp_path / "bars").resolve()
+    assert config.bars_path() == (tmp_path / "bars.db").resolve()
     assert config.reports_dir() == (tmp_path / "reports").resolve()
-    assert config.imports_dir() == (tmp_path / "imports").resolve()
     assert config.legacy_book() == (tmp_path / "hub.db").resolve()
 
 
