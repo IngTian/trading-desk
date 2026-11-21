@@ -15,8 +15,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from desk import config, model, store, strategy
+from desk import config, model, store, strategy, yahoo
 from desk.errors import Refused
+from desk.strategy import minutes  # start_run's `strategy` parameter shadows the module
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade", "move_order",
@@ -176,6 +177,11 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
         if v not in {r["version"] for r in rows}:
             raise Refused(f"Strategy {strategy!r} has no version {v}; it has versions 1 to "
                           f"{len(rows)}.")
+        finest = json.loads(next(r for r in rows if r["version"] == v)["timeframes"])[0]
+        if mode == "live" and minutes(finest) not in yahoo.INTERVALS:
+            raise Refused(f"Live runs read Yahoo, which has no {finest} bars; give the strategy a "
+                          "finest timeframe of 1m, 2m, 5m, 15m, 30m, 1h, 90m, 4h, 1d or 1w, or "
+                          "start a replay run.")
         id = f"{strategy}-r{len(store.runs(con, strategy)) + 1}"
         store.add_run(con, id, strategy, v, mode, list(dict.fromkeys(tags)))
         store.append(con, kind="run_started", run_id=id, at=_at(start), payload={},
