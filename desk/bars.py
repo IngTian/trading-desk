@@ -20,6 +20,8 @@ VERSION = 1   # bars.db's PRAGMA user_version
 
 
 def _text(t: datetime) -> str:
+    if t.tzinfo is None:   # astimezone would guess the host's zone into an insert-only row
+        raise ValueError(f"{t!r} has no timezone; bars.db stores UTC")
     return t.astimezone(UTC).isoformat()
 
 

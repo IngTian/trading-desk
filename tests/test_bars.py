@@ -72,6 +72,14 @@ def test_an_inconsistent_bar_raises_and_nothing_of_the_call_is_stored(con):
     assert bars.covered(con, "yahoo", "ACME", 60) == []
 
 
+def test_a_time_without_a_timezone_is_refused_and_nothing_of_the_call_is_stored(con):
+    naive = judge.Bar(datetime(2026, 3, 2, 15, 0), 100.0, 101.0, 99.0, 100.5, None)
+    with pytest.raises(ValueError, match="no timezone"):
+        bars.add(con, "yahoo", "ACME", 60, [b(1), naive], h(1), h(3), AT)
+    assert bars.read(con, "yahoo", "ACME", 60, h(0)) == []
+    assert bars.covered(con, "yahoo", "ACME", 60) == []
+
+
 def test_read_keeps_to_one_source_symbol_and_timeframe_within_its_range(con):
     bars.add(con, "yahoo", "ACME", 60, [b(1), b(2)], h(1), h(3), AT)
     bars.add(con, "other", "ACME", 60, [b(2, c=100.75), b(3)], h(2), h(4), AT)
