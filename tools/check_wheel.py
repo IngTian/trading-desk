@@ -13,10 +13,11 @@ import glob
 import sys
 import zipfile
 
-# THE SCHEMA IS THE TOOL: without it a fresh install cannot create desk.db. It once lived in
-# book/, which was not a package, so an installed copy resolved to a path that did not exist.
+# THE SCHEMAS ARE THE TOOL: without them a fresh install cannot create desk.db or bars.db.
+# schema.sql once lived in book/, which was not a package, so an installed copy resolved to a
+# path that did not exist.
 # THE EXAMPLE STRATEGY is what a new user copies first (config.example_strategy()).
-REQUIRED = ("desk/schema.sql", "desk/strategy.example.md")
+REQUIRED = ("desk/schema.sql", "desk/bars.sql", "desk/strategy.example.md")
 SCRIPTS = {"trading-desk": "desk.cli:main"}
 
 

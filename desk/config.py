@@ -11,7 +11,7 @@ lives under one data root:
         config.toml   optional; every key has a default
         desk.db       the store: the owner's decisions, an append-only log
         attachments/  screenshots attached to trades, named by content hash
-        (a later release adds price bars here)
+        bars.db       price bars for live runs, insert-only, and the spans each fetch covered
 
 The ROOT is $TRADING_DESK_HOME, else ~/Documents/trading-desk. Configuration belongs WITH
 the data, never in the repo: a file about where the data is, living in the tool, is how a
@@ -27,11 +27,11 @@ desk.db resolves most explicit first:
 (2) deliberately beats (3) so a one-off `TRADING_DESK_DB=/tmp/scratch.db trading-desk
 integrity` reads there rather than to the configured store.
 
-ISOLATING A RUN: set $TRADING_DESK_HOME (which moves config.toml and attachments/ too).
-$TRADING_DESK_DB moves desk.db alone, so screenshots still go to the real root. NOT
-$TRADING_DESK_BOOK: 0.5 does not use it (in 0.4 it named hub.db), so a scratch run that
-sets just it still writes to the real desk.db. The test suite
-clears both overrides and points the root at a temp dir before every test (conftest.py).
+ISOLATING A RUN: set $TRADING_DESK_HOME (which moves config.toml, attachments/ and bars.db
+too). $TRADING_DESK_DB moves desk.db alone, so screenshots and bars.db still go to the real
+root. NOT $TRADING_DESK_BOOK: 0.5 does not use it (in 0.4 it named hub.db), so a scratch run
+that sets just it still writes to the real desk.db. The test suite clears both overrides and
+points the root at a temp dir before every test (conftest.py).
 
 NOTE ON SYNCED FOLDERS. The default root is under ~/Documents, which iCloud syncs on many
 Macs. store.open() sets journal_mode=DELETE precisely so there is no -wal sidecar for a
@@ -142,9 +142,9 @@ def db_path(explicit: str | os.PathLike | None = None) -> Path:
     return (home() / "desk.db").resolve()
 
 
-def bars_dir() -> Path:
-    """Where fetched OHLC bars are cached."""
-    return (home() / "bars").resolve()
+def bars_path() -> Path:
+    """bars.db, the price bars. Always under the root: no environment override."""
+    return (home() / "bars.db").resolve()
 
 
 def reports_dir() -> Path:
@@ -155,11 +155,6 @@ def reports_dir() -> Path:
 def attachments_dir() -> Path:
     """Where screenshots attached to trades are stored, named by content hash."""
     return (home() / "attachments").resolve()
-
-
-def imports_dir() -> Path:
-    """Where imported trade CSVs are staged."""
-    return (home() / "imports").resolve()
 
 
 def vault_path() -> Path | None:
@@ -194,6 +189,11 @@ def schema_sql() -> Path:
     `desk/schema.sql` is a real file on disk either way -- no importlib.resources needed.
     """
     return Path(__file__).resolve().parent / "schema.sql"
+
+
+def bars_sql() -> Path:
+    """bars.db's schema. Package-relative, as schema_sql() is and for the same reason."""
+    return Path(__file__).resolve().parent / "bars.sql"
 
 
 def example_strategy() -> Path:

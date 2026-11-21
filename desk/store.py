@@ -1,6 +1,6 @@
 """The v3 store: strategies, versions, runs, trades and an append-only log of decisions.
 
-This module is the only one that writes SQL. Current state is derived by folding events.
+This module is the only one that writes desk.db. Current state is derived by folding events.
 No updates, no deletes. A correction is a new event naming the one it corrects.
 """
 from __future__ import annotations

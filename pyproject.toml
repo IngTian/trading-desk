@@ -67,7 +67,7 @@ include = ["desk*"]
 # a real built wheel, because an editable install reads the source tree and so cannot
 # catch a missing declaration.
 [tool.setuptools.package-data]
-"desk" = ["schema.sql", "strategy.example.md"]
+"desk" = ["schema.sql", "bars.sql", "strategy.example.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
