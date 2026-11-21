@@ -80,7 +80,7 @@ long = { at_most = 40 }
 ## Checklist
 
 - The pullback came on lighter volume than the move up.
-```
+````
 
 A template ships with the package (`desk/strategy.example.md`). The block is TOML. Every
 value is read when the strategy is saved: an unknown rule, an unreadable value, a value in the
@@ -102,7 +102,7 @@ and lists the rules whose answer has changed in `checks_differ`.
 | `sides`, `instruments` | The sides (`"long"`, `"short"`) and instruments (`"stock"`, `"etf"`, `"future"`) you will trade. |
 | `max_open_trades` | How many trades this run may hold at once. A pending limit order counts. |
 | `max_trades_per_day` | How many trades the run may enter in a day (the system timezone's midnight to midnight). |
-| `max_consecutive_losses` | How many losses in a row the run may take before the next trade. |
+| `max_consecutive_losses` | How many losses in a row the run may take within the day before the next trade. |
 | `daily_loss_limit` | The most R the run may lose in a day, e.g. `{ R = 2 }`. A day at exactly that loss is kept. One R is the amount a trade risks between its entry and its stop. |
 | `cooldown_after_loss` | How long to wait after a loss, `{ minutes = 60, same_ticker = true }`; `same_ticker` is optional. |
 | `trading_hours` | `{ start = "09:45", end = "15:30", days = ["mon", "tue"] }`, in the system timezone. It may not cross midnight; `days` is optional. |
