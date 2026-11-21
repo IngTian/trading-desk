@@ -2,8 +2,9 @@
 
 `decisions_of` reads a trade's `entered` event, its moves, its reports, its close and its void,
 with every correction read in place of the event it names. What the decisions led to -- fills,
-exits, R and cash -- will be derived from them and the bars by the judge (a later release),
-which takes `Decisions` as its input.
+exits, R and cash -- is derived on read, from `Decisions`: a replay trade's from its reports
+alone (`judge.replay`), a live trade's by the judge in `desk/judge.py`, from the decisions and
+the bars, with the reports laid over it (`judge.live`).
 
 ## Payload-key contract (what each trade event carries)
 
