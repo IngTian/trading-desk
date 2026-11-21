@@ -198,7 +198,7 @@ M15 = datetime(2026, 3, 2, 19, 45, tzinfo=UTC)
 
 def test_the_post_close_stub_bar_is_not_stored(con, fake_yahoo):
     stub = judge.Bar(M15 + timedelta(minutes=15), 10.5, 10.5, 10.5, 10.5, 0.0)
-    fake_yahoo({"15m": [judge.Bar(M15, 10, 11, 9, 10.5, 5.0), stub]}, market_time=M15)
+    fake_yahoo({"15m": [judge.Bar(M15, 10, 11, 9, 10.5, 5.0), stub]})   # market = call end
     yahoo.ensure(con, "ACME", 15, M15, M15 + timedelta(minutes=30))
     assert [b.open_time for b in bars.read(con, "yahoo", "ACME", 15, M15)] == [M15]
 
