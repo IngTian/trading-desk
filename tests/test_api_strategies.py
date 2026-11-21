@@ -47,26 +47,24 @@ def test_a_prose_edit_makes_version_two_and_keeps_version_one_readable(con):
     assert old.version == 1 and "Buy dips." in old.text and old.versions == 2
 
 
-def test_a_tracker_only_edit_keeps_the_version_and_changes_the_hash(con):
-    v1 = api.save_strategy(con, "dip-buyer", make(), now=NOW)
-    v2 = api.save_strategy(con, "dip-buyer", make(), tracker_script="print(1)",
-                           tracker_limit="40 bars after exit", if_current=v1.current_hash, now=NOW)
-    assert v2.version == 1 and v2.saved == "tracker updated"
-    assert v2.current_hash != v1.current_hash
-    assert (v2.tracker_script, v2.tracker_limit) == ("print(1)", "40 bars after exit")
-    same = api.save_strategy(con, "dip-buyer", make(), tracker_script="print(1)",
-                             tracker_limit="40 bars after exit", if_current=v2.current_hash,
-                             now=NOW)
-    assert same.saved == "unchanged"
+def test_the_current_hash_is_the_latest_versions_text_hash(con):
+    v = api.save_strategy(con, "dip-buyer", make(), now=NOW)
+    assert v.current_hash == store.versions(con, "dip-buyer")[-1]["text_hash"]
+    assert not hasattr(v, "tracker_script") and not hasattr(v, "tracker_limit")
 
 
-def test_a_second_save_from_the_same_hash_is_refused_after_a_tracker_only_save(con):
+def test_a_second_save_from_the_same_hash_is_refused_after_a_text_edit(con):
     v1 = api.save_strategy(con, "dip-buyer", make(), now=NOW)
-    api.save_strategy(con, "dip-buyer", make(), tracker_script="print(1)",
-                      tracker_limit="2h after exit", if_current=v1.current_hash, now=NOW)
+    api.save_strategy(con, "dip-buyer", make("Buy dips!"), if_current=v1.current_hash, now=NOW)
     with pytest.raises(api.Refused, match="changed since you read it"):
-        api.save_strategy(con, "dip-buyer", make("Buy dips!"), if_current=v1.current_hash, now=NOW)
-    assert len(store.versions(con, "dip-buyer")) == 1
+        api.save_strategy(con, "dip-buyer", make("Buy deep dips."), if_current=v1.current_hash,
+                          now=NOW)
+    assert len(store.versions(con, "dip-buyer")) == 2
+
+
+def test_save_strategy_takes_no_tracker_arguments(con):
+    with pytest.raises(TypeError):
+        api.save_strategy(con, "dip-buyer", make(), tracker_script="print(1)", now=NOW)
 
 
 def test_an_existing_id_without_if_current_is_refused(con):
@@ -115,23 +113,9 @@ def test_an_unknown_id_is_refused_naming_it(con):
         api.get_strategy(con, "dip-buyer", 9)
 
 
-@pytest.mark.parametrize("limit", ["soon", "0 bars after exit", "1.5 bars after exit",
-                                   "40 bars", "2 parsecs after exit"])
-def test_a_bad_tracker_limit_is_refused_and_nothing_is_written(con, limit):
-    with pytest.raises(api.Refused, match="tracker_limit"):
-        api.save_strategy(con, "dip-buyer", make(), tracker_script="x", tracker_limit=limit,
-                          now=NOW)
-    assert api.list_strategies(con) == []
-
-
-def test_a_limit_without_a_script_is_refused(con):
-    with pytest.raises(api.Refused, match="script"):
-        api.save_strategy(con, "dip-buyer", make(), tracker_limit="40 bars after exit", now=NOW)
-
-
 def test_a_failed_save_of_a_new_strategy_leaves_nothing_behind(con):
     with pytest.raises(api.Refused):
-        api.save_strategy(con, "dip-buyer", "not a strategy", tracker_script="x", now=NOW)
+        api.save_strategy(con, "dip-buyer", "not a strategy", now=NOW)
     assert con.execute("SELECT count(*) FROM strategies").fetchone()[0] == 0
 
 
@@ -162,9 +146,7 @@ def test_a_naive_now_is_refused_on_save(con):
 
 
 @pytest.mark.parametrize(("kw", "name"), [
-    (dict(markdown=5), "markdown"), (dict(markdown=None), "markdown"),
-    (dict(tracker_script=5), "tracker_script"),
-    (dict(tracker_script="x", tracker_limit=40), "tracker_limit"), (dict(id=5), "id")])
+    (dict(markdown=5), "markdown"), (dict(markdown=None), "markdown"), (dict(id=5), "id")])
 def test_text_arguments_that_are_not_text_are_refused(con, kw, name):
     """Review item 5: a non-string reached .strip() or a regex and raised a TypeError or an
     AttributeError instead of a refusal."""

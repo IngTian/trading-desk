@@ -1,4 +1,4 @@
-"""The v2 store: strategies, versions, runs, trades and an append-only log of decisions.
+"""The v3 store: strategies, versions, runs, trades and an append-only log of decisions.
 
 This module is the only one that writes SQL. Current state is derived by folding events.
 No updates, no deletes. A correction is a new event naming the one it corrects.
@@ -17,13 +17,13 @@ from desk import config
 KINDS = ("run_started", "run_stopped", "entered", "order_moved", "closed", "corrected", "voided")
 
 
-# PRAGMA user_version of a v2 desk.db. Stamped at create and required at open, so a file that
+# PRAGMA user_version of a v3 desk.db. Stamped at create and required at open, so a file that
 # is not one -- the frozen legacy book above all -- is recognised before anything touches it.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class NotADeskDatabase(ValueError):
-    """The file exists but is not a v2 desk.db, so the store refuses to open it."""
+    """The file exists but is not a database this version reads, so it is refused untouched."""
 
 
 def create(path: Path | None = None) -> None:
@@ -42,8 +42,11 @@ def create(path: Path | None = None) -> None:
         con.close()
 
 
-def _probe(db: Path) -> None:
-    """Refuse a file that is not a v2 desk.db, without writing to it.
+def _probe(db: Path, *, version: int = SCHEMA_VERSION, table: str = "events",
+           columns: frozenset[str] = frozenset({"recorded_at", "kind", "payload"}),
+           name: str = "desk.db") -> None:
+    """Refuse a file that is not a `name` at schema `version` with `table` holding `columns`,
+    without writing to it.
 
     Opened `immutable=1` as well as read-only: a plain read-only open of a WAL-mode file needs
     its -shm, and SQLite may create one. Immutable takes no locks and writes nothing, which is
@@ -53,23 +56,25 @@ def _probe(db: Path) -> None:
     try:
         con = sqlite3.connect(f"{db.as_uri()}?mode=ro&immutable=1", uri=True)
         try:
-            version = con.execute("PRAGMA user_version").fetchone()[0]
-            columns = {row[1] for row in con.execute("PRAGMA table_info(events)")}
+            found = con.execute("PRAGMA user_version").fetchone()[0]
+            present = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
         finally:
             con.close()
     except sqlite3.DatabaseError as e:
-        raise NotADeskDatabase(f"{db} is not a desk.db: SQLite cannot read it ({e})") from None
-    if version != SCHEMA_VERSION or not {"recorded_at", "kind", "payload"} <= columns:
+        raise NotADeskDatabase(f"{db} is not a {name}: SQLite cannot read it ({e})") from None
+    if found != version or not columns <= present:
+        book = (" This version does not read the 0.4 book (hub.db): point TRADING_DESK_DB or "
+                "config.toml's `db` at a desk.db instead." if name == "desk.db" else "")
         raise NotADeskDatabase(
-            f"{db} is not a v2 desk.db (schema version {version}, expected {SCHEMA_VERSION}); "
-            f"it was left untouched. This version does not read the 0.4 book (hub.db): point "
-            f"TRADING_DESK_DB or config.toml's `db` at a desk.db instead.")
+            f"{db} is not a {name} this version reads (schema version {found}, expected "
+            f"{version}); it was left untouched. There is no migration between schema versions: "
+            f"move the file aside and create a new {name}.{book}")
 
 
 def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connection:
     """Open the store. Sets row_factory, PRAGMA foreign_keys = ON, and journal_mode = DELETE.
 
-    The file is probed first (see _probe), so a file that is not a v2 desk.db is refused
+    The file is probed first (see _probe), so a file that is not a v3 desk.db is refused
     unchanged, read-only or not.
 
     DELETE, not WAL: the default folder is under ~/Documents, which iCloud syncs, and a
@@ -141,13 +146,6 @@ def add_version(con, strategy_id: str, version: int, text: str, text_hash: str,
              json.dumps(rules, allow_nan=False), json.dumps(timeframes), at))
 
 
-def add_tracker(con, strategy_id: str, script: str | None, script_hash: str | None,
-                tracker_limit: str | None, at: str) -> None:
-    _insert(con, "INSERT INTO trackers (strategy_id, script, script_hash, tracker_limit,"
-            " saved_at) VALUES (?, ?, ?, ?, ?)",
-            (strategy_id, script, script_hash, tracker_limit, at))
-
-
 def add_run(con, id: str, strategy_id: str, version: int, mode: str, tags: list) -> None:
     _insert(con, "INSERT INTO runs (id, strategy_id, version, mode, tags) VALUES (?, ?, ?, ?, ?)",
             (id, strategy_id, version, mode, json.dumps(tags)))
@@ -173,11 +171,6 @@ def append(con, *, kind: str, run_id: str, at: str, payload: dict,
 def versions(con, strategy_id: str) -> list[sqlite3.Row]:
     return con.execute("SELECT * FROM versions WHERE strategy_id = ? ORDER BY version",
                        (strategy_id,)).fetchall()
-
-
-def latest_tracker(con, strategy_id: str) -> sqlite3.Row | None:
-    return con.execute("SELECT * FROM trackers WHERE strategy_id = ? ORDER BY id DESC LIMIT 1",
-                       (strategy_id,)).fetchone()
 
 
 def run(con, id: str) -> sqlite3.Row | None:

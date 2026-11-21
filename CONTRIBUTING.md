@@ -21,7 +21,7 @@ change. Please open an issue and make the case before writing it.
 - **Nothing is silently dropped or guessed.** An unknown rule, a value in the wrong unit or a
   time without a timezone is refused rather than read as something else. A figure that
   cannot be computed is withheld, never shown as zero.
-- **The log is append-only.** Triggers keep events, versions and tracker rows insert-only.
+- **The log is append-only.** Triggers keep events and versions insert-only.
   A correction is a new event read in place of the old one; nothing is updated or deleted.
 - **Reads that decide a write go inside `store.transaction(con)`**, which takes the write lock
   first, so two sessions cannot both pass a check and then both write.

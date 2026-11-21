@@ -11,7 +11,7 @@ lives under one data root:
         config.toml   optional; every key has a default
         desk.db       the store: the owner's decisions, an append-only log
         attachments/  screenshots attached to trades, named by content hash
-        (later releases add price bars, chart imports and tracker data here)
+        (a later release adds price bars here)
 
 The ROOT is $TRADING_DESK_HOME, else ~/Documents/trading-desk. Configuration belongs WITH
 the data, never in the repo: a file about where the data is, living in the tool, is how a

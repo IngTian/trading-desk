@@ -1,4 +1,4 @@
-"""Tests for the v2 integrity checker. Violations are written as raw SQL with foreign keys OFF,
+"""Tests for the v3 integrity checker. Violations are written as raw SQL with foreign keys OFF,
 the way a damaged or hand-edited file would hold them; the healthy log goes through the API.
 Every figure is invented."""
 import json

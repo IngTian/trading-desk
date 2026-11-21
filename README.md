@@ -118,7 +118,7 @@ api.get_trade(con, t.id).decisions
 
 | Call | Does |
 |---|---|
-| `save_strategy`, `get_strategy`, `list_strategies` | Save a strategy (a new version whenever its text changes), read one, list them. Saving over an existing strategy needs `if_current`, the `current_hash` from your last read, so two sessions can never overwrite each other's edits. A strategy can also carry a `tracker_script` and `tracker_limit`; they are stored now and run in a later release. |
+| `save_strategy`, `get_strategy`, `list_strategies` | Save a strategy (a new version whenever its text changes), read one, list them. Saving over an existing strategy needs `if_current`, the `current_hash` from your last read, so two sessions can never overwrite each other's edits. |
 | `start_run`, `stop_run`, `list_runs` | Deploy a version, stop it, list runs. |
 | `trade` | Enter a trade, with your reasons and screenshots. A screenshot is a local file, copied into the store under its content hash, or an `https` link. |
 | `move_order`, `close_trade` | Move the stop or target, or close by hand. Each needs a reason. |
@@ -161,7 +161,6 @@ and a damaged page it never reads can pass. To check the file itself, run
 | next | Bars and the judge: price bars from Yahoo for live runs and from TradingView chart exports for replay runs, and a pure function that works out every fill and exit from them. A stop hit fills at the stop, or at the open if the bar gapped through it. A target hit fills at the target. |
 | then | Rule checks when you enter a trade (the results you were shown are kept with it), and statistics per run, version and strategy: win rate, average R, total R, P&L. Each can be narrowed by mode, by tags, or to the trades that kept their rules, worked out again on read. |
 | then | The MCP server and a Claude Code plugin, so an agent records your trades and decisions for you. |
-| then | Custom trackers: a script per strategy that records whatever you choose about each trade, stored separately. |
 | 1.0 | The release, once all of the above has landed. |
 
 ## Development
