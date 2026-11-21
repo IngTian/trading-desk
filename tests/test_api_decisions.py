@@ -159,8 +159,17 @@ def void(con, id, **kw):
     return api.void_trade(con, id, **{"reason": "x", "now": LATER, **kw})
 
 
-DECISIONS = [move, close, correct, void]
-DATED = [move, close]
+def fill(con, id, **kw):
+    return api.report(con, id, **{"state": "filled", "reason": "x", "at": T2, "now": LATER, **kw})
+
+
+def cancel(con, id, **kw):
+    return api.report(con, id, **{"state": "cancelled", "why": "pulled", "reason": "x", "at": T2,
+                                  "now": LATER, **kw})
+
+
+DECISIONS = [move, close, correct, void, fill, cancel]
+DATED = [move, close, fill, cancel]
 
 
 @pytest.mark.parametrize("decide", DECISIONS)
@@ -187,6 +196,14 @@ def test_an_unknown_trade_is_refused(con, decide):
         decide(con, "nope-20260302")
 
 
+@pytest.mark.parametrize("decide", DECISIONS)
+def test_a_trade_id_that_is_not_text_is_refused(con, decide):
+    n = len(store.events(con))
+    with pytest.raises(api.Refused, match="trade must be text"):
+        decide(con, 5)
+    assert len(store.events(con)) == n
+
+
 @pytest.mark.parametrize("decide", DATED)
 def test_a_replay_decision_without_at_is_refused(con, decide):
     t = enter(con)
@@ -201,7 +218,8 @@ def test_a_decision_before_the_entry_is_refused(con, decide):
     with pytest.raises(api.Refused, match=re.escape(f"entered at {T1.isoformat()}")):
         decide(con, t.id, at=T1 - timedelta(minutes=1))
     decide(con, t.id, at=T1 + timedelta(minutes=1))
-    assert kinds(con, t.id) == ["entered", "order_moved" if decide is move else "closed"]
+    assert kinds(con, t.id) == ["entered", {move: "order_moved", close: "closed", fill: "filled",
+                                            cancel: "cancelled"}[decide]]
 
 
 def test_a_move_at_the_entrys_own_moment_is_accepted(con):

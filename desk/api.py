@@ -20,7 +20,7 @@ from desk.errors import Refused
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "trade", "move_order",
-           "close_trade", "correct_trade", "void_trade", "get_trade", "list_trades"]
+           "close_trade", "report", "correct_trade", "void_trade", "get_trade", "list_trades"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
 
@@ -186,7 +186,9 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, tags=(),
 def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
              now: datetime | None = None) -> RunView:
     """Stop the run at `at`: not before its start, and after every non-void trade's entry
-    (whichever was logged first), since trade() refuses an entry at or after the stop."""
+    (whichever was logged first), since trade() refuses an entry at or after the stop, and at or
+    after every reported fill and cancellation, since a run stop cancels the orders still
+    pending."""
     row = store.run(con, run)
     if row is None:
         raise Refused(f"There is no run {run!r}; list_runs to see the ones that exist.")
@@ -198,14 +200,17 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
         if stop < view.started:
             raise Refused(f"Run {run!r} started at {view.started.isoformat()}; its stop cannot "
                           "be before that, so give a later `at`.")
-        entries = [(d.entry.at, t["id"]) for t in store.trades(con, run)
-                   if not (d := model.decisions_of(con, t["id"])).voided]
+        standing = [(t, d) for t in store.trades(con, run)
+                    if not (d := model.decisions_of(con, t["id"])).voided]
+        entries = [(d.entry.at, t["id"]) for t, d in standing]
         if entries and (last := max(entries))[0] >= stop:
             raise Refused(f"Trade {last[1]!r} on run {run!r} was entered at "
                           f"{last[0].isoformat()}; the run cannot stop at or before a trade on "
                           "it, so give a later `at` (or void that trade, if it does not belong).")
         store.append(con, kind="run_stopped", run_id=run, at=_at(stop), payload={},
                      recorded_at=_at(now))
+        for t, _ in standing:
+            _consistent(con, t)
     return _run_view(con, row)
 
 
@@ -371,7 +376,9 @@ def _trade_row(con, trade: str) -> sqlite3.Row:
 
 
 def _decision(con, trade: str, reason) -> sqlite3.Row:
-    """The trade's identity row, once the decision's reason is given and the trade exists."""
+    """The trade's identity row, once the id is text, the decision's reason is given and the
+    trade exists."""
+    _text("trade", trade)
     if not _text("reason", reason).strip():
         raise Refused("reason is empty; say why, in your own words.")
     return _trade_row(con, trade)
@@ -392,12 +399,57 @@ def _after_entry(trade: str, d: model.Decisions, when: datetime) -> None:
                       "cannot be before that, so give a later `at`.")
 
 
+def _the_close(d: model.Decisions) -> str:
+    """The standing close as a refusal names it: how, when, and the price when the record holds
+    one (a stop or target exit given no price: the level in force at the close)."""
+    at, price = d.close_at.isoformat(), d.close_price
+    if d.close_kind == "hand":
+        how = f"closed by hand at {at}"
+    else:
+        how = f"closed at its {d.close_kind} at {at}"
+        if price is None:
+            price = model.in_force(d, d.close_at)[0 if d.close_kind == "stop" else 1]
+    return how if price is None else f"{how}, at {price}"
+
+
 def _before_close(trade: str, d: model.Decisions, when: datetime) -> None:
-    """A move is strictly before the hand close: one at the close's `at` would
-    take effect only from the bar after the exit."""
+    """A move is strictly before the close: one at the close's `at` would take effect only
+    from the bar after the exit."""
     if d.close_at is not None and when >= d.close_at:
-        raise Refused(f"Trade {trade!r} was closed by hand at {d.close_at.isoformat()}; a move "
-                      "at or after that has no order to move, so give an earlier `at`.")
+        raise Refused(f"Trade {trade!r} was {_the_close(d)}; a move at or after that has no "
+                      "order to move, so give an earlier `at`.")
+
+
+def _not_closed(trade: str, d: model.Decisions) -> None:
+    if d.close_at is not None:
+        raise Refused(f"Trade {trade!r} was already closed at {d.close_at.isoformat()}: "
+                      f"{d.close_reason!r}. A trade is closed once: to give that close the "
+                      "broker's price, correct it (correct_trade with fields={'report': 'close', "
+                      "'price': …}); if it was a mistake, correct it (fields={'report': 'close', "
+                      "…}) or withdraw it (void_trade with report='close').")
+
+
+def _close_order(trade: str, d: model.Decisions, when: datetime) -> None:
+    """A close, by close_trade or an exit report, is strictly after the entry and every move."""
+    _after_entry(trade, d, when)
+    if when == d.entry.at:  # a close is strictly after the entry
+        raise Refused(f"Trade {trade!r} was entered at {d.entry.at.isoformat()}; a close at "
+                      "that same moment leaves it no time open, so give a later `at`.")
+    if d.moves and when <= d.moves[-1].at:  # moves are in `at` order: the last is latest
+        raise Refused(f"Trade {trade!r} has a move at {d.moves[-1].at.isoformat()}; a close "
+                      "at or before it would leave that move after the close, so give a "
+                      "later `at`.")
+
+
+def _consistent(con, row: sqlite3.Row) -> None:
+    """Refuse when the trade's reports, as the record now stands, do not fit it. Called after
+    the append, inside the transaction, so a refusal rolls the append back."""
+    run = store.run(con, row["run_id"])
+    problem = model.report_problem(row["id"], model.decisions_of(con, row["id"]),
+                                   side=row["side"], mode=run["mode"],
+                                   stopped=_run_view(con, run).stopped)
+    if problem:
+        raise Refused(problem)
 
 
 def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float | None = None,
@@ -418,67 +470,158 @@ def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float 
         moved ={k: float(v) for k, v in (("stop", stop), ("target", target)) if v is not None}
         store.append(con, kind="order_moved", run_id=row["run_id"], trade_id=trade, at=_at(when),
                      recorded_at=_at(now), payload={**moved, "reason": reason})
+        _consistent(con, row)
     return _trade_view(con, row)
 
 
 def close_trade(con: sqlite3.Connection, trade: str, *, reason: str, at: datetime | None = None,
                 now: datetime | None = None) -> TradeView:
-    """Close the trade by hand at `at`. A trade is closed once."""
+    """Close the trade by hand at `at`: the author's decision to get out. A trade is closed once.
+    On a limit still pending it cancels the order. A live position is priced from the bars; a
+    replay one has none, so its exit is reported with its price instead
+    (report(state="exited", price=…))."""
     now = _aware(now)
     row = _decision(con, trade, reason)
     when = _decision_time(store.run(con, row["run_id"])["mode"], at, now, "close a trade")
     with store.transaction(con):
         d = _not_void(con, trade)[0]
-        if d.close_at is not None:
-            raise Refused(f"Trade {trade!r} was already closed at {d.close_at.isoformat()}: "
-                          f"{d.close_reason!r}. A trade is closed once; if that close was a "
-                          "mistake, void the trade and enter it again.")
-        _after_entry(trade, d, when)
-        if when == d.entry.at:  # a close is strictly after the entry
-            raise Refused(f"Trade {trade!r} was entered at {d.entry.at.isoformat()}; a close at "
-                          "that same moment leaves it no time open, so give a later `at`.")
-        if d.moves and when <= d.moves[-1].at:  # moves are in `at` order: the last is latest
-            raise Refused(f"Trade {trade!r} has a move at {d.moves[-1].at.isoformat()}; a close "
-                          "at or before it would leave that move after the close, so give a "
-                          "later `at`.")
+        _not_closed(trade, d)
+        _close_order(trade, d, when)
         store.append(con, kind="closed", run_id=row["run_id"], trade_id=trade, at=_at(when),
                      recorded_at=_at(now), payload={"reason": reason})
+        _consistent(con, row)
+    return _trade_view(con, row)
+
+
+_TAKES = {"filled": ("price",), "cancelled": ("why",), "open": (), "exited": ("price", "kind")}
+
+
+def _kind(kind) -> str:
+    if kind not in ("hand", "stop", "target"):
+        raise Refused(f"kind {kind!r} is not known; use 'hand' (closed by hand), 'stop' (the stop "
+                      "filled) or 'target' (the target filled), or leave it out for 'hand'.")
+    return kind
+
+
+def _why(why) -> str:
+    if why not in ("not filled", "pulled"):
+        raise Refused(f"why {why!r} is not known; use 'not filled' (the market never reached the "
+                      "limit, or the order expired unfilled) or 'pulled' (the author withdrew "
+                      "it).")
+    return why
+
+
+def _not_after_now(when: datetime, now: datetime) -> None:
+    """A report states a state the trade was already in, live or replay."""
+    if when > now:
+        raise Refused(f"`at` {when.isoformat()} is after now ({now.isoformat()}); a report states "
+                      "a state the trade was already in, so give the moment it was in it, in "
+                      "UTC.")
+
+
+def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, reason: str,
+           price: float | None = None, kind: str | None = None, why: str | None = None,
+           now: datetime | None = None) -> TradeView:
+    """Report the trade's state as of `at`, which is required in both modes:
+    "filled" (the limit order filled; price None: at the limit), "cancelled" (it never will;
+    why "not filled" or "pulled"), "open" (the position is still held) or "exited" (kind "stop",
+    "target" or "hand", None meaning "hand"; a hand exit gives its price, and a stop or target
+    exit given none is at the level in force). Checked against the record alone."""
+    row = _decision(con, trade, reason)
+    now = _aware(now)
+    if state not in tuple(_TAKES):  # a tuple: a JSON list or dict compares, never hashes
+        raise Refused(f"state {state!r} is not known; use 'filled' (the limit order filled), "
+                      "'cancelled' (it never will), 'open' (the position is still held) or "
+                      "'exited' (it closed at its stop, at its target or by hand).")
+    if at is None:
+        raise Refused("A report states the trade's state as of `at`, so it needs `at`, in live as "
+                      "in replay: give the moment the order or the position was in that state, "
+                      "not the moment you report it.")
+    when = _aware(at, "at")
+    _not_after_now(when, now)
+    for name, value in (("price", price), ("kind", kind), ("why", why)):
+        if value is not None and name not in _TAKES[state]:
+            raise Refused(f"{name} does not go with state={state!r}: price goes with 'filled' and "
+                          "'exited', kind with 'exited', why with 'cancelled'.")
+    if state == "cancelled":
+        _why(why)
+    if state == "exited" and _kind("hand" if kind is None else kind) == "hand" and price is None:
+        raise Refused("A hand exit is reported with the price it filled at; give price=…. To "
+                      "have the bars price a live close instead, call close_trade.")
+    _price("price", price, required=False)
+    given = {"why": why, "kind": kind, "price": None if price is None else float(price)}
+    payload = {"reason": reason, **{k: v for k, v in given.items() if v is not None}}
+    with store.transaction(con):
+        d = _not_void(con, trade)[0]
+        for asked, noun, standing, word in (("filled", "fill", d.fill, "fill"),
+                                            ("cancelled", "cancellation", d.cancel, "cancel")):
+            if state == asked and standing is not None:
+                raise Refused(f"Trade {trade!r}'s {noun} was already reported at "
+                              f"{standing.at.isoformat()}; correct it (correct_trade with "
+                              f"fields={{'report': '{word}', …}}) or withdraw it (void_trade "
+                              f"with report='{word}').")
+        if state == "exited":
+            _not_closed(trade, d)
+            _close_order(trade, d, when)
+        store.append(con, kind={"open": "held", "exited": "closed"}.get(state, state),
+                     run_id=row["run_id"], trade_id=trade, at=_at(when), recorded_at=_at(now),
+                     payload=payload)
+        _consistent(con, row)
     return _trade_view(con, row)
 
 
 _ENTRY_FIELDS = ("entry", "stop", "target", "size", "at", "point_value", "currency")
 _MOVE_FIELDS = ("stop", "target", "at")
+# A report as correct_trade and void_trade name it (the record's words, since a `closed` event
+# holds an exit report and close_trade's decision alike), and the fields a correction changes.
+_REPORT_FIELDS = {"fill": ("price", "at"), "cancel": ("at", "why"), "open": ("at",),
+                  "close": ("price", "at", "kind")}
+_NOUNS = {"fill": "fill", "cancel": "cancellation", "open": "open report", "close": "close"}
 
 
 def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: str,
                   now: datetime | None = None) -> TradeView:
-    """Correct the entry, or with `move: <index>` (its place in get_trade's moves) one move.
-    Appended as a `corrected` event naming that `entered` or `order_moved` event, read in its
-    place; only the fields named change. A field given as None is not given, so a
-    stop or target is never removed by a correction. A wrong run, ticker or side is not
-    corrected either: void the trade and enter it again."""
+    """Correct the entry, with `move: <index>` (its place in get_trade's moves) one move, or
+    with `report: "fill" | "cancel" | "open" | "close"` one standing report ("open": the latest).
+    Appended as a `corrected` event naming that event, read in its place; only the fields named
+    change. A field given as None is not given, so a stop or target is never removed by a
+    correction. A wrong run, ticker or side is not corrected either: void the trade and enter
+    it again."""
     now = _aware(now)
     row = _decision(con, trade, reason)
     if not isinstance(fields, dict):
         raise Refused("fields must be a mapping of the fields to correct to their corrected "
                       f"values, e.g. {{'stop': 97.5}}; got {fields!r}.")
     asked, fields = fields, {k: v for k, v in fields.items() if v is not None}
-    index = fields.pop("move", None)
-    names = _ENTRY_FIELDS if index is None else _MOVE_FIELDS
+    index, which = fields.pop("move", None), fields.pop("report", None)
+    if index is not None and which is not None:
+        raise Refused("fields names both a move and a report; correct one at a time.")
+    if which is not None and which not in tuple(_REPORT_FIELDS):
+        raise Refused(f"report {which!r} is not known; use 'fill', 'cancel', 'open' or 'close'.")
+    if which is not None:
+        names, noun = _REPORT_FIELDS[which], _NOUNS[which]
+        on, redo = (f"{'an' if which == 'open' else 'a'} {noun}",
+                    f"withdraw it (void_trade with report={which!r}) and report it again")
+    else:
+        names = _ENTRY_FIELDS if index is None else _MOVE_FIELDS
+        on, redo = "an entry" if index is None else "a move", "void the trade and enter it again"
     if not fields:
         removal = (" A stop or target is not removed by a correction: void the trade and enter "
                    "it again without it." if {"stop", "target"} & asked.keys() else "")
         raise Refused("fields names nothing to correct (a field given as None is read as not "
                       f"given); give one or more of {', '.join(names)}.{removal}")
     if unknown := [k for k in fields if k not in names]:
-        raise Refused(f"{', '.join(unknown)} cannot be corrected on "
-                      f"{'an entry' if index is None else 'a move'}; correct only "
-                      f"{', '.join(names)}, or void the trade and enter it again.")
+        raise Refused(f"{', '.join(unknown)} cannot be corrected on {on}; correct only "
+                      f"{', '.join(names)}, or {redo}.")
     for name in ("entry", "point_value"):
         if name in fields:
             _price(name, fields[name])
-    _price("stop", fields.get("stop"), required=False)
-    _price("target", fields.get("target"), required=False)
+    for name in ("stop", "target", "price"):
+        _price(name, fields.get(name), required=False)
+    if "kind" in fields:
+        _kind(fields["kind"])
+    if "why" in fields:
+        _why(fields["why"])
     if "size" in fields:
         _size(fields["size"])
     if "currency" in fields:
@@ -487,9 +630,18 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
         raise Refused(f"Trade {trade!r} is a {row['instrument']}, whose point value is 1; only a "
                       "future's point value can be corrected.")
     when = _aware(fields["at"], "at") if "at" in fields else None
+    if which is not None and when is not None:
+        _not_after_now(when, now)
     with store.transaction(con):  # the decisions the correction is checked against, under the lock
-        d, entered, move_ids, _reports = _not_void(con, trade)
-        if index is None:
+        d, entered, move_ids, reports = _not_void(con, trade)
+        if which is not None:
+            if which not in reports:
+                raise Refused(f"Trade {trade!r} has no {noun} to correct; get_trade shows its "
+                              "reports.")
+            if which == "close" and when is not None:
+                _close_order(trade, d, when)
+            corrects = reports[which]
+        elif index is None:
             if fields.get("entry", d.entry.price) == fields.get("stop", d.entry.stop):
                 raise Refused("The corrected stop equals the entry, so the risk (the distance to "
                               "the stop, 1R) is zero; put the stop away from the entry.")
@@ -497,9 +649,8 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                 _within_run(_run_view(con, store.run(con, row["run_id"])), when)
                 later = [m.at for m in d.moves]
                 if d.close_at is not None and when >= d.close_at:  # an entry is before the close
-                    raise Refused(f"Trade {trade!r} was closed by hand at "
-                                  f"{d.close_at.isoformat()}; its entry must be before that, so "
-                                  "give an earlier `at`.")
+                    raise Refused(f"Trade {trade!r} was {_the_close(d)}; its entry must be "
+                                  "before that, so give an earlier `at`.")
                 if later and when > min(later):
                     raise Refused(f"Trade {trade!r} has a decision at {min(later).isoformat()}; "
                                   "its entry cannot be after that, so give an `at` at or "
@@ -515,24 +666,38 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                 _before_close(trade, d, when)
             corrects = move_ids[index]
         stored = {**fields, **{k: float(fields[k]) for k in ("entry", "stop", "target",
-                                                             "point_value") if fields.get(k)}}
+                                                             "point_value", "price")
+                               if fields.get(k)}}
         if when is not None:
             stored["at"] = _at(when)
         store.append(con, kind="corrected", run_id=row["run_id"], trade_id=trade, at=_at(now),
                      recorded_at=_at(now), corrects=corrects,
                      payload={"fields": stored, "reason": reason})
+        _consistent(con, row)
     return _trade_view(con, row)
 
 
-def void_trade(con: sqlite3.Connection, trade: str, *, reason: str,
+def void_trade(con: sqlite3.Connection, trade: str, *, reason: str, report: str | None = None,
                now: datetime | None = None) -> TradeView:
-    """Void a trade: it stays in the log; later releases' statistics and checks leave it out."""
+    """Void a trade: it stays in the log; later releases' statistics and checks leave it out.
+    With `report` ("fill", "cancel", "open" or "close"), withdraw that standing report instead
+    ("open": the latest, leaving the one before it standing): it is read as absent, and the
+    trade stands."""
     now = _aware(now)
     row = _decision(con, trade, reason)
+    if report is not None and report not in tuple(_REPORT_FIELDS):
+        raise Refused(f"report {report!r} is not known; use 'fill', 'cancel', 'open' or 'close', "
+                      "or leave it out to void the whole trade.")
     with store.transaction(con):
-        _not_void(con, trade)
+        reports = _not_void(con, trade)[3]
+        if report is not None and report not in reports:
+            raise Refused(f"Trade {trade!r} has no {_NOUNS[report]} to withdraw; get_trade shows "
+                          "its reports.")
         store.append(con, kind="voided", run_id=row["run_id"], trade_id=trade, at=_at(now),
-                     recorded_at=_at(now), payload={"reason": reason})
+                     recorded_at=_at(now), corrects=None if report is None else reports[report],
+                     payload={"reason": reason})
+        if report is not None:
+            _consistent(con, row)
     return _trade_view(con, row)
 
 

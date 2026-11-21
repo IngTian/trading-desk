@@ -79,7 +79,7 @@ def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime],
 
 def _decision_dates(con: sqlite3.Connection) -> list[str]:
     """By effective time: an entry is not before its run's start, nor (unless the trade is void)
-    at or after its run's stop; a move is not before the entry and is strictly before the hand
+    at or after its run's stop; a move is not before the entry and is strictly before the
     close; a close is strictly after the entry.
 
     A trade is skipped when it is `_unfoldable`. A fold that fails for any other reason, such as
@@ -102,8 +102,7 @@ def _decision_dates(con: sqlite3.Connection) -> list[str]:
                 if m.at < d.entry.at:
                     failures.append(f"{who}: move at {m.at.isoformat()} is before the entry")
                 if d.close_at is not None and m.at >= d.close_at:
-                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the hand "
-                                    "close")
+                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the close")
             if d.close_at is not None and d.close_at <= d.entry.at:
                 failures.append(f"{who}: closed at {d.close_at.isoformat()}, not after the entry")
         except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
