@@ -36,7 +36,7 @@ _DEFAULTS = {"stop_atr": {"length": 14}, "rsi": {"length": 14},
              "ema": {}, "sma": {}}
 _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 _FACT = re.compile(r"[a-z][a-z0-9_]{0,63}")
-_FACT_PREFIXES = ("rsi_", "atr_", "macd_", "ema_", "sma_", "close_")
+_FACT_PREFIXES = ("rsi_", "atr_", "macd_", "ema_", "sma_", "close_", "stop_atr_")
 _AT = re.compile(r"\s*\(at (?:line (\d+), column \d+|end of document)\)$")
 _OLD_LINE = re.compile(r"^\s*[A-Za-z_]+\s*:\s*\S")
 _HINT = ('; from 0.7 the rules block is TOML: write timeframes = ["1h", "15m"], not '
@@ -259,8 +259,8 @@ def _facts(path: str, v) -> None:
         if name in ORDER or name == "timeframes":
             raise _no(where, "that is a rule's name; a fact may not be named like a rule")
         if name.startswith(_FACT_PREFIXES):
-            raise _no(where, "a fact may not start with rsi_, atr_, macd_, ema_, sma_ or close_: "
-                             "those are built-in figures")
+            raise _no(where, "a fact may not start with rsi_, atr_, macd_, ema_, sma_, close_ or "
+                             "stop_atr_: those are built-in figures")
         if not isinstance(cmp, dict):
             raise _no(where, f"{cmp!r} is not a comparison", f"{name} = {{ at_least = 2 }}")
         _only(where, cmp, (*_COMPARES, *_SIDES))

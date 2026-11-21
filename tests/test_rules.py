@@ -126,6 +126,8 @@ TF = ("15m", "1h")
     ({"facts": {"rvol": {"at_least": "2"}}}, "checklist"),
     ({"facts": {"Rvol": {"at_least": 2}}}, "lowercase"),
     ({"facts": {"rsi_14_15m": {"at_least": 2}}}, "built-in"),
+    ({"stop_atr": {"at_least": 1.5}, "facts": {"stop_atr_14_15m": {"at_least": 2}}},
+     "facts.stop_atr_14_15m: a fact may not start with .*stop_atr_"),
     ({"facts": {"sides": {"at_least": 2}}}, "a rule's name"),
 ])
 def test_validate_refuses_naming_the_key_and_the_fix(values, match):
