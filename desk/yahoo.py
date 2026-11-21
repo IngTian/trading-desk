@@ -15,12 +15,12 @@ from desk import bars, judge
 
 SOURCE = "yahoo"   # bars.db's source for every bar this module stores
 
-# Minutes -> Yahoo's interval name.
+# Minutes -> Yahoo's interval name. yfinance 1.8 has no 4h (ruling R10).
 INTERVALS: dict[int, str] = {1: "1m", 2: "2m", 5: "5m", 15: "15m", 30: "30m", 60: "60m",
-                             90: "90m", 240: "4h", 1440: "1d", 10080: "1wk"}
+                             90: "90m", 1440: "1d", 10080: "1wk"}
 # One day inside Yahoo's 30/60/730; 2m held only ~42 days in the probe (external.md §1.4);
 # absent: no limit.
-RETENTION_DAYS: dict[int, int] = {1: 29, 2: 40, 5: 59, 15: 59, 30: 59, 90: 59, 60: 729, 240: 729}
+RETENTION_DAYS: dict[int, int] = {1: 29, 2: 40, 5: 59, 15: 59, 30: 59, 90: 59, 60: 729}
 # The design's 7 days (Yahoo allows 8); a timeframe absent here is one request.
 CHUNK: dict[int, timedelta] = {1: timedelta(days=7)}
 
@@ -63,7 +63,10 @@ def _yfinance(symbol: str, interval: str, start: datetime, end: datetime) -> Fet
                            float(r.Low), float(r.Close),
                            None if math.isnan(r.Volume) else float(r.Volume))
                  for t, r in frame.iterrows())
+    # yfinance 1.8 gives a pandas.Timestamp when the meta names the exchange's zone, else seconds.
     market = ticker.get_history_metadata().get("regularMarketTime")
+    if isinstance(market, datetime):
+        market = market.timestamp()
     return Fetched(rows, None if market is None else datetime.fromtimestamp(market, UTC))
 
 

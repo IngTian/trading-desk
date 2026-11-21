@@ -30,7 +30,7 @@ def _offline(symbol, interval, start, end):
 
 class FakeYahoo:
     """yahoo.fetch's stand-in. `rows` is a list, or a dict of lists keyed by Yahoo interval
-    ("60m", "4h"; a missing key: none). A call returns the rows with start <= open_time < end,
+    ("60m", "1d"; a missing key: none). A call returns the rows with start <= open_time < end,
     and `market_time` (default: the call's end). `calls` records (symbol, interval, start, end)."""
 
     def __init__(self, rows, market_time=None):

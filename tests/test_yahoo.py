@@ -103,7 +103,11 @@ def test_ticker_symbols(ticker, instrument, currency, symbol):
     assert yahoo.ticker_symbol(ticker, instrument, currency) == symbol
 
 
-def test_the_yfinance_fetch_asks_for_raw_regular_session_bars_and_returns_them_in_utc(monkeypatch):
+# yfinance 1.8's history() runs format_history_metadata on the meta it keeps: with the exchange's
+# time zone, regularMarketTime comes back a pandas.Timestamp; without it, still Unix seconds.
+@pytest.mark.parametrize("meta", [{"exchangeTimezoneName": "America/New_York"}, {}])
+def test_the_yfinance_fetch_asks_for_raw_regular_session_bars_and_returns_them_in_utc(monkeypatch,
+                                                                                       meta):
     import pandas as pd
     import yfinance
     asked = {}
@@ -122,7 +126,7 @@ def test_the_yfinance_fetch_asks_for_raw_regular_session_bars_and_returns_them_i
             return frame
 
         def get_history_metadata(self):
-            return {"regularMarketTime": 1772466000}
+            return yfinance.utils.format_history_metadata({**meta, "regularMarketTime": 1772466000})
 
     monkeypatch.setattr(yfinance, "Ticker", Ticker)
     f = yahoo._yfinance("ACME", "60m", h(0), h(3))
