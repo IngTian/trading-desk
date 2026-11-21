@@ -124,7 +124,8 @@ t = api.trade(con, run.id, ticker="ACME", side="long", entry_type="limit",
               entry=100.0, stop=98.5, target=103.0, size=10, currency="USD",
               reasons="Held the rising trend line on the hourly; a limit at the dip's low.",
               screenshots=["https://www.tradingview.com/x/AbCd1234/"], at=utc(2, 14))
-api.report(con, t.id, state="filled", at=utc(2, 15), reason="The 15:00 bar traded down to it.")
+api.report(con, t.id, state="filled", at=utc(2, 15, 15),
+           reason="The 15:00 bar traded down to it.")
 t = api.report(con, t.id, state="exited", kind="target", at=utc(3, 16, 30),
                reason="The target filled.")
 t.outcome   # status "exited", fill 100.0, exit 103.0 at its target, r 2.0, cash 30.0
@@ -236,7 +237,7 @@ A report that fails one is refused, saying which, and nothing is written.
   counts its stop and its target when it had finished by the close, and only its stop when
   it was still forming.
 - A run stop cancels pending limit orders and closes nothing.
-- A market entry's own bar, and a reported fill's, is not judged.
+- An entry's own bar (market or limit), and a reported fill's, is not judged.
 
 When bars are missing, the trade reads "not judged": the missing range is named, and nothing
 after it is claimed.
