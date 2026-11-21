@@ -496,6 +496,19 @@ def test_an_earlier_entry_recorded_later_changes_the_results_now(con):
     assert v.checks_differ == ("max_open_trades",)
 
 
+def test_correcting_an_entrys_at_moves_the_recomputes_at(con):
+    t1, t2, t3, t4 = (NOW - timedelta(hours=h) for h in (4, 3, 2, 1))
+    a = enter(con, at=t1)
+    b = enter(con, at=t2)
+    api.report(con, a.id, state="exited", kind="target", at=t3, reason="Invented.", now=NOW)
+    assert now_of(api.get_trade(con, b.id, now=NOW), "max_open_trades").ok is False  # A open at t2
+    api.correct_trade(con, b.id, fields={"at": t4}, reason="Invented.", now=NOW)
+    v = api.get_trade(con, b.id, now=NOW)      # after A's exit now
+    assert v.decisions.entry.at == t4
+    assert (now_of(v, "max_open_trades").ok, result(v, "max_open_trades").ok) == (True, False)
+    assert v.checks_differ == ("max_open_trades",)
+
+
 def test_an_entered_event_without_results_reads_none_shown(con):
     store.add_trade(con, "raw-1", REPLAY, "ACME", "long", "stock", 1.0, "USD")
     store.append(con, kind="entered", run_id=REPLAY, trade_id="raw-1", at=NOW.isoformat(),
