@@ -72,8 +72,8 @@ def test_a_payload_that_is_not_json_is_refused(con):
 def test_an_unknown_kind_is_refused(con):
     with pytest.raises(sqlite3.IntegrityError):
         _append(con, kind="unknown_kind")
-    assert store.KINDS == ("run_started", "run_stopped", "entered", "order_moved",
-                           "closed", "corrected", "voided")
+    assert store.KINDS == ("run_started", "run_stopped", "entered", "order_moved", "filled",
+                           "cancelled", "held", "closed", "corrected", "voided")
 
 
 def test_a_run_naming_a_missing_version_is_refused(con):

@@ -43,7 +43,7 @@ CREATE TABLE events (
     at          TEXT NOT NULL,
     recorded_at TEXT NOT NULL,
     kind        TEXT NOT NULL CHECK (kind IN ('run_started','run_stopped','entered',
-                    'order_moved','closed','corrected','voided')),
+                    'order_moved','filled','cancelled','held','closed','corrected','voided')),
     run_id      TEXT NOT NULL REFERENCES runs(id),
     trade_id    TEXT REFERENCES trades(id),
     corrects    INTEGER REFERENCES events(id),

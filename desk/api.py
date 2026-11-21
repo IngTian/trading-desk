@@ -377,7 +377,7 @@ def _decision(con, trade: str, reason) -> sqlite3.Row:
     return _trade_row(con, trade)
 
 
-def _not_void(con, trade: str) -> tuple[model.Decisions, int, tuple[int, ...]]:
+def _not_void(con, trade: str) -> tuple[model.Decisions, int, tuple[int, ...], dict[str, int]]:
     """The trade's fold; call it under the write lock, since what it reads decides the write."""
     folded = model._fold(con, trade)
     if folded[0].voided:
@@ -488,7 +488,7 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                       "future's point value can be corrected.")
     when = _aware(fields["at"], "at") if "at" in fields else None
     with store.transaction(con):  # the decisions the correction is checked against, under the lock
-        d, entered, move_ids = _not_void(con, trade)
+        d, entered, move_ids, _reports = _not_void(con, trade)
         if index is None:
             if fields.get("entry", d.entry.price) == fields.get("stop", d.entry.stop):
                 raise Refused("The corrected stop equals the entry, so the risk (the distance to "

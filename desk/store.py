@@ -14,7 +14,8 @@ from pathlib import Path
 from desk import config
 
 # Exported so tests and later tasks do not re-declare it.
-KINDS = ("run_started", "run_stopped", "entered", "order_moved", "closed", "corrected", "voided")
+KINDS = ("run_started", "run_stopped", "entered", "order_moved", "filled", "cancelled", "held",
+         "closed", "corrected", "voided")
 
 
 # PRAGMA user_version of a v3 desk.db. Stamped at create and required at open, so a file that
