@@ -75,7 +75,8 @@ TOOLS: dict[str, Tool] = {
         "One version of a strategy (default: the latest): its text; its rules as parsed; its "
         "timeframes, the bar lengths its rules read, finest first (e.g. 15m, 1h); its checklist "
         "items; `versions`, how many it has; and `current_hash`, which save_strategy takes as "
-        "`if_current` to save a change."), {
+        "`if_current` to save a change. `market_keys`: every key its rules read from `market`, "
+        "in the rules' order with the facts last."), {
         "id": _p("string", "The strategy's id."),
         "version": _VERSION,
     }, ("id",)),
@@ -138,8 +139,9 @@ TOOLS: dict[str, Tool] = {
         "entry to the stop. A future's `point_value` is the cash a one-point move is worth on "
         "one contract; a continuous ticker such as GC1! reads as a future. `market` holds the "
         "figures the rules read that you supply: indicator keys such as rsi_14_15m and the "
-        "facts the strategy declares; a key its rules do not read is refused. `checklist` "
-        "answers the version's checklist items, matched by their exact text.\n\n"
+        "facts the strategy declares; a key its rules do not read is refused. RSI is the "
+        "relative strength index, a 0 to 100 reading of recent gains against recent losses. "
+        "`checklist` answers the version's checklist items, matched by their exact text.\n\n"
         "Before an entry whose rules read market keys, take them from get_strategy's "
         "market_keys and supply each the instructions name (a replay run: all; a live run: the "
         "facts, a future's indicator keys, and any value you trust over the desk's), read off "
