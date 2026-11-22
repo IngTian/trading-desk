@@ -106,13 +106,13 @@ You tell the agent what you did and why, and it calls the desk's tools. A sessio
 | | `list_runs` | Every run, or one strategy's, with `started` and `stopped`. |
 | Trades | `trade` | Enters a trade, checked against its version's rules as of `at`; with `check_only`, a preview. |
 | | `move_order` | Moves the stop, the target or both, in force from the first bar opening at or after `at`. |
-| | `close_trade` | Closes by hand with no price: pulls a pending limit, or prices a live position from the bars. |
+| | `close_trade` | Closes by hand with no price: pulls a pending limit, or prices a live position from the bars. A replay position is refused: report its exit with its price instead, `report(state="exited", kind="hand", price=…)`. |
 | | `report` | States the trade's state as of `at`: `filled`, `cancelled`, `open` or `exited`. |
-| | `correct_trade` | Corrects the entry, one move or one report, read in place of the original, which stays in the log. |
+| | `correct_trade` | Corrects the entry, one move (`fields={"move": i, …}`, `i` its place in `get_trade`'s moves) or one report (`fields={"report": "fill", "price": …}`, or `"cancel"`, `"open"`, `"close"`), read in place of the original, which stays in the log. |
 | | `void_trade` | Takes a trade out of the stats and the other trades' checks, or withdraws one report. It cannot be undone. |
 | Reading | `get_trade` | One trade, read now: its decisions, `outcome`, `judged`, `differs`, `checks_shown`, `checks_now`, `checks_differ`. |
 | | `list_trades` | Every trade, voids included, narrowed by run, by strategy and to the open ones or the rest. |
-| | `trade_bars` | A live trade's bars from its entry to its end, on a timeframe of its run or 1m, with the ranges missing. |
+| | `trade_bars` | A live trade's bars on a timeframe of its run or 1m: from `before` bars ahead of the entry's bar through `after` bars past its exit or cancellation (both 0 if left out), or through the latest bar while it has not ended, with the ranges missing. |
 | | `stats` | Counts, rates and averages for one scope. |
 
 Replies are JSON with UTC times. A refusal is a tool error that says what to change, and a refused
