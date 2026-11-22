@@ -419,7 +419,7 @@ def _screenshot(text: str) -> tuple[dict, bytes | None, str | None]:
     return {"file": stored, "name": path.name}, data, stored
 
 
-# ------------------------------------------------- the checks, as of a trade's `at` (§7) ---
+# ------------------------------------------------- the checks, as of a trade's `at` ---
 def _other(row: sqlite3.Row, d: model.Decisions, o: outcome.Outcome, seq: int) -> checks.Other:
     """Another trade of the run as the checks read it, from its outcome. An exit always carries
     its cash (outcome._money gives one), which the record rules add up."""
@@ -476,7 +476,7 @@ def _differ(shown: tuple[checks.Result, ...] | None, now: tuple[checks.Result, .
 
 
 def _market(rules: Rules, market) -> dict[str, float]:
-    """The agent's values (design §7.5): only the keys the version's rules read, each a finite
+    """The agent's values: only the keys the version's rules read, each a finite
     number, kept as floats. None is none."""
     if market is None:
         return {}
@@ -495,7 +495,7 @@ def _market(rules: Rules, market) -> dict[str, float]:
 
 
 def _answers(items: tuple[str, ...], checklist) -> tuple[dict, ...]:
-    """The agent's checklist answers (design §7.6), kept as given in the order given. None is
+    """The agent's checklist answers, kept as given in the order given. None is
     none."""
     if checklist is None:
         return ()

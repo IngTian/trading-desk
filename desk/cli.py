@@ -1,5 +1,5 @@
-"""Command-line interface: `trading-desk mcp`, the desk's one interface, and `trading-desk
-integrity`. Recording goes through desk/api.py."""
+"""Command-line interface: `trading-desk mcp`, how an agent reaches the desk, and `trading-desk
+integrity`. Recording goes through desk/api.py, which Python imports directly."""
 from __future__ import annotations
 
 import argparse

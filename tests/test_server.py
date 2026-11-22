@@ -439,7 +439,7 @@ def test_stray_output_never_reaches_the_wire(wire):
 
 
 # ------------------------------------------------------------------- the instruction file ---
-def test_the_instruction_file_fits_and_says_what_design_9_asks():
+def test_the_instruction_file_fits_and_says_what_the_agent_needs():
     text = config.instructions().read_text(encoding="utf-8")
     assert len(text) <= 4000
     for phrase in ("exactly as they wrote", "never write one for them", "Never state a figure",
@@ -447,8 +447,8 @@ def test_the_instruction_file_fits_and_says_what_design_9_asks():
                    "ask the user first", "`market`", "every declared fact (the desk computes none)",
                    "checklist item", "nothing but your reports", "not filled",
                    "stop-out at its real time", "broker's fill price",
-                   "confirms the broker still holds",
-                   "at least weekly", "full file paths or https://"):
+                   "confirms the broker still holds", "only on the user's word",
+                   "full file paths or https://"):
         assert phrase in text, phrase
 
 

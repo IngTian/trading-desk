@@ -2,7 +2,7 @@
 desk/instructions.md as the server's `instructions`.
 
 On the MCP SDK's low-level server, never MCPServer: MCPServer coerces arguments ("1" and true
-reach an integer parameter as 1), and the API refuses a wrong type itself (design §9). The SDK
+reach an integer parameter as 1), and the API refuses a wrong type itself. The SDK
 frames messages, speaks both protocol eras, answers ping, skips bad lines, and points fd 0 and
 fd 1 away from the wire while serving. The desk adds what it does not: Python's buffered prints
 kept off the wire, one call at a time in a worker thread, and replies in strict JSON.

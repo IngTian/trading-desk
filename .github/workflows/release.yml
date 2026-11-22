@@ -2,7 +2,7 @@ name: Release
 
 # Publishes `trading-desk` to PyPI when a version tag is pushed:
 #
-#     git tag v0.10.0 && git push origin v0.10.0
+#     git tag v0.11.0 && git push origin v0.11.0
 #
 # Authentication is PyPI Trusted Publishing (OIDC), so there is no API token in the
 # repository or in Actions secrets -- nothing to leak and nothing to rotate. PyPI trusts

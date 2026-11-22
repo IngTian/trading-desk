@@ -8,15 +8,16 @@ build-backend = "setuptools.build_meta"
 # nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
-version = "0.10.0"
+version = "0.11.0"
 description = "An MCP server that keeps your trading record: trades under versioned strategies, checked against their rules, with outcomes and stats"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 keywords = ["trading", "strategy", "trade-journal", "mcp", "claude-code", "replay", "sqlite", "event-sourcing"]
-# `mcp` is required: MCP is the desk's only interface (`trading-desk mcp`), served on the SDK's
-# low-level server, which passes the agent's arguments through unchanged for the API to check.
+# `mcp` is required: MCP is how an agent reaches the desk (`trading-desk mcp`), served on the
+# SDK's low-level server, which passes the agent's arguments through unchanged for the API to
+# check. `desk/api.py` is the same face from Python (docs/python.md), and needs nothing else.
 # The upper bound is deliberate: 2.x renamed and rewrote its own API within two months, so a
 # 3.0 is not taken unseen.
 dependencies = ["mcp>=2.3,<3"]

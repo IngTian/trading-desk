@@ -7,7 +7,7 @@ cash -- is derived on read, from `Decisions` and its reports alone (`outcome.of`
 ## Payload-key contract (what each trade event carries)
 
 - **entered**: `entry_type`, `entry`, `stop`, `target`, `size`, `reasons`, `screenshots`, and
-  what the author was shown at entry (design §7.1): `checks` (each result as `checks.Result`'s
+  what the author was shown at entry: `checks` (each result as `checks.Result`'s
   fields; `[]` when the version has no rules), `market` (the agent's values by market key, as
   floats) and `checklist` (the answers as given: `item`, `verdict` `pass` or `fail`, `reason`).
   Never corrected; an entry written without `checks` shows none

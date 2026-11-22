@@ -13,14 +13,12 @@ import glob
 import sys
 import zipfile
 
-# THE SCHEMAS ARE THE TOOL: without them a fresh install cannot create desk.db or bars.db.
-# schema.sql once lived in book/, which was not a package, so an installed copy resolved to a
-# path that did not exist.
+# THE SCHEMA IS THE TOOL: without it a fresh install cannot create desk.db. It once lived in
+# book/, which was not a package, so an installed copy resolved to a path that did not exist.
 # THE EXAMPLE STRATEGY is what a new user copies first (config.example_strategy()).
 # THE INSTRUCTIONS are the MCP server's `instructions`: without them `trading-desk mcp`
 # cannot start.
-REQUIRED = ("desk/schema.sql", "desk/bars.sql", "desk/strategy.example.md",
-            "desk/instructions.md")
+REQUIRED = ("desk/schema.sql", "desk/strategy.example.md", "desk/instructions.md")
 SCRIPTS = {"trading-desk": "desk.cli:main"}
 
 
@@ -43,8 +41,7 @@ def main(folder: str) -> int:
     if unexpected:
         return _fail(f"unexpected top-level packages in {wheel}: {sorted(unexpected)}")
 
-    # 0.4's commands (desk, desk-migrate, desk-check, desk-mcp) are gone; a wheel that still
-    # declared one would install a command that imports a deleted module.
+    # A wheel that declared a second command would install one that imports a deleted module.
     (entry_points,) = [n for n in names if n.endswith(".dist-info/entry_points.txt")]
     parsed = configparser.ConfigParser()
     parsed.read_string(archive.read(entry_points).decode())
@@ -52,7 +49,16 @@ def main(folder: str) -> int:
     if scripts != SCRIPTS:
         return _fail(f"console scripts are {scripts}, expected {SCRIPTS}")
 
-    print(f"{wheel}: {', '.join(REQUIRED)} present, only desk/ ships, one command")
+    # The wheel's name carries its version; pyproject.toml declares it. A release publishes
+    # what the tag says, so the two must agree before it is built.
+    (metadata,) = [n for n in names if n.endswith(".dist-info/METADATA")]
+    declared = next(line.split(": ", 1)[1] for line in archive.read(metadata).decode().splitlines()
+                    if line.startswith("Version: "))
+    if f"-{declared}-" not in wheel:
+        return _fail(f"{wheel} is not a wheel of version {declared}")
+
+    print(f"{wheel}: version {declared}, {', '.join(REQUIRED)} present, only desk/ ships, "
+          "one command")
     return 0
 
 

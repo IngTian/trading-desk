@@ -6,10 +6,10 @@
 **trading-desk is an MCP server that keeps your trading record for an agent to drive.** MCP, the
 Model Context Protocol, is how an agent such as Claude Code calls a program's functions. Each trade
 is filed under the strategy, version and run that allowed it, with your reasons and screenshots,
-and checked against the version's rules before entry; a breach never refuses it. Its outcome comes
-from your reports when you replay history, or from price bars when you trade live, the reports
-overriding the bars. It is bookkeeping: stats per run, version and strategy, as counts, rates and
-averages, never a verdict.
+and checked against the version's rules before entry; a breach never refuses it. The desk reads no
+market data: a trade's fill, exit and cancellation come only from your reports, and every indicator
+value the rules read comes only from what the agent supplies. It is bookkeeping: stats per run,
+version and strategy, as counts, rates and averages, never a verdict.
 
 ## Is this you?
 
@@ -17,15 +17,15 @@ averages, never a verdict.
   want every entry checked against them and kept with your reasons, so you can see which trades
   kept the rules and which did not.
 - **You want an agent to keep the record.** You tell Claude Code what you did and why, and it
-  files the trade, its moves, closes and reports through the desk's tools.
-- **You replay your history by hand** to see how a strategy would have done. The desk reads no
-  bars on a replay run: only your reports, each dated at the bar you acted on.
-- **You trade live** and want outcomes judged from Yahoo's price bars, with your broker's fills
-  and stop-outs reported over the bars.
+  files the trade, its moves and reports through the desk's tools.
+- **You replay your history by hand** to see how a strategy would have done. Every figure comes
+  from your reports, each dated at the bar you acted on.
+- **You trade live** and want each fill, stop-out and cancellation recorded as you report it, with
+  the same rules checked at entry.
 - **You want the numbers** — win rate, average R, P&L per currency, fill rate — worked out per
   run, version and strategy, never as a verdict or a ranking.
 - **You script it.** The same record is callable from Python, so your own analysis can read
-  every trade and its bars.
+  every trade and its whole record.
 
 It will not place orders, send alerts or keep account balances: it is a record, not a broker. The
 full list of what it does not do is in
@@ -52,21 +52,21 @@ You tell the agent what you did and why, and it calls the desk's tools. A sessio
    - It needs `instrument` (`stock`, `etf` or `future`) unless the ticker names a continuous
      future (`GC1!`), and a future's `point_value`, the cash a one-point move is worth on one
      contract. An ETF is an exchange-traded fund. A future is a contract to buy or sell at a set
-     price on a later date; the desk reads Yahoo's rolling front month, the contract nearest
-     expiry, which switches to the next at a roll.
-   - Also give the `market` values its rules read, which `get_strategy`'s `market_keys` names. A
-     key left out reads unknown, or on a live run is computed where the desk can.
+     price on a later date.
+   - Also give the `market` values its rules read, which `get_strategy`'s `market_keys` names,
+     read off your chart at the bar you acted on. The desk computes none of them, and a key left
+     out reads unknown for good, since `market` is not corrected.
    - Answer every checklist item; an unanswered one is recorded "not answered". Neither of these
      two is refused.
    - Over MCP, `reasons` is still required: pass an empty string with `check_only`.
    - Screenshots are local files, copied into the desk under a hash of their bytes, or https
      links.
-4. **After entry**: `move_order` and `report`.
+4. **After entry**: `move_order` and `report`. The desk learns nothing on its own, so report each
+   limit's fill or cancellation, and each exit with its kind and, for a hand exit, its price.
 5. **Fix a mistake**: `correct_trade` and `void_trade`. A trade's currency cannot be corrected.
 6. **Read back**: `get_trade`, with `checks_now` and `checks_differ`; and `list_trades`.
-7. **Stop the run.** `stop_run` sorts its unfilled limits into `cancelled` (by the stop),
-   `awaiting_bars` (bars not yet at the stop: read again later) and `needs_report` (bars that
-   could not be read: report each).
+7. **Stop the run.** `stop_run` cancels its unfilled limit orders and lists their ids in
+   `cancelled`; its open trades stay open until you report their exit.
 8. **Read the stats** of a run, a version or a strategy.
 
 Say you tell the agent about an entry on the pullback strategy:
@@ -74,8 +74,8 @@ Say you tell the agent about an entry on the pullback strategy:
 > **you:** I'm long ACME at 100, stop 98.5, target 103, 10 shares. The pullback held the 1h EMA
 > on lighter volume, and no tier-1 news inside the next hour.
 
-The agent answers the checklist, fills in the `market` keys the rules read (on a replay run, read
-off your chart), and checks the trade first with `check_only`, which records nothing:
+The agent answers the checklist, fills in the `market` keys the rules read from your chart, and
+checks the trade first with `check_only`, which records nothing:
 
 ```
 min_reward_risk     kept  reward to risk 2.00 against a minimum of 2
@@ -126,13 +126,8 @@ pip install trading-desk
 ```
 
 It needs Python 3.11 or later, built with SQLite 3.38 or later (for its STRICT tables and its JSON
-functions), on macOS or Linux. It depends on the `mcp` SDK, and on yfinance (with pandas and numpy),
-through which live runs read Yahoo Finance's price bars (each period's open, high, low, close and
-volume). yfinance's own README says it is not affiliated with Yahoo, and that Yahoo's terms of use
-govern the data, which is for personal use. To upgrade, run `uv tool upgrade trading-desk`. An
-install older than 0.8 has no `mcp` command, so the plugin cannot start until you upgrade. An
-install made from the repository, as 0.6 to 0.9 were, moves to PyPI with
-`uv tool install --force trading-desk`.
+functions), on macOS or Linux. Its one dependency is the `mcp` SDK. To upgrade, run
+`uv tool upgrade trading-desk`.
 
 ## Use it from Claude Code
 
@@ -162,12 +157,11 @@ Everything lives under one folder, the data root: `~/Documents/trading-desk/` by
 
 ```
 desk.db        strategies, runs, trades and every decision, reports included (append-only)
-bars.db        price bars for live runs, and the range each fetch covered (insert-only)
 attachments/   screenshots, named by the hash of their bytes
 ```
 
-Append-only and insert-only mean rows are added, never changed or deleted. `$TRADING_DESK_DB` beats
-`$TRADING_DESK_HOME`, for the database only. No config.toml is read. Both databases use a rollback
+Append-only means rows are added, never changed or deleted. `$TRADING_DESK_DB` beats
+`$TRADING_DESK_HOME`, for the database only. No config.toml is read. desk.db uses a rollback
 journal, never WAL, because `~/Documents` is often synced by iCloud. The full story — the iCloud
 guards, `trading-desk integrity`, and how to keep a session apart from your real data — is in
 [Where your data lives](https://github.com/IngTian/trading-desk/blob/main/docs/data.md).
@@ -182,21 +176,18 @@ guards, `trading-desk integrity`, and how to keep a session apart from your real
 | read a `stats` reply field by field | [Stats](https://github.com/IngTian/trading-desk/blob/main/docs/stats.md) |
 | know where my data lives, and check its integrity | [Where your data lives](https://github.com/IngTian/trading-desk/blob/main/docs/data.md) |
 | call the desk from Python | [Python](https://github.com/IngTian/trading-desk/blob/main/docs/python.md) |
-| see what 0.10 does not do | [Limits](https://github.com/IngTian/trading-desk/blob/main/docs/limits.md) |
+| see what 0.11 does not do | [Limits](https://github.com/IngTian/trading-desk/blob/main/docs/limits.md) |
 | see the version history | [Versions](https://github.com/IngTian/trading-desk/blob/main/docs/versions.md) |
 | contribute | [CONTRIBUTING.md](https://github.com/IngTian/trading-desk/blob/main/CONTRIBUTING.md) |
 
 ## Status
 
-**0.10.0, on PyPI, Beta:** the tools and the data format may change before 1.0, and each change is
+**0.11.0, on PyPI, Beta:** the tools and the data format may change before 1.0, and each change is
 listed under [Versions](https://github.com/IngTian/trading-desk/blob/main/docs/versions.md).
 
-- It reads a desk.db from 0.7 or later. One from 0.5 or 0.6 is refused untouched: move it aside and
-  restart the MCP server, which creates a new one, since there is no migration.
-- The one trap in upgrading from 0.8: a config.toml that sets `db` is refused, naming the step to
-  take.
-- 0.4 was a different tool, a portfolio book with a terminal UI. Its book (hub.db) is never opened
-  unless you point `TRADING_DESK_DB` at it, and then it is refused untouched.
+- It reads a desk.db at schema version 5. One an earlier version wrote is refused untouched: move
+  it aside and restart the MCP server, which creates a new one, since there is no migration.
+- A config.toml that sets `db` is refused, naming the step to take.
 
 ## Development
 
