@@ -26,7 +26,7 @@ from desk.strategy import minutes  # start_run's `strategy` parameter shadows th
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "CheckView", "trade",
            "move_order", "close_trade", "report", "correct_trade", "void_trade", "get_trade",
-           "list_trades", "TradeBars", "trade_bars", "Stats", "stats"]
+           "list_trades", "TradeBars", "trade_bars", "Stats", "stats", "StoppedRun"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
 _YAHOO_HAS = "1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w"   # yahoo.INTERVALS, as a refusal names them
@@ -342,7 +342,7 @@ class TradeView:
     # unanswered one reads verdict "not answered", reason None. Never scored.
     checklist: tuple[dict, ...] = ()
     checks_now: tuple[checks.Result, ...] | None = None
-    checks_differ: tuple[str, ...] = ()
+    checks_differ: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -617,10 +617,11 @@ def _results_now(con, row: sqlite3.Row, d: model.Decisions, others: tuple[checks
 
 
 def _differ(shown: tuple[checks.Result, ...] | None, now: tuple[checks.Result, ...]
-            ) -> tuple[str, ...]:
-    """The names whose (ok, figure) differ between the results shown and now, or are in one only."""
+            ) -> tuple[str, ...] | None:
+    """The names whose (ok, figure) differ between the results shown and now, or are in one only;
+    None when no results were shown to compare."""
     if shown is None:
-        return ()
+        return None
     then = {r.name: (r.ok, r.figure) for r in shown}
     here = {r.name: (r.ok, r.figure) for r in now}
     return tuple(dict.fromkeys(n for n in [*here, *then]
@@ -1373,7 +1374,8 @@ class TradeBars:
 def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = None,
                before: int | None = 0, after: int | None = 0,
                now: datetime | None = None) -> TradeBars:
-    """A live trade's bars at one of its run's version's timeframes (default: the finest): from
+    """A live trade's bars at one of its run's version's timeframes (default: the finest), or at 1m,
+    the bars every live trade is judged on: from
     `before` bars ahead of the bar holding the entry through `after` bars past the last bar
     opening before the exit or cancellation, or through the latest bar while it has not ended.
     `missing`: what no fetch covered from the entry to its end, or to now while it has not ended;
@@ -1389,16 +1391,15 @@ def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = N
     names = tuple(_timeframes(con, run).values())
     if timeframe is None:
         timeframe = names[0]
-    elif timeframe not in names:
+    elif timeframe not in (*names, yahoo.INTERVALS[_JUDGED]):
         raise Refused(f"timeframe {shown(timeframe)} is not one of the timeframes of run "
-                      f"{shown(row['run_id'])}; "
-                      f"use one of {', '.join(names)}, or leave it out for the finest.")
+                      f"{shown(row['run_id'])}; use one of {', '.join(names)}, or 1m, the bars "
+                      "it is judged on, or leave it out for the finest.")
     m = minutes(timeframe)
     if m not in yahoo.INTERVALS:
-        raise Refused(f"Live runs read Yahoo, which has no {timeframe} bars; ask for another of "
-                      f"the timeframes of run {shown(row['run_id'])} ({', '.join(names)}) that "
-                      f"Yahoo has: "
-                      f"{_YAHOO_HAS}.")
+        raise Refused(f"Live runs read Yahoo, which has no {timeframe} bars; ask for 1m, the bars "
+                      f"run {shown(row['run_id'])} is judged on, or for another of its "
+                      f"timeframes ({', '.join(names)}) that Yahoo has: {_YAHOO_HAS}.")
     for name, v in (("before", before), ("after", after)):
         if v is not None and (isinstance(v, bool) or not isinstance(v, int)
                               or not 0 <= v <= 10_000):

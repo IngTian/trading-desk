@@ -1,5 +1,8 @@
 """Tests for the v1 data-folder layout."""
-from desk import config
+import pytest
+
+from desk import config, store
+from desk.errors import Refused
 
 
 def test_the_data_folder_layout_is_one_place(tmp_path, monkeypatch):
@@ -67,3 +70,21 @@ def test_the_env_db_skips_the_legacy_check(tmp_path, monkeypatch):
     _legacy(tmp_path, monkeypatch)
     monkeypatch.setenv(config.ENV_DB, str(tmp_path / "x.db"))
     config.refuse_legacy_db()
+
+
+def test_python_openers_refuse_a_config_toml_that_sets_db(tmp_path, monkeypatch):
+    _legacy(tmp_path, monkeypatch)
+    for opener in (store.open, store.create):
+        with pytest.raises(Refused, match='sets db = "elsewhere.db"'):
+            opener()
+    assert not (tmp_path / "desk.db").exists()
+    store.create(tmp_path / "chosen.db")        # an explicit path is the caller's own choice
+
+
+def test_python_openers_refuse_a_desk_db_only_in_icloud():
+    db = config.db_path()
+    config.icloud_placeholder(db).write_bytes(b"an invented placeholder")
+    for opener in (store.open, store.create):
+        with pytest.raises(Refused, match="in iCloud but not downloaded"):
+            opener()
+    assert not db.exists()

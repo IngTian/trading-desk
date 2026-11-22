@@ -75,7 +75,8 @@ TOOLS: dict[str, Tool] = {
         "One version of a strategy (default: the latest): its text; its rules as parsed; its "
         "timeframes, the bar lengths its rules read, finest first (e.g. 15m, 1h); its checklist "
         "items; `versions`, how many it has; and `current_hash`, which save_strategy takes as "
-        "`if_current` to save a change."), {
+        "`if_current` to save a change. `market_keys`: every key its rules read from `market`, "
+        "in the rules' order with the facts last."), {
         "id": _p("string", "The strategy's id."),
         "version": _VERSION,
     }, ("id",)),
@@ -138,8 +139,9 @@ TOOLS: dict[str, Tool] = {
         "entry to the stop. A future's `point_value` is the cash a one-point move is worth on "
         "one contract; a continuous ticker such as GC1! reads as a future. `market` holds the "
         "figures the rules read that you supply: indicator keys such as rsi_14_15m and the "
-        "facts the strategy declares; a key its rules do not read is refused. `checklist` "
-        "answers the version's checklist items, matched by their exact text.\n\n"
+        "facts the strategy declares; a key its rules do not read is refused. RSI is the "
+        "relative strength index, a 0 to 100 reading of recent gains against recent losses. "
+        "`checklist` answers the version's checklist items, matched by their exact text.\n\n"
         "Before an entry whose rules read market keys, take them from get_strategy's "
         "market_keys and supply each the instructions name (a replay run: all; a live run: the "
         "facts, a future's indicator keys, and any value you trust over the desk's), read off "
@@ -276,7 +278,8 @@ TOOLS: dict[str, Tool] = {
         "value, in the trade's currency. `judged`: the bars' own reading of a live trade (null "
         "in replay), and `differs`: the fields where it and the outcome part. `checks_shown`: "
         "the rule results shown at entry; `checks_now`: as they read now, from the run's "
-        "current trades; `checks_differ`: the rules whose result changed. A live trade is "
+        "current trades; `checks_differ`: the rules whose result changed (null for a voided trade, "
+        "or when the entry stored no results to compare). A live trade is "
         "judged from bars fetched as it is read; what the bars cannot give is null, with a "
         "note."), {
         "trade": _TRADE,
@@ -285,8 +288,9 @@ TOOLS: dict[str, Tool] = {
         "Every trade in recording order, voids included, narrowed to a run or a strategy, and "
         "to the open ones (`true`) or the rest (`false`). Open means pending, open or closing, "
         "or not judged with no close or cancellation to end it. Each trade carries its whole "
-        "record, as get_trade gives it without `checks_now`, so narrow to a run, and to "
-        "`open: true`, when you can."), {
+        "record, as get_trade gives it, except that `checks_now` and `checks_differ` are null: "
+        "only get_trade works them out, so narrow to a run, and to `open: true`, when you "
+        "can."), {
         "run": _p("string", "A run's id, to list only its trades."),
         "strategy": _p("string", "A strategy's id, to list only its runs' trades."),
         "open": _p("boolean", "true: only the open trades; false: only the rest; left out: "
@@ -294,13 +298,14 @@ TOOLS: dict[str, Tool] = {
     }),
     "trade_bars": Tool(api.trade_bars, (
         "A live trade's price bars, each with its open time in UTC and its open, high, low, "
-        "close and volume, on one of its run's timeframes (default: the finest). They run from "
+        "close and volume, on one of its run's timeframes (default: the finest), or on 1m, the "
+        "bars it is judged on. They run from "
         "`before` bars ahead of the bar holding its entry to `after` bars past its exit or "
         "cancellation, or to the latest bar while it has not ended. `missing` gives the ranges "
         "no fetch covered, and `notes` why. Replay trades have no bars."), {
         "trade": _p("string", "A live trade's id."),
-        "timeframe": _p("string", "One of its run's timeframes, e.g. 15m; left out: the "
-                        "finest."),
+        "timeframe": _p("string", "One of its run's timeframes, e.g. 15m, or 1m, the bars it is "
+                        "judged on; left out: the finest."),
         "before": _p("integer", "Bars to include ahead of the bar holding the entry; left out: "
                      "0.", minimum=0, maximum=10000),
         "after": _p("integer", "Bars to include past the exit or cancellation; left out: 0.",
@@ -391,13 +396,10 @@ def _counted(s: dict) -> dict:
 
 
 def _open() -> sqlite3.Connection:
-    config.refuse_legacy_db()
     try:
         return store.open()
     except FileNotFoundError:   # its text names store.create(), which an agent cannot call
         path = config.db_path()
-        # Refused: replied as it stands and logged nowhere, as a refusal is
-        config.refuse_if_in_icloud(path)
         raise Refused(f"There is no desk.db at {path}; restart the MCP server, which creates one, "
                       "or check TRADING_DESK_HOME and TRADING_DESK_DB.") from None
 

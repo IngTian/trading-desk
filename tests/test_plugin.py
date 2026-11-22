@@ -1,6 +1,7 @@
 """The Claude Code plugin and the marketplace that lists it agree with each other."""
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -37,3 +38,27 @@ def test_yfinance_is_a_dependency_not_an_extra():
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
     assert any(d.startswith("yfinance") for d in project["dependencies"])
     assert "optional-dependencies" not in project
+
+
+def test_the_readme_gives_the_commands_that_work():
+    readme = (ROOT / "README.md").read_text()
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    repo = project["urls"]["Repository"].removeprefix("https://github.com/")
+    market = _json(".claude-plugin", "marketplace.json")["name"]
+    plugin = _json("plugin", ".claude-plugin", "plugin.json")["name"]
+    assert f"uv tool install {project['name']}\n" in readme and "git+https" not in readme
+    assert f"/plugin marketplace add {repo}" in readme
+    assert f"/plugin install {plugin}@{market}" in readme
+    assert f"{PREFIX}*" in readme
+    assert all(f"`{name}`" in readme for name in TOOLS)
+
+
+def test_the_readme_links_work_on_pypi():
+    readme = (ROOT / "README.md").read_text()
+    targets = re.findall(r"\]\(([^)\s]+)\)", readme)
+    assert targets and all(t.startswith(("https://", "mailto:")) for t in targets), targets
+    prose = re.sub(r"^```.*?^```", "", readme, flags=re.M | re.S)   # a fence's `## x` is not one
+    anchors = {re.sub(r"[^\w -]", "", h.lower()).replace(" ", "-")   # GitHub keeps `_`
+               for h in re.findall(r"^#+ (.+)$", prose, re.M)}
+    page = "https://github.com/IngTian/trading-desk#"
+    assert {t.removeprefix(page) for t in targets if t.startswith(page)} <= anchors
