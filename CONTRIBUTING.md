@@ -1,11 +1,11 @@
 # Contributing
 
-Thanks for looking. Two principles decide most questions about this tool, and both are in the
-README: **only decisions and bars are stored** (decisions include reports; everything else is
-derived on read), and **one timing rule**. A change that stores something derived (an exit, a P&L,
-a check result beyond the ones shown at entry, which the README names as the one exception) or that
-dates a decision any other way is a design change. Please open an issue and make the case before
-writing it.
+Thanks for looking. Two principles decide most questions about this tool, and both are in
+[docs/how-it-works.md](docs/how-it-works.md): **only decisions and bars are stored** (decisions
+include reports; everything else is derived on read), and **one timing rule**. A change that stores
+something derived (an exit, a P&L, a check result beyond the ones shown at entry, which that doc
+names as the one exception) or that dates a decision any other way is a design change. Please open
+an issue and make the case before writing it.
 
 ## Ground rules
 

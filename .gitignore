@@ -19,10 +19,6 @@ __pycache__/
 # The author: "we dont need the old archive going forward."
 archive/
 
-# Claude-generated design specs and process docs. The author: "we dont need that
-# superpower docs or anything claude generated design spec docs."
-docs/
-
 # Reviewer and agent scratch. `.probe/` is here because two subagent diagnostic
 # scripts were actually committed on 2026-09-07 (d6df16e): an audit workflow ran 45
 # agents with filesystem access, they wrote probes into .probe/ and scratch/, and a
