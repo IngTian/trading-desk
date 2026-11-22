@@ -90,7 +90,7 @@ You tell the agent what you did and why, and it calls the desk's tools. A sessio
 4. **After entry**: `move_order`, `close_trade` and `report`.
 5. **Fix a mistake**: `correct_trade` and `void_trade`. A trade's currency cannot be corrected.
 6. **Read back**: `get_trade`, with `checks_now` and `checks_differ`; `list_trades`; and
-   `trade_bars`, at the finest timeframe or at `1m`.
+   `trade_bars`, at one of its run's timeframes (the finest by default) or at `1m`.
 7. **Stop the run.** `stop_run` sorts its unfilled limits into `cancelled` (by the stop),
    `awaiting_bars` (bars not yet at the stop: read again later) and `needs_report` (bars that could
    not be read: report each).
@@ -208,8 +208,8 @@ fix. No rule is silently dropped.
 | `trading_hours` | `{ start = "09:45", end = "15:30", days = ["mon", "tue"] }`, in the system timezone, from `start` up to `end`. It may not cross midnight; `days` is optional. |
 | `[stop_atr]` | The stop's distance in ATRs (average true range: a bar's typical high-to-low size), `length` 14 unless given, e.g. `at_least = 1.5`. |
 | `[rsi]`, `[macd]` | RSI (relative strength index: a 0 to 100 reading of recent gains against recent losses; `length` 14) or MACD (moving average convergence divergence: the gap between a fast and a slow moving average; `fast` 12, `slow` 26, `signal` 9, and an `output` of `histogram`, `line` or `signal`) on a `timeframe` (the finest unless given), with `at_least`, `at_most` or `between`, at the top or under `long` and `short`. |
-| `[ema]`, `[sma]` | The close above or below an EMA or an SMA (exponential or simple moving average): a `length`, a `timeframe`, and `long` or `short` set to `"above"` or `"below"`. Write `[[ema]]` more than once for several. |
-| `[facts]` | Named values you supply at entry, each with a comparison, e.g. `rvol = { at_least = 2 }` for a relative volume read off your chart. The desk never computes a fact. |
+| `[ema]`, `[sma]` | The close above or below an EMA or an SMA (exponential or simple moving average): a `length`, a `timeframe` (the finest unless given), and `long` or `short` set to `"above"` or `"below"`. Write `[[ema]]` more than once for several. |
+| `[facts]` | Named values you supply at entry, each with a comparison, e.g. `rvol = { at_least = 2 }` for a relative volume (the volume against its recent average) read off your chart. The desk never computes a fact. |
 
 At entry the desk checks the trade against the run's version's rules, as of its `at`, and shows
 each result: kept, breached, or unknown, naming what is missing. A breach never refuses a trade,
@@ -243,7 +243,7 @@ or `run stopped`; the last is dated only at the run's stop, and the fill rate le
 `kind="hand"`, the default, always with its `price`). No bars are read, and a position with no exit
 reported reads open.
 
-**Live runs are judged** from Yahoo's 1-minute bars, unadjusted (not rewritten for a later split or
+**Live runs are judged** from Yahoo's 1-minute bars, unadjusted (not rewritten for a later split, a change in a company's share count that moves its price, or a
 dividend) and regular-session (the exchange's normal hours only). A future such as `GC` reads as
 `GC=F`, and a stock or an ETF in CAD as its Toronto listing (`.TO`). A read fetches the completed
 bars a trade lacks, only while it has not ended, and keeps them in bars.db. Yahoo keeps 1-minute
@@ -278,7 +278,7 @@ stop the price gapped through (a bar that opened beyond it) fills at the bar's o
 the target price, and a bar that reaches both counts as the stop. A limit order never fills better
 than its price, and in the bar it fills only the stop counts. A position that opens with its stop
 already at or beyond its price (a stop moved past a pending limit, or a fill reported beyond the
-stop) is stopped out at once, at that price. A hand close exits at the close of the last bar
+stop) is stopped out at once, at that price. A hand close, unless the trade exited first, exits at the close of the last bar
 opening before it, or at the entry price when no bar traded from the entry to the close; that bar
 counts its stop and its target when it had finished by the close, and only its stop while still
 forming, when the trade reads `closing`. A run stop cancels pending limits and closes nothing; a
@@ -323,8 +323,9 @@ config.toml is read, and every opener of desk.db refuses one that sets `db` (unl
 Both databases use a rollback journal, never WAL (a write-ahead log, a second file beside the
 database), because `~/Documents` is often synced by iCloud, and a database synced apart from its
 log can be corrupted. Write from one machine at a time. Where iCloud has evicted desk.db or
-bars.db, the desk refuses rather than create an empty one over it, naming the folder to open in
-Finder. That guard catches the `.icloud` stub that macOS 13 and earlier leave for an evicted file;
+bars.db, the desk never creates an empty one over either, and names the folder to open in Finder.
+Without desk.db every call is refused; without bars.db a live trade reads `not judged`, an entry is
+still recorded with its indicator results unknown, and `trade_bars` fails. That guard catches the `.icloud` stub that macOS 13 and earlier leave for an evicted file;
 on macOS 14 and later an evicted desk.db keeps its name, and is downloaded when it is opened.
 
 `trading-desk integrity` checks the log for shapes it should never hold: a trade with no entry, a
@@ -379,13 +380,14 @@ runs, so a correction or a void shows up on its next run.
 
 ## Limits
 
-- A split (a company changing its share count, which moves its price) or another corporate action,
+- A split or another corporate action,
   such as a merger or a special dividend, during an open live trade is not adjusted for, because
   Yahoo's bars are unadjusted.
 - A future's 1d or 1w indicator, and one on any timeframe Yahoo lacks (it has 1m, 2m, 5m, 15m, 30m,
   1h, 90m, 1d and 1w), is not computed: supply it in `market`.
-- `trade_bars` at 1m on a trade open for weeks can return a megabyte or more, which Claude Code
-  saves to a file.
+- `trade_bars` at 1m returns about 45,000 characters per trading day of a stock, and about three
+  times that for a future. Claude Code saves a reply over 50,000 characters to a file, so past about
+  a day the agent reads it from there; a trade open for weeks can return a megabyte or more.
 
 What 0.10 does not do: place orders, or send alerts; keep account balances or account-level P&L;
 convert currencies; take more than one exit per trade; expire orders (report an expired order
