@@ -225,8 +225,8 @@ def test_max_open_trades_counts_a_live_trade_as_open_until_its_exit_is_reported(
     live, _ = version(con, 'timeframes = ["15m"]\nmax_open_trades = 1\n')
     a = enter(con, live, at=NOW - timedelta(hours=2))
     assert a.outcome.status == "open"                     # a live trade reads from its record
-    held = enter(con, live, at=NOW - timedelta(hours=1), check_only=True)
-    assert result(held, "max_open_trades").ok is False
+    opened = enter(con, live, at=NOW - timedelta(hours=1), check_only=True)
+    assert result(opened, "max_open_trades").ok is False
     out = api.report(con, a.id, state="exited", kind="hand", price=101.0,
                      at=NOW - timedelta(minutes=30), reason="Invented.", now=NOW)
     assert (out.outcome.status, out.outcome.exited_at) == ("exited", NOW - timedelta(minutes=30))

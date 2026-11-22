@@ -166,7 +166,7 @@ TOOLS: dict[str, Tool] = {
         "market": _p("object", "The figures the rules read that you supply, by key, each a "
                      "number read at the bar acted on, e.g. {\"rsi_14_15m\": 28.5}.",
                      additionalProperties={"type": "number"}),
-        "checklist": _p("array", "One answer per checklist item of the version, as you judge "
+        "checklist": _p("array", "One answer per checklist item of the version, as you read "
                         "it: the item's exact text, a verdict, and a one-line reason.",
                         items={"type": "object", "properties": {
                             "item": {"type": "string"},
@@ -179,7 +179,7 @@ TOOLS: dict[str, Tool] = {
     }, ("run", "ticker", "side", "entry_type", "entry", "size", "currency", "reasons")),
     "move_order": Tool(api.move_order, (
         "Move a trade's stop, its target or both, from `at` on. Refused once the trade has "
-        "closed, and on a limit order its run's stop cancelled. The reply is the trade, with the "
+        "exited, and on a limit order its run's stop cancelled. The reply is the trade, with the "
         "move in `decisions.moves`, in time order."), {
         "trade": _TRADE,
         "reason": _p("string", "Why the order moves, exactly as the user wrote it."),
@@ -190,7 +190,8 @@ TOOLS: dict[str, Tool] = {
     "report": Tool(api.report, (
         "Report the trade's state as of `at`, never after now. `filled`: a limit order filled, "
         "at the limit unless a price is given. `cancelled`: it never will; give `why`. `open`: "
-        "the position is still held. `exited`: it closed; give `kind`, and a hand exit gives "
+        "the position is still open. `exited`: the position is out; give `kind`, and a hand "
+        "exit gives "
         "its price (a stop or target exit given none is at the level in force). Reports are the "
         "only source of a trade's outcome, in a live run as in a replay one. A "
         "limit's fill is reported before its exit. A wrong report is fixed with correct_trade "
@@ -198,7 +199,7 @@ TOOLS: dict[str, Tool] = {
         "record."), {
         "trade": _TRADE,
         "state": _p("string", "filled: the limit order filled; cancelled: it never will; open: "
-                    "the position is still held; exited: it closed.",
+                    "the position is still open; exited: the position is out.",
                     enum=["filled", "cancelled", "open", "exited"]),
         "at": _p("string", "The moment the trade was in that state: a UTC ISO-8601 time with "
                  "its offset, e.g. 2026-03-02T14:30:00Z."),
@@ -208,7 +209,7 @@ TOOLS: dict[str, Tool] = {
         "price": _p("number", "filled: the fill price (left out: the limit); exited: the exit "
                     "price, required for a hand exit."),
         "kind": _p("string", "exited only: stop (the stop filled), target (the target filled) "
-                   "or hand (closed by hand; left out: hand).", enum=["hand", "stop", "target"]),
+                   "or hand (exited by hand; left out: hand).", enum=["hand", "stop", "target"]),
         "why": _p("string", "cancelled only, and required there: not filled (the market never "
                   "reached the limit, or the order expired), pulled (withdrawn) or run "
                   "stopped (the run's stop cancelled it; only on a stopped run, dated at its "
@@ -221,7 +222,7 @@ TOOLS: dict[str, Tool] = {
         "`target`, `size`, `at`, or `point_value`, e.g. "
         "{\"stop\": 97.5}. One move: {\"move\": i, …} with its `stop`, `target` or `at`, where "
         "i is the move's place in get_trade's `decisions.moves`, from 0. One standing report: "
-        "{\"report\": \"fill\" | \"cancel\" | \"open\" | \"close\", …} with its `price`, `at`, "
+        "{\"report\": \"filled\" | \"cancelled\" | \"open\" | \"exited\", …} with its `price`, "
         "`why` or `kind`, where \"open\" is the latest open report. A field given as null is "
         "read as not given, so a correction never removes a stop or a target. A wrong run, "
         "ticker or side is not corrected: void the trade and enter it again with its original "
@@ -239,10 +240,11 @@ TOOLS: dict[str, Tool] = {
         "trade": _TRADE,
         "reason": _p("string", "Why it is withdrawn, exactly as the user wrote it."),
         "report": _p("string", "The one standing report to withdraw instead of the trade; "
-                     "open: the latest open report.", enum=["fill", "cancel", "open", "close"]),
+                     "open: the latest open report.",
+                     enum=["filled", "cancelled", "open", "exited"]),
     }, ("trade", "reason")),
     "get_trade": Tool(api.get_trade, (
-        "One trade, read now. `decisions`: the entry, its moves, its close and its reports, as "
+        "One trade, read now. `decisions`: the entry, its moves and its reports, as "
         "corrected. `outcome`: what its record reads as, with `status` (pending, open, exited or "
         "cancelled), the fill, the exit, R and cash. R is the move from "
         "the fill to the exit divided by the risk, the distance from the fill to the entry's "

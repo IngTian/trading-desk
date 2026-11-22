@@ -6,7 +6,7 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from desk import judge
+from desk import outcome
 
 _RESIDUE = 1e-9   # an R this close to 0 is a breakeven: float residue, not a win or a loss
 
@@ -21,7 +21,7 @@ class Row:
     tags: tuple[str, ...]          # its run's
     entry_type: str
     currency: str
-    outcome: judge.Outcome
+    outcome: outcome.Outcome
     planned_rr: float | None       # checks.reward_risk of the entry as corrected
 
 

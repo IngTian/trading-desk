@@ -2,14 +2,13 @@
 averages only. Every figure is invented."""
 import pytest
 
-from desk import judge
+from desk import outcome
 from desk.stats import Row, summarise
 
 
 def o(status, r=None, cash=None, fill=100.0, why=None):
-    return judge.Outcome(**{**judge._BLANK, "status": status, "r": r, "cash": cash, "fill": fill,
-                            "cancelled_why": why},
-                         notes=())
+    return outcome.Outcome(**dict(outcome.BLANK, status=status, r=r, cash=cash, fill=fill,
+                                  cancelled_why=why), notes=())
 
 
 def row(id, outcome, entry_type="market", planned=None, currency="USD", mode="replay", tags=(),

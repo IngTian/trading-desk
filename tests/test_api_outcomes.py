@@ -38,7 +38,7 @@ def test_a_replay_trade_reads_its_reports(con):
     assert (t.outcome.status, t.outcome.fill, t.outcome.filled_at) == ("open", 100.0, h(1))
     o = api.report(con, t.id, state="exited", kind="stop", reason="Stopped.", at=h(3),
                    now=LATER).outcome
-    assert (o.status, o.exit, o.exited_at, o.exit_reason, o.r, o.cash) == (
+    assert (o.status, o.exit, o.exited_at, o.exit_kind, o.r, o.cash) == (
         "exited", 98.0, h(3), "stop", -1.0, -20.0)
     assert api.get_trade(con, t.id).outcome == o
 
@@ -69,7 +69,7 @@ def test_a_live_market_trade_reads_open_until_an_exit_is_reported(con):
     assert api.get_trade(con, t.id, now=h(5)).outcome == o   # a read changes nothing
     x = api.report(con, t.id, state="exited", kind="stop", reason="Stopped.", at=h(3),
                    now=h(5)).outcome
-    assert (x.status, x.exit, x.exited_at, x.exit_reason, x.r, x.cash) == (
+    assert (x.status, x.exit, x.exited_at, x.exit_kind, x.r, x.cash) == (
         "exited", 98.0, h(3), "stop", -1.0, -20.0)
 
 
@@ -110,7 +110,7 @@ def test_limit_orders_placed_filled_and_cancelled_are_countable(con):
 def test_list_trades_filters_open_trades(con):
     done = enter(con, "gold-r1", at=h(1), now=LATER)
     api.report(con, done.id, state="exited", kind="target", reason="Target.", at=h(3), now=LATER)
-    held = enter(con, "gold-r1", at=h(1), now=LATER)
+    opened = enter(con, "gold-r1", at=h(1), now=LATER)
     waiting = enter(con, "gold-r1", entry_type="limit", at=h(1), now=LATER)
     pulled = enter(con, "gold-r1", entry_type="limit", at=h(1), now=LATER)
     api.report(con, pulled.id, state="cancelled", reason="Pulled.", why="pulled", at=h(2),
@@ -118,7 +118,7 @@ def test_list_trades_filters_open_trades(con):
     gone = enter(con, "gold-r1", at=h(1), now=LATER)
     api.void_trade(con, gone.id, reason="Duplicate.", now=LATER)
     ids = lambda **kw: [t.id for t in api.list_trades(con, run="gold-r1", **kw)]  # noqa: E731
-    assert ids(open=True) == [held.id, waiting.id]
+    assert ids(open=True) == [opened.id, waiting.id]
     assert ids(open=False) == [done.id, pulled.id, gone.id]
 
 
@@ -131,7 +131,7 @@ def test_a_void_keeps_its_outcome_beside_the_void(con):
 def test_a_replay_open_report_is_kept_and_changes_no_outcome(con):
     t = enter(con, "gold-r1", at=h(1), now=LATER)
     v = api.report(con, t.id, state="open", reason="Still in.", at=h(2), now=LATER)
-    assert v.outcome == t.outcome and v.decisions.held.at == h(2)
+    assert v.outcome == t.outcome and v.decisions.open.at == h(2)
 
 
 @pytest.mark.parametrize(("call", "says"), [

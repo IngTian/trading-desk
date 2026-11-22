@@ -1,4 +1,4 @@
-"""Integrity checker for the v4 log.
+"""Integrity checker for the v5 log.
 
 Each invariant is a named check returning failure lines (empty when healthy). The log is
 append-only, so a damaged row cannot be repaired in place; these checks find what the API
@@ -93,7 +93,7 @@ def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime],
 def _decision_dates(con: sqlite3.Connection) -> list[str]:
     """By effective time: an entry is not before its run's start, nor (unless the trade is void)
     at or after its run's stop; a move is not before the entry and is strictly before the
-    close; a close is strictly after the entry.
+    exit; an exit is strictly after the entry.
 
     A trade is skipped when it is `_unfoldable`. A fold that fails for any other reason, such as
     a malformed correction payload, is reported here."""
@@ -114,10 +114,10 @@ def _decision_dates(con: sqlite3.Connection) -> list[str]:
             for m in d.moves:
                 if m.at < d.entry.at:
                     failures.append(f"{who}: move at {m.at.isoformat()} is before the entry")
-                if d.close_at is not None and m.at >= d.close_at:
-                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the close")
-            if d.close_at is not None and d.close_at <= d.entry.at:
-                failures.append(f"{who}: closed at {d.close_at.isoformat()}, not after the entry")
+                if d.exited is not None and m.at >= d.exited.at:
+                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the exit")
+            if d.exited is not None and d.exited.at <= d.entry.at:
+                failures.append(f"{who}: exited at {d.exited.at.isoformat()}, not after the entry")
         except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
             failures.append(f"{who}: fold failed: {type(exc).__name__}: {exc}")
     return failures
@@ -159,9 +159,9 @@ def _correction_target(con: sqlite3.Connection) -> list[str]:
     failures = []
     for e in store.events(con):
         if e["kind"] == "corrected":
-            what, kinds = "correction", ("entered", "order_moved", *model._REPORTS)
+            what, kinds = "correction", ("entered", "order_moved", *model.REPORTS)
         elif e["kind"] == "voided" and e["corrects"] is not None:
-            what, kinds = "withdrawal", model._REPORTS
+            what, kinds = "withdrawal", model.REPORTS
         else:
             continue
         named = con.execute("SELECT * FROM events WHERE id = ?", (e["corrects"],)).fetchone()
@@ -190,12 +190,12 @@ def _nothing_after_void(con: sqlite3.Connection) -> list[str]:
 
 
 def _one_report(con: sqlite3.Connection) -> list[str]:
-    """At most one standing (not withdrawn) fill, cancellation and close per trade. Not `held`:
+    """At most one standing (not withdrawn) fill, cancellation and exit per trade. Not `open`:
     several open reports may stand."""
     return [f"trade {r['trade_id']}: has {r['n']} standing {r['kind']} events, expected at most 1"
             for r in con.execute(
                 "SELECT trade_id, kind, COUNT(*) AS n FROM events e"
-                " WHERE kind IN ('filled', 'cancelled', 'closed') AND NOT EXISTS ("
+                " WHERE kind IN ('filled', 'cancelled', 'exited') AND NOT EXISTS ("
                 "SELECT 1 FROM events v WHERE v.kind = 'voided' AND v.corrects = e.id"
                 " AND v.trade_id = e.trade_id)"
                 " GROUP BY trade_id, kind HAVING n > 1 ORDER BY trade_id, kind")]

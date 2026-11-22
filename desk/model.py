@@ -1,8 +1,8 @@
 """A trade's decisions, folded from the event log. Nothing is stored but the decisions.
 
-`decisions_of` reads a trade's `entered` event, its moves, its reports, its close and its void,
-with every correction read in place of the event it names. What the decisions led to -- fills,
-exits, R and cash -- is derived on read, from `Decisions` and its reports alone (`judge.replay`).
+`decisions_of` reads a trade's `entered` event, its moves, its reports and its void, with every
+correction read in place of the event it names. What the decisions led to -- fills, exits, R and
+cash -- is derived on read, from `Decisions` and its reports alone (`outcome.of`).
 
 ## Payload-key contract (what each trade event carries)
 
@@ -16,15 +16,14 @@ exits, R and cash -- is derived on read, from `Decisions` and its reports alone 
 - **cancelled**: `reason`, `why` (`not filled`: the market never reached the limit, or the order
   expired unfilled; `pulled`: the author withdrew it; `run stopped`: the run's stop cancelled
   it, dated at the stop)
-- **held**: `reason`: the position was still open at `at` (a report of state `open`)
-- **closed**: `reason`, and `kind` when given (`hand`, `stop` or `target`; absent: `hand`) and
-  `price` when given. A hand exit gives its price; a stop or target exit given none is at the
-  level in force
+- **open**: `reason`: the position was still open at `at`
+- **exited**: `reason`, `kind` (`hand`, `stop` or `target`) and `price` when given. A hand exit
+  gives its price; a stop or target exit given none is at the level in force
 - **corrected**: `fields` (the named event's fields that change, `at` among them), `reason`;
-  `corrects` names an `entered`, `order_moved`, `filled`, `cancelled`, `held` or `closed` event.
+  `corrects` names an `entered`, `order_moved`, `filled`, `cancelled`, `open` or `exited` event.
   Its own `at` is when it was written, which the fold never reads.
 - **voided**: `reason`, with `at` as for `corrected`. `corrects` NULL voids the trade; naming a
-  `filled`, `cancelled`, `held` or `closed` event, it **withdraws** that report, which the fold
+  `filled`, `cancelled`, `open` or `exited` event, it **withdraws** that report, which the fold
   then reads as absent. A `voided` naming any other kind of event is not read (integrity reports
   it).
 """
@@ -111,18 +110,18 @@ class Move:
 class Report:
     """A state the agent reported, taken as given."""
     at: dt.datetime
-    price: float | None  # a fill's price as given; None: the limit. Always None on the others
+    price: float | None  # a fill's or an exit's price as given; None: the limit, or not given
     reason: str
     # a cancellation's cause, "not filled" | "pulled" | "run stopped"; None on the others
     why: str | None = None
+    # an exit's, "hand" | "stop" | "target"; None on the others
+    kind: str | None = None
 
 
 @dataclass(frozen=True)
 class Decisions:
     entry: Entry
     moves: tuple[Move, ...]       # in `at` order
-    close_at: dt.datetime | None
-    close_reason: str | None
     voided: bool
     reasons: str
     screenshots: tuple[dict, ...]
@@ -130,12 +129,11 @@ class Decisions:
     point_value: float
     currency: str
     # The standing reports, last and defaulted so a Decisions built without them still works.
-    fill: Report | None = None
-    cancel: Report | None = None
-    held: Report | None = None        # the standing open report with the latest `at`
-    held_first: Report | None = None  # the one with the earliest (the same one when one stands)
-    close_kind: str | None = None     # "hand" | "stop" | "target" while closed
-    close_price: float | None = None  # as given with the close; None: not given
+    filled: Report | None = None
+    cancelled: Report | None = None
+    open: Report | None = None        # the standing open report with the latest `at`
+    open_first: Report | None = None  # the one with the earliest (the same one when one stands)
+    exited: Report | None = None
     # What was shown at entry, as stored: None when the entry holds no results.
     checks: tuple[dict, ...] | None = None
     market: dict = field(default_factory=dict)
@@ -157,14 +155,16 @@ def decisions_of(con: sqlite3.Connection, trade_id: str) -> Decisions:
     return _fold(con, trade_id)[0]
 
 
-_REPORTS = ("filled", "cancelled", "held", "closed")  # the kinds a withdrawal can name
+# The four reports, in one vocabulary: the `report` states, the stored event kinds, the fields
+# of `Decisions`, and what `correct_trade` and `void_trade` take.
+REPORTS = ("filled", "cancelled", "open", "exited")
 
 
 def _fold(con: sqlite3.Connection, trade_id: str
           ) -> tuple[Decisions, int, tuple[int, ...], dict[str, int]]:
     """`decisions_of`, plus the ids a correction names: the `entered` event's, each move's in
-    `moves` order, and the standing reports' as {"fill", "cancel", "open", "close"}, each when
-    present ("open": the latest standing open report)."""
+    `moves` order, and the standing reports' keyed by `REPORTS`, each when present ("open": the
+    latest standing open report)."""
     events = store.events(con, trade_id=trade_id)
     kind = {e["id"]: e["kind"] for e in events}
     corrects = {e["id"]: e["corrects"] for e in events}
@@ -181,7 +181,7 @@ def _fold(con: sqlite3.Connection, trade_id: str
         payload[named].update(fields)
 
     withdrawn = {corrects[id] for id in kind
-                 if kind[id] == "voided" and kind.get(corrects[id]) in _REPORTS}
+                 if kind[id] == "voided" and kind.get(corrects[id]) in REPORTS}
 
     def when(id: int) -> dt.datetime:
         return dt.datetime.fromisoformat(at[id])
@@ -189,38 +189,36 @@ def _fold(con: sqlite3.Connection, trade_id: str
     def of(k: str) -> list[int]:
         return [id for id in kind if kind[id] == k and id not in withdrawn]
 
-    def report(id: int | None, price=None, why=None) -> Report | None:
+    def report(id: int | None, price=None, why=None, kind=None) -> Report | None:
         return None if id is None else Report(at=when(id), price=price,
-                                               reason=payload[id]["reason"], why=why)
+                                              reason=payload[id]["reason"], why=why, kind=kind)
 
     entered = of("entered")[0]
     moves = sorted(of("order_moved"), key=when)  # stable: a tie keeps recording order
     # The first standing one by id: the API keeps at most one, and integrity reports a second.
-    filled, cancelled, closed = (next(iter(of(k)), None) for k in ("filled", "cancelled", "closed"))
+    filled, cancelled, exited = (next(iter(of(k)), None) for k in ("filled", "cancelled", "exited"))
     # Several open reports may stand; a tie on `at` goes to the last by id, or the first.
-    latest = max(of("held"), key=lambda id: (when(id), id), default=None)
-    earliest = min(of("held"), key=lambda id: (when(id), id), default=None)
+    latest = max(of("open"), key=lambda id: (when(id), id), default=None)
+    earliest = min(of("open"), key=lambda id: (when(id), id), default=None)
     p, row = payload[entered], store.trade(con, trade_id)
     shown, answers = p.get("checks"), p.get("checklist", [])   # a damaged one: as stored
-    reports = {k: id for k, id in (("fill", filled), ("cancel", cancelled), ("open", latest),
-                                   ("close", closed)) if id is not None}
+    reports = {k: id for k, id in (("filled", filled), ("cancelled", cancelled), ("open", latest),
+                                   ("exited", exited)) if id is not None}
     return Decisions(
         entry=Entry(type=p["entry_type"], price=p["entry"], stop=p["stop"], target=p["target"],
                     size=p["size"], at=when(entered)),
         moves=tuple(Move(at=when(m), stop=payload[m].get("stop"), target=payload[m].get("target"),
                          reason=payload[m]["reason"]) for m in moves),
-        close_at=None if closed is None else when(closed),
-        close_reason=None if closed is None else payload[closed]["reason"],
         voided=any(kind[id] == "voided" and corrects[id] is None for id in kind),
         reasons=p["reasons"], screenshots=tuple(p["screenshots"]),
         point_value=p.get("point_value", row["point_value"]),
         currency=p.get("currency", row["currency"]),
         # Read as stored, not coerced: a damaged price folds, and report_problem meets it.
-        fill=report(filled, price=payload.get(filled, {}).get("price")),
-        cancel=report(cancelled, why=payload.get(cancelled, {}).get("why")),
-        held=report(latest), held_first=report(earliest),
-        close_kind=None if closed is None else payload[closed].get("kind", "hand"),
-        close_price=payload.get(closed, {}).get("price"),
+        filled=report(filled, price=payload.get(filled, {}).get("price")),
+        cancelled=report(cancelled, why=payload.get(cancelled, {}).get("why")),
+        open=report(latest), open_first=report(earliest),
+        exited=report(exited, price=payload.get(exited, {}).get("price"),
+                      kind=payload.get(exited, {}).get("kind")),
         checks=tuple(shown) if isinstance(shown, list) else shown,
         market=p.get("market", {}),
         checklist=tuple(answers) if isinstance(answers, list) else answers,
@@ -243,15 +241,14 @@ def report_problem(trade: str, d: Decisions, *, side: str,
                    stopped: dt.datetime | None) -> str | None:
     """The first way d's reports do not fit the record, as a refusal naming the fix; None when
     they fit. The api's `_consistent` and integrity's `reports` both read it, so every report
-    rule lives here. A trade's entry against its run, a move against the entry and the close,
-    and a close against the entry stay the api's inline checks and integrity's decision_dates.
+    rule lives here. A trade's entry against its run, a move against the entry and the exit,
+    and an exit against the entry stay the api's inline checks and integrity's decision_dates.
 
     `stopped` is the run's stop, when it has one."""
-    e, f, c, h, h1 = d.entry, d.fill, d.cancel, d.held, d.held_first
+    e, f, c, h, h1, x = d.entry, d.filled, d.cancelled, d.open, d.open_first, d.exited
     fp = e.price if f is None or f.price is None else f.price
     position = e.type == "market" or f is not None
-    closed = d.close_at is not None
-    close_at = d.close_at.isoformat() if closed else None
+    exit_at = x.at.isoformat() if x is not None else None
     # 1-5: the fill
     if e.type == "market" and (f or c):
         return (f"Trade {shown(trade)} was a market entry, filled when it was entered; only a "
@@ -262,7 +259,7 @@ def report_problem(trade: str, d: Decisions, *, side: str,
         return (f"The order of trade {shown(trade)} cannot both fill (at {f.at.isoformat()}) and "
                 f"be "
                 f"cancelled (at {c.at.isoformat()}); withdraw the wrong report with "
-                "void_trade with report \"fill\" or \"cancel\".")
+                "void_trade with report \"filled\" or \"cancelled\".")
     if f and f.at < e.at:
         return (f"Trade {shown(trade)} was entered at {e.at.isoformat()}; its fill at "
                 f"{f.at.isoformat()} cannot be before that, so give one of them its real `at`.")
@@ -278,8 +275,8 @@ def report_problem(trade: str, d: Decisions, *, side: str,
                 f"limit "
                 "order fills at its price or better, so give the price it filled at.")
     # 6: the vocabulary, before any rule below reads a kind
-    if closed and d.close_kind not in ("hand", "stop", "target"):
-        return (f"The close of trade {shown(trade)} has kind {shown(d.close_kind)}; use "
+    if x is not None and x.kind not in ("hand", "stop", "target"):
+        return (f"The exit of trade {shown(trade)} has kind {shown(x.kind)}; use "
                 "\"hand\", \"stop\" or \"target\".")
     if c and c.why not in ("not filled", "pulled", "run stopped"):
         return (f"The cancellation of trade {shown(trade)} has why {shown(c.why)}; use \"not "
@@ -309,48 +306,48 @@ def report_problem(trade: str, d: Decisions, *, side: str,
                 f"its run "
                 f"stopped at {stopped.isoformat()}, which had already cancelled it: give the "
                 "cancellation its real `at` (at or before the stop), or withdraw it "
-                "(void_trade with report \"cancel\") and the run stop's cancellation "
+                "(void_trade with report \"cancelled\") and the run stop's cancellation "
                 "stands. A run stop, once recorded, cannot be moved: stop_run, if that is the "
                 "call refused, takes an `at` at or after the cancellation.")
-    if c and closed:
+    if c and x is not None:
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, so it "
                 f"has no "
-                f"position to close (closed at {close_at}); withdraw the wrong one with "
-                "void_trade with report \"cancel\" or \"close\"; to pull a limit you closed by "
-                "mistake, withdraw the close (void_trade with report \"close\"), then report "
+                f"position to exit (exited at {exit_at}); withdraw the wrong one with "
+                "void_trade with report \"cancelled\" or \"exited\"; to pull a limit you exited "
+                "by mistake, withdraw the exit (void_trade with report \"exited\"), then report "
                 "the cancellation.")
-    # 9-11: the close
-    if closed and not position:
-        return (f"The exit of trade {shown(trade)} at {close_at} needs a position, and its limit "
+    # 9-11: the exit
+    if x is not None and not position:
+        return (f"The exit of trade {shown(trade)} at {exit_at} needs a position, and its limit "
                 f"order has "
                 "no fill reported: report the fill (report(trade, state=\"filled\", …)) before the "
                 "exit, and withdraw the exit before the fill.")
-    if closed and f and d.close_at < f.at:
-        return (f"Trade {shown(trade)} was closed at {close_at}, before its fill at "
-                f"{f.at.isoformat()}; a fill comes at or before the close, so give one of them "
+    if x is not None and f and x.at < f.at:
+        return (f"Trade {shown(trade)} exited at {exit_at}, before its fill at "
+                f"{f.at.isoformat()}; a fill comes at or before the exit, so give one of them "
                 "its real `at`.")
-    if closed and d.close_kind == "hand" and d.close_price is None:
-        return (f"The hand exit of trade {shown(trade)} at {close_at} gives no price; report it "
+    if x is not None and x.kind == "hand" and x.price is None:
+        return (f"The hand exit of trade {shown(trade)} at {exit_at} gives no price; report it "
                 "with the price it filled at (report(trade, state=\"exited\", kind=\"hand\", "
                 "price=…, at=…, reason=…)).")
-    if d.close_kind in ("stop", "target"):
-        kind = d.close_kind
-        level = in_force(d, d.close_at)[0 if kind == "stop" else 1]
+    if x is not None and x.kind in ("stop", "target"):
+        kind = x.kind
+        level = in_force(d, x.at)[0 if kind == "stop" else 1]
         if level is None:
-            return (f"Trade {shown(trade)} has no {kind} in force at {close_at}, so it cannot "
+            return (f"Trade {shown(trade)} has no {kind} in force at {exit_at}, so it cannot "
                     f"exit at "
                     "one; report the exit with kind=\"hand\" and its price.")
-        if kind == "stop" and d.close_price is None and _signed(side, fp, level) >= 0:
+        if kind == "stop" and x.price is None and _signed(side, fp, level) >= 0:
             return (f"The position of trade {shown(trade)} opened at {fp}, at or beyond its stop "
                     f"{level}, "
                     "so the stop fired at once, at that price or worse; give the price it "
                     "filled at (price=…).")  # the level would read as a win
-        price = level if d.close_price is None else d.close_price
+        price = level if x.price is None else x.price
         if kind == "stop" and _signed(side, level, price) > 0:
             return (f"The stop exit of trade {shown(trade)} at {price} is better than its stop "
                     f"{level}: a "
                     "stop fills at its price or worse, so give the price it filled at, or "
-                    "kind=\"hand\" if it was closed by hand.")
+                    "kind=\"hand\" if it was exited by hand.")
         if kind == "target" and _signed(side, level, price) < 0:
             return (f"The target exit of trade {shown(trade)} at {price} is worse than its target "
                     f"{level}: a target fills at its price or better, so give the price it "
@@ -360,21 +357,21 @@ def report_problem(trade: str, d: Decisions, *, side: str,
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, so it "
                 f"has no "
                 "position to report open; if it had in fact filled, withdraw the cancellation "
-                "(void_trade with report \"cancel\") and report the fill first.")
+                "(void_trade with report \"cancelled\") and report the fill first.")
     if h and not position:  # pending by the record, as in rule 9
         return (f"The limit order of trade {shown(trade)} has no fill reported, so there is no "
                 f"position to "
                 "report open: report the fill first (report(trade, state=\"filled\", at=…, "
                 "reason=…)).")
     opened = e.at if f is None else f.at
-    if h and h1.at < opened:  # the earliest, so an older open report is held to it too
+    if h and h1.at < opened:  # the earliest, so an older open report is bound to it too
         return (f"The position of trade {shown(trade)} opened at {opened.isoformat()}, so it "
                 f"cannot be "
                 f"reported open at {h1.at.isoformat()}, before that; give one of them its real "
                 "`at`.")
-    if h and closed and h.at >= d.close_at:  # a priceless close too: the author wanted out
-        return (f"Trade {shown(trade)} was closed at {close_at} and reported open at "
-                f"{h.at.isoformat()}; every open report comes before the close, so give one of "
-                "them its real `at`, or, if the trade is in fact still open, withdraw the close "
-                "(void_trade with report \"close\").")
+    if h and x is not None and h.at >= x.at:  # a priceless exit too: the author wanted out
+        return (f"Trade {shown(trade)} exited at {exit_at} and was reported open at "
+                f"{h.at.isoformat()}; every open report comes before the exit, so give one of "
+                "them its real `at`, or, if the trade is in fact still open, withdraw the exit "
+                "(void_trade with report \"exited\").")
     return None

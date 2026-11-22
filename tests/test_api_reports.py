@@ -43,7 +43,7 @@ def cancel(con, id, **kw):
                                   "at": T2, "now": LATER, **kw})
 
 
-def held(con, id, **kw):
+def opened(con, id, **kw):
     return api.report(con, id, **{"state": "open", "reason": "Still in.", "at": T2, "now": LATER,
                                   **kw})
 
@@ -60,39 +60,39 @@ def last(con, id):
 
 def test_a_fill_is_one_filled_event_at_the_limit_unless_a_price_is_given(con):
     t = enter(con)
-    assert fill(con, t.id).decisions.fill == model.Report(at=T2, price=None, reason="Filled.")
+    assert fill(con, t.id).decisions.filled == model.Report(at=T2, price=None, reason="Filled.")
     assert last(con, t.id) == ("filled", T2.isoformat(), None, {"reason": "Filled."})
     u = enter(con)
-    assert fill(con, u.id, price=99.75).decisions.fill.price == 99.75
+    assert fill(con, u.id, price=99.75).decisions.filled.price == 99.75
     assert last(con, u.id)[3] == {"reason": "Filled.", "price": 99.75}
 
 
 def test_a_cancellation_is_one_cancelled_event(con):
     t = enter(con)
-    assert cancel(con, t.id).decisions.cancel == model.Report(at=T2, price=None, reason="Pulled.",
-                                                              why="pulled")
+    assert cancel(con, t.id).decisions.cancelled == model.Report(
+        at=T2, price=None, reason="Pulled.", why="pulled")
     assert last(con, t.id) == ("cancelled", T2.isoformat(), None,
                                {"reason": "Pulled.", "why": "pulled"})
     u = enter(con)
-    assert cancel(con, u.id, why="not filled").decisions.cancel.why == "not filled"
+    assert cancel(con, u.id, why="not filled").decisions.cancelled.why == "not filled"
 
 
-def test_an_exit_is_one_closed_event_with_its_kind_and_its_price(con):
+def test_an_exit_is_one_exited_event_with_its_kind_and_its_price(con):
     a, b = enter(con, entry_type="market"), enter(con, entry_type="market")
     d = out(con, a.id, kind="stop").decisions
-    assert (d.close_at, d.close_kind, d.close_price) == (T3, "stop", None)
+    assert (d.exited.at, d.exited.kind, d.exited.price) == (T3, "stop", None)
     assert last(con, a.id)[3] == {"reason": "Out.", "kind": "stop"}
     d = out(con, b.id, price=101.0).decisions
-    assert (d.close_kind, d.close_price) == ("hand", 101.0)
-    assert last(con, b.id)[3] == {"reason": "Out.", "price": 101.0}
+    assert (d.exited.kind, d.exited.price) == ("hand", 101.0)
+    assert last(con, b.id)[3] == {"reason": "Out.", "kind": "hand", "price": 101.0}
 
 
-def test_an_open_report_is_one_held_event_and_the_latest_stands(con):
+def test_an_open_report_is_one_open_event_and_the_latest_stands(con):
     t = enter(con, entry_type="market")
-    held(con, t.id, at=T3)
-    v = held(con, t.id)                                    # dated earlier, logged later
-    assert v.decisions.held == model.Report(at=T3, price=None, reason="Still in.")
-    assert last(con, t.id) == ("held", T2.isoformat(), None, {"reason": "Still in."})
+    opened(con, t.id, at=T3)
+    v = opened(con, t.id)                                    # dated earlier, logged later
+    assert v.decisions.open == model.Report(at=T3, price=None, reason="Still in.")
+    assert last(con, t.id) == ("open", T2.isoformat(), None, {"reason": "Still in."})
 
 
 @pytest.mark.parametrize("run", ["dip-buyer-r1", "dip-buyer-r2"], ids=["live", "replay"])
@@ -106,13 +106,13 @@ def test_a_report_needs_its_at_live_and_replay(con, run):
 
 
 SETUPS = {  # what a case does before the call it expects refused
-    "fill": lambda con, t: fill(con, t),
+    "filled": lambda con, t: fill(con, t),
     "fill 99.75": lambda con, t: fill(con, t, price=99.75),
     "fill at T3": lambda con, t: fill(con, t, at=T3),
-    "cancel": lambda con, t: cancel(con, t),
+    "cancelled": lambda con, t: cancel(con, t),
     "cancel at T3": lambda con, t: cancel(con, t, at=T3),
-    "open": lambda con, t: held(con, t),
-    "open at T3": lambda con, t: held(con, t, at=T3),
+    "open": lambda con, t: opened(con, t),
+    "open at T3": lambda con, t: opened(con, t, at=T3),
     "hand exit": lambda con, t: out(con, t, price=101.0),
     "stop exit": lambda con, t: out(con, t, kind="stop"),
     "move at T3": lambda con, t: api.move_order(con, t, stop=99.0, reason="x", at=T3, now=LATER),
@@ -121,15 +121,15 @@ SETUPS = {  # what a case does before the call it expects refused
 }
 MARKET = dict(entry_type="market")
 REFUSED = [  # (id, entry kwargs, setups, the call refused, a substring of the refusal)
-    ("a state that is not known", {}, [], lambda con, t: fill(con, t, state="closed"), "state"),
+    ("a state that is not known", {}, [], lambda con, t: fill(con, t, state="shut"), "state"),
     ("a field the state does not take", {}, [], lambda con, t: fill(con, t, kind="stop"),
      "does not go with"),
     ("a fill on a market entry", MARKET, [], lambda con, t: fill(con, t), "market entry"),
     ("a cancellation on a market entry", MARKET, [], lambda con, t: cancel(con, t), "market entry"),
-    ("a second fill", {}, ["fill"], lambda con, t: fill(con, t), "already reported"),
-    ("a second cancellation", {}, ["cancel"], lambda con, t: cancel(con, t, at=T3),
+    ("a second fill", {}, ["filled"], lambda con, t: fill(con, t), "already reported"),
+    ("a second cancellation", {}, ["cancelled"], lambda con, t: cancel(con, t, at=T3),
      "already reported"),
-    ("a fill on a cancelled order", {}, ["cancel"], lambda con, t: fill(con, t),
+    ("a fill on a cancelled order", {}, ["cancelled"], lambda con, t: fill(con, t),
      "cannot both fill"),
     ("a fill worse than the limit", {}, [], lambda con, t: fill(con, t, price=100.5),
      "worse than its limit 100.0"),
@@ -156,8 +156,8 @@ REFUSED = [  # (id, entry kwargs, setups, the call refused, a substring of the r
      "with the price"),
     ("a live exit on a limit with no fill", dict(run=LIVE), [],
      lambda con, t: out(con, t, kind="stop"), "no fill reported"),
-    ("an exit after a close", MARKET, ["stop exit"],
-     lambda con, t: out(con, t, price=101.0, at=T4), "already closed"),
+    ("a second exit", MARKET, ["stop exit"],
+     lambda con, t: out(con, t, price=101.0, at=T4), "already exited"),
     ("a stop exit better than the stop", MARKET, [],
      lambda con, t: out(con, t, kind="stop", price=99.0), "better than its stop 98.5"),
     ("a target exit worse than the target", MARKET, [],
@@ -168,26 +168,26 @@ REFUSED = [  # (id, entry kwargs, setups, the call refused, a substring of the r
      f"entered at {T1.isoformat()}"),
     ("a cancellation before a move", {}, ["move at T3"], lambda con, t: cancel(con, t),
      f"has a move at {T3.isoformat()}"),
-    ("a move after a cancellation", {}, ["cancel"],
+    ("a move after a cancellation", {}, ["cancelled"],
      lambda con, t: api.move_order(con, t, stop=99.0, reason="x", at=T3, now=LATER),
      "has a move at"),
-    ("an exit on a cancelled order", {}, ["cancel"], lambda con, t: out(con, t, price=101.0),
-     "no position to close"),
-    ("an open report on a limit with no fill", {}, [], lambda con, t: held(con, t),
+    ("an exit on a cancelled order", {}, ["cancelled"], lambda con, t: out(con, t, price=101.0),
+     "no position to exit"),
+    ("an open report on a limit with no fill", {}, [], lambda con, t: opened(con, t),
      "report the fill first"),
-    ("an open report on a cancelled order", {}, ["cancel"], lambda con, t: held(con, t, at=T3),
+    ("an open report on a cancelled order", {}, ["cancelled"], lambda con, t: opened(con, t, at=T3),
      "withdraw the cancellation"),
-    ("an open report before the fill", {}, ["fill at T3"], lambda con, t: held(con, t),
+    ("an open report before the fill", {}, ["fill at T3"], lambda con, t: opened(con, t),
      f"opened at {T3.isoformat()}, so it cannot be reported open"),
     ("an older open report before the entry", MARKET, ["open at T3"],
-     lambda con, t: held(con, t, at=NOW),
+     lambda con, t: opened(con, t, at=NOW),
      f"opened at {T1.isoformat()}, so it cannot be reported open"),
     ("a report dated after now", MARKET, [],
-     lambda con, t: held(con, t, at=LATER + timedelta(hours=1)), "after now"),
-    ("an open report after an exit", MARKET, ["stop exit"], lambda con, t: held(con, t, at=T4),
-     "and reported open at"),
+     lambda con, t: opened(con, t, at=LATER + timedelta(hours=1)), "after now"),
+    ("an open report after an exit", MARKET, ["stop exit"], lambda con, t: opened(con, t, at=T4),
+     "and was reported open at"),
     ("an exit at an open report's moment", MARKET, ["open"],
-     lambda con, t: out(con, t, kind="stop", at=T2), "and reported open at"),
+     lambda con, t: out(con, t, kind="stop", at=T2), "and was reported open at"),
     ("a kind that is not known", MARKET, [], lambda con, t: out(con, t, kind="trailing"), "kind"),
     ("a price that is not a number", {}, [], lambda con, t: fill(con, t, price="99"), "price"),
 ]
@@ -209,61 +209,62 @@ def test_a_report_that_does_not_fit_the_record_is_refused_and_writes_nothing(con
 def test_reports_are_corrected_in_place(con):
     t = enter(con)
     fill(con, t.id, price=99.75)
-    v = api.correct_trade(con, t.id, fields={"report": "fill", "price": 99.5}, reason="Typo.",
+    v = api.correct_trade(con, t.id, fields={"report": "filled", "price": 99.5}, reason="Typo.",
                           now=LATER)
     filled = [e["id"] for e in store.events(con, trade_id=t.id) if e["kind"] == "filled"][0]
-    assert v.decisions.fill.price == 99.5 and last(con, t.id)[:3] == (
+    assert v.decisions.filled.price == 99.5 and last(con, t.id)[:3] == (
         "corrected", LATER.isoformat(), filled)
     m = enter(con, entry_type="market")
     out(con, m.id, kind="stop")
-    d = api.correct_trade(con, m.id, fields={"report": "close", "kind": "hand", "price": 99.0,
+    d = api.correct_trade(con, m.id, fields={"report": "exited", "kind": "hand", "price": 99.0,
                                              "at": T4}, reason="By hand.", now=LATER).decisions
-    assert (d.close_kind, d.close_price, d.close_at) == ("hand", 99.0, T4)
+    assert (d.exited.kind, d.exited.price, d.exited.at) == ("hand", 99.0, T4)
     c = enter(con)
     cancel(con, c.id)
-    k = api.correct_trade(con, c.id, fields={"report": "cancel", "at": T3, "why": "not filled"},
-                          reason="It was never reached.", now=LATER).decisions.cancel
+    k = api.correct_trade(con, c.id, fields={"report": "cancelled", "at": T3, "why": "not filled"},
+                          reason="It was never reached.", now=LATER).decisions.cancelled
     assert (k.at, k.why) == (T3, "not filled")
     o = enter(con, entry_type="market")
-    held(con, o.id)
+    opened(con, o.id)
     assert api.correct_trade(con, o.id, fields={"report": "open", "at": T3}, reason="Later.",
-                             now=LATER).decisions.held.at == T3
+                             now=LATER).decisions.open.at == T3
 
 
 CORRECTIONS = [  # (id, entry kwargs, setups, fields, a substring of the refusal)
-    ("a report that was not made", {}, [], {"report": "fill", "price": 99.0}, "no fill to correct"),
-    ("a field a fill does not have", {}, ["fill"], {"report": "fill", "kind": "stop"},
+    ("a report that was not made", {}, [], {"report": "filled", "price": 99.0},
+     "no fill to correct"),
+    ("a field a fill does not have", {}, ["filled"], {"report": "filled", "kind": "stop"},
      "cannot be corrected on a fill"),
     ("a field an open report does not have", MARKET, ["open"], {"report": "open", "price": 99.0},
      "cannot be corrected on an open report"),
-    ("a fill price worse than the limit", {}, ["fill"], {"report": "fill", "price": 100.5},
+    ("a fill price worse than the limit", {}, ["filled"], {"report": "filled", "price": 100.5},
      "worse than its limit"),
     ("the limit corrected under a fill", {}, ["fill 99.75"], {"entry": 99.5},
      "worse than its limit 99.5"),
-    ("a fill moved past the close", {}, ["fill", "hand exit"], {"report": "fill", "at": T4},
+    ("a fill moved past the exit", {}, ["filled", "hand exit"], {"report": "filled", "at": T4},
      "before its fill"),
-    ("a stop exit's price past the stop", MARKET, ["stop exit"], {"report": "close", "price": 99.0},
-     "better than its stop"),
-    ("a close moved onto the entry", MARKET, ["stop exit"], {"report": "close", "at": T1},
+    ("a stop exit's price past the stop", MARKET, ["stop exit"],
+     {"report": "exited", "price": 99.0}, "better than its stop"),
+    ("an exit moved onto the entry", MARKET, ["stop exit"], {"report": "exited", "at": T1},
      f"entered at {T1.isoformat()}"),
-    ("an open report moved onto the close", MARKET, ["open", "stop exit"],
-     {"report": "open", "at": T3}, "and reported open at"),
+    ("an open report moved onto the exit", MARKET, ["open", "stop exit"],
+     {"report": "open", "at": T3}, "and was reported open at"),
     ("the latest open report moved before the entry", MARKET, ["open", "open at T3"],
      {"report": "open", "at": NOW}, f"opened at {T1.isoformat()}, so it cannot be reported open"),
-    ("a fill moved past an older open report", {}, ["fill", "open", "open at T3"],
-     {"report": "fill", "at": T3}, f"opened at {T3.isoformat()}, so it cannot be reported open"),
+    ("a fill moved past an older open report", {}, ["filled", "open", "open at T3"],
+     {"report": "filled", "at": T3}, f"opened at {T3.isoformat()}, so it cannot be reported open"),
     ("a market entry moved past an open report", MARKET, ["open"], {"at": T3},
      f"opened at {T3.isoformat()}, so it cannot be reported open"),
-    ("a report moved after now", {}, ["fill"], {"report": "fill", "at": LATER + timedelta(hours=1)},
-     "after now"),
-    ("a move and a report at once", {}, ["fill"], {"move": 0, "report": "fill", "price": 99.0},
+    ("a report moved after now", {}, ["filled"],
+     {"report": "filled", "at": LATER + timedelta(hours=1)}, "after now"),
+    ("a move and a report at once", {}, ["filled"], {"move": 0, "report": "filled", "price": 99.0},
      "one at a time"),
     ("a report that is not known", {}, [], {"report": "exit", "price": 99.0}, "report"),
-    ("a close kind that is not known", MARKET, ["stop exit"],
-     {"report": "close", "kind": "trailing"}, "kind"),
-    ("a report price that is not a number", {}, ["fill"], {"report": "fill", "price": "99"},
+    ("an exit kind that is not known", MARKET, ["stop exit"],
+     {"report": "exited", "kind": "trailing"}, "kind"),
+    ("a report price that is not a number", {}, ["filled"], {"report": "filled", "price": "99"},
      "price"),
-    ("a cancellation's cause that is not known", {}, ["cancel"], {"report": "cancel",
+    ("a cancellation's cause that is not known", {}, ["cancelled"], {"report": "cancelled",
                                                                  "why": "expired"}, "why"),
 ]
 
@@ -284,38 +285,39 @@ def test_a_correction_that_does_not_fit_the_record_is_refused_and_writes_nothing
 def test_a_withdrawn_report_stops_counting_and_the_trade_stands(con):
     t = enter(con)
     fill(con, t.id)
-    v = api.void_trade(con, t.id, reason="It never filled.", report="fill", now=LATER)
-    assert (v.decisions.fill, v.decisions.voided) == (None, False)
+    v = api.void_trade(con, t.id, reason="It never filled.", report="filled", now=LATER)
+    assert (v.decisions.filled, v.decisions.voided) == (None, False)
     named = [e["id"] for e in store.events(con, trade_id=t.id) if e["kind"] == "filled"][0]
     assert last(con, t.id) == ("voided", LATER.isoformat(), named, {"reason": "It never filled."})
-    assert fill(con, t.id, at=T3).decisions.fill.at == T3                 # reported again
+    assert fill(con, t.id, at=T3).decisions.filled.at == T3                 # reported again
     assert api.move_order(con, t.id, stop=99.0, reason="x", at=T3, now=LATER).decisions.moves
 
 
-def test_a_withdrawn_close_lets_the_trade_close_again(con):
+def test_a_withdrawn_exit_lets_the_trade_exit_again(con):
     t = enter(con, entry_type="market")
     out(con, t.id, kind="stop")
-    api.void_trade(con, t.id, reason="Not stopped.", report="close", now=LATER)
+    api.void_trade(con, t.id, reason="Not stopped.", report="exited", now=LATER)
     d = out(con, t.id, price=101.0, at=T4).decisions
-    assert (d.close_kind, d.close_price, d.close_at) == ("hand", 101.0, T4)
+    assert (d.exited.kind, d.exited.price, d.exited.at) == ("hand", 101.0, T4)
 
 
 def test_withdrawing_the_latest_open_report_leaves_the_one_before_it(con):
     t = enter(con, entry_type="market")
-    held(con, t.id, at=T3)
-    held(con, t.id)                                    # at T2, logged later
+    opened(con, t.id, at=T3)
+    opened(con, t.id)                                    # at T2, logged later
     v = api.void_trade(con, t.id, reason="Not then.", report="open", now=LATER)
-    assert v.decisions.held.at == T2
+    assert v.decisions.open.at == T2
 
 
 WITHDRAWALS = [  # (id, entry kwargs, setups, report, a substring of the refusal)
-    ("a fill under an exit", {}, ["fill", "hand exit"], "fill",
+    ("a fill under an exit", {}, ["filled", "hand exit"], "filled",
      "withdraw the exit before the fill"),
-    ("a fill under an open report", {}, ["fill", "open at T3"], "fill", "report the fill first"),
-    ("a report that was not made", {}, [], "cancel", "no cancellation to withdraw"),
+    ("a fill under an open report", {}, ["filled", "open at T3"], "filled",
+     "report the fill first"),
+    ("a report that was not made", {}, [], "cancelled", "no cancellation to withdraw"),
     ("an open report that was not made", MARKET, [], "open", "no open report to withdraw"),
     ("a report that is not known", {}, [], "exit", "report"),
-    ("a report on a void trade", {}, ["fill", "void"], "fill", "is void"),
+    ("a report on a void trade", {}, ["filled", "void"], "filled", "is void"),
 ]
 
 
@@ -373,6 +375,17 @@ def test_a_cancellation_at_the_stop_can_be_corrected_to_run_stopped(con):
     t = enter(con, LIVE)
     api.stop_run(con, LIVE, at=T3, now=LATER)
     cancel(con, t.id, why="not filled", at=T3)
-    o = api.correct_trade(con, t.id, fields={"report": "cancel", "why": "run stopped"},
+    o = api.correct_trade(con, t.id, fields={"report": "cancelled", "why": "run stopped"},
                           reason="The stop ended it.", now=LATER).outcome
     assert o.cancelled_why == "run stopped"
+
+
+@pytest.mark.parametrize("word", ['fill', 'cancel', 'close'])
+def test_the_words_a_report_no_longer_uses_are_refused_as_unknown(con, word):
+    t = enter(con, **MARKET)
+    out(con, t.id, price=101.0)
+    with pytest.raises(api.Refused, match="is not known"):
+        api.correct_trade(con, t.id, fields={"report": word, "price": 102.0}, reason="x",
+                          now=LATER)
+    with pytest.raises(api.Refused, match="is not known"):
+        api.void_trade(con, t.id, report=word, reason="x", now=LATER)

@@ -1,4 +1,4 @@
-"""Tests for the v3 integrity checker. Violations are written as raw SQL with foreign keys OFF,
+"""Tests for the integrity checker. Violations are written as raw SQL with foreign keys OFF,
 the way a damaged or hand-edited file would hold them; the healthy log goes through the API.
 Every figure is invented."""
 import json
@@ -86,7 +86,8 @@ def test_a_healthy_log_reports_nothing(con):
 
 
 def test_the_count_is_returned_and_printed(con, capsys):
-    ev(con, "closed", T4, trade=tid(con, "ACME"))  # a second close
+    ev(con, "exited", T4, trade=tid(con, "ACME"),
+       payload={"kind": "hand"})  # a second exit
     count = integrity.run(con)
     assert count == 1
     assert "1 integrity violation(s) found" in capsys.readouterr().out
@@ -148,26 +149,28 @@ def test_a_move_at_the_entry_is_healthy(con):
     assert found(con)[0] == 0
 
 
-def test_a_close_before_the_entry_is_reported(con):
-    raw_trade(con, "CLOS-1", at=T2, entry_type="market")
-    ev(con, "closed", T2 - timedelta(seconds=1), trade="CLOS-1",
-       payload={"reason": "x", "price": 101.0})
+def test_an_exit_before_the_entry_is_reported(con):
+    raw_trade(con, "EXIT-1", at=T2, entry_type="market")
+    ev(con, "exited", T2 - timedelta(seconds=1), trade="EXIT-1",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
     assert only(con, "decision_dates") == 1
 
 
-def test_a_close_at_the_entry_is_reported_and_one_second_later_is_not(con):
-    raw_trade(con, "CLOS-1", at=T2, entry_type="market")
-    ev(con, "closed", T2 + timedelta(seconds=1), trade="CLOS-1",
-       payload={"reason": "x", "price": 101.0})
+def test_an_exit_at_the_entry_is_reported_and_one_second_later_is_not(con):
+    raw_trade(con, "EXIT-1", at=T2, entry_type="market")
+    ev(con, "exited", T2 + timedelta(seconds=1), trade="EXIT-1",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
     assert found(con)[0] == 0
-    raw_trade(con, "CLOS-2", at=T2, entry_type="market")
-    ev(con, "closed", T2, trade="CLOS-2", payload={"reason": "x", "price": 101.0})
+    raw_trade(con, "EXIT-2", at=T2, entry_type="market")
+    ev(con, "exited", T2, trade="EXIT-2",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
     assert only(con, "decision_dates") == 1
 
 
-def test_a_move_at_the_hand_close_is_reported_and_one_second_before_is_not(con):
+def test_a_move_at_the_hand_exit_is_reported_and_one_second_before_is_not(con):
     raw_trade(con, "MOVE-1", at=T1, entry_type="market")
-    ev(con, "closed", T3, trade="MOVE-1", payload={"reason": "x", "price": 101.0})
+    ev(con, "exited", T3, trade="MOVE-1",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
     ev(con, "order_moved", T3 - timedelta(seconds=1), trade="MOVE-1",
        payload={"stop": 99.0, "reason": "x"})
     assert found(con)[0] == 0
@@ -238,15 +241,15 @@ def test_a_correction_naming_a_later_event_is_reported(con):
     assert any(ln.startswith("file: ") for ln in found(con)[1])
 
 
-# --- void and close are final ------------------------------------------------------------------
+# --- void and exit are final ------------------------------------------------------------------
 
 def test_an_event_after_a_void_is_reported(con):
     ev(con, "order_moved", T4, trade=tid(con, "WXYZ"), payload={"stop": 99.0, "reason": "x"})
     assert only(con, "nothing_after_void") == 1
 
 
-def test_two_closes_are_reported(con):
-    ev(con, "closed", T4, trade=tid(con, "ACME"), payload={"reason": "again"})
+def test_two_exits_are_reported(con):
+    ev(con, "exited", T4, trade=tid(con, "ACME"), payload={"reason": "again", "kind": "hand"})
     assert only(con, "one_report") == 1
 
 
@@ -268,28 +271,28 @@ def test_a_log_with_reports_a_withdrawal_and_a_corrected_report_reports_nothing(
        payload={"fields": {"price": 99.75}, "reason": "x"})
     # A move after a withdrawal: not after a void. Then still open at T3.
     ev(con, "order_moved", T3, trade="RAW-1", payload={"stop": 99.0, "reason": "x"})
-    ev(con, "held", T3, trade="RAW-1", payload={"reason": "x"})
-    ev(con, "closed", T4, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    ev(con, "open", T3, trade="RAW-1", payload={"reason": "x"})
+    ev(con, "exited", T4, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
     assert found(con) == (0, [])
 
 
 def test_an_exit_with_no_position_is_reported(con):
     raw_trade(con, "RAW-1")
-    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
     assert only(con, "reports") == 1
 
 
 def test_an_exit_kind_that_is_not_known_is_reported(con):
     raw_trade(con, "RAW-1")
-    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "trailing"})
+    ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "trailing"})
     assert only(con, "reports") == 1
 
 
-def test_an_open_report_at_or_after_the_close_is_reported(con):
+def test_an_open_report_at_or_after_the_exit_is_reported(con):
     raw_trade(con, "RAW-1")
     ev(con, "filled", T2, trade="RAW-1", payload={"reason": "x"})
-    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
-    ev(con, "held", T4, trade="RAW-1", payload={"reason": "x"})
+    ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    ev(con, "open", T4, trade="RAW-1", payload={"reason": "x"})
     assert only(con, "reports") == 1
 
 

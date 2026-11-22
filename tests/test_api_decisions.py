@@ -111,9 +111,9 @@ def test_a_move_at_or_after_the_hand_exit_is_refused(con, at):
     move."""
     t = enter(con, entry_type="market")
     out(con, t.id)
-    with pytest.raises(api.Refused, match=f"closed by hand at {re.escape(T3.isoformat())}"):
+    with pytest.raises(api.Refused, match=f"exited by hand at {re.escape(T3.isoformat())}"):
         api.move_order(con, t.id, stop=99.0, reason="x", at=at, now=LATER)
-    assert kinds(con, t.id) == ["entered", "closed"]
+    assert kinds(con, t.id) == ["entered", "exited"]
     api.move_order(con, t.id, stop=99.0, reason="x", at=T3 - timedelta(minutes=1), now=LATER)
 
 
@@ -227,7 +227,7 @@ def test_a_correction_moving_the_entry_onto_the_hand_exit_is_refused(con):
     out(con, t.id)
     with pytest.raises(api.Refused, match=re.escape(T3.isoformat())):
         correct(con, t.id, fields={"at": T3})
-    assert kinds(con, t.id) == ["entered", "closed"]
+    assert kinds(con, t.id) == ["entered", "exited"]
     assert correct(con, t.id, fields={"at": T3 - timedelta(seconds=1)}).decisions.entry.at < T3
 
 
@@ -402,10 +402,10 @@ def test_a_corrected_move_at_at_or_after_the_hand_exit_is_refused(con, at):
     api.move_order(con, t.id, stop=99.0, reason="a", at=T1 + timedelta(minutes=30), now=LATER)
     api.move_order(con, t.id, stop=99.5, reason="b", at=T2, now=LATER)
     out(con, t.id)
-    with pytest.raises(api.Refused, match=f"closed by hand at {re.escape(T3.isoformat())}"):
+    with pytest.raises(api.Refused, match=f"exited by hand at {re.escape(T3.isoformat())}"):
         correct(con, t.id, fields={"move": 0, "at": at})
-    assert kinds(con, t.id) == ["entered", "order_moved", "order_moved", "closed"]
-    # still before the close, and past the other move: moves re-order among themselves
+    assert kinds(con, t.id) == ["entered", "order_moved", "order_moved", "exited"]
+    # still before the exit, and past the other move: moves re-order among themselves
     v = correct(con, t.id, fields={"move": 0, "at": T3 - timedelta(minutes=1)})
     assert [m.reason for m in v.decisions.moves] == ["b", "a"]
 

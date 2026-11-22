@@ -1,7 +1,9 @@
-"""What a trade's decisions led to, read from its record alone.
+"""What a trade's decisions led to: its fill, its exit, its R and its cash, read from its record
+alone.
 
 A pure function of the decisions: no connection, clock, path or network. A trade's fill, exit and
-cancellation come only from the reports in its record, so `replay` reads every run the same way.
+cancellation come only from the reports in its record, so `of` reads every run the same way, live
+or replay.
 
 A position reads open until its exit is reported (an open report changes nothing); a pending
 limit reads cancelled at its run's stop once the run has one, and pending before that. An exit
@@ -11,7 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 from desk import model
 
@@ -25,7 +27,7 @@ class Outcome:
     filled_at: dt.datetime | None
     exit: float | None
     exited_at: dt.datetime | None  # the exit report's `at`
-    exit_reason: str | None  # "stop" | "target" | "hand"
+    exit_kind: str | None  # "hand" | "stop" | "target"
     cancelled_at: dt.datetime | None
     cancelled_why: str | None  # "not filled" | "pulled" | "run stopped"
     # Against the entry's stop (as corrected); None without one, or with one at or beyond the fill.
@@ -34,8 +36,7 @@ class Outcome:
     notes: tuple[str, ...]
 
 
-_BLANK = dict.fromkeys(("fill", "filled_at", "exit", "exited_at", "exit_reason", "cancelled_at",
-                        "cancelled_why", "r", "cash"))
+BLANK = {f.name: None for f in fields(Outcome) if f.name not in ("status", "notes")}
 
 
 def _money(side: str, entry: float, stop: float | None, exit: float, size: int,
@@ -52,7 +53,7 @@ def _money(side: str, entry: float, stop: float | None, exit: float, size: int,
 def _position(d: model.Decisions) -> tuple[float, dt.datetime]:
     """The position's price and `at`: a standing reported fill's (its price, else the limit), else
     the entry's."""
-    f = d.fill
+    f = d.filled
     if f is None:
         return d.entry.price, d.entry.at
     return (d.entry.price if f.price is None else f.price), f.at
@@ -60,32 +61,31 @@ def _position(d: model.Decisions) -> tuple[float, dt.datetime]:
 
 def _ends(d: model.Decisions, base: Outcome, *, side: str) -> Outcome:
     """`base` with d's reported ends laid over it: a cancellation or an exit replaces it whole."""
-    e, c = d.entry, d.cancel
+    e, c, x = d.entry, d.cancelled, d.exited
     if c is not None:
-        return Outcome(**{**_BLANK, "status": "cancelled", "cancelled_at": c.at,
-                          "cancelled_why": c.why}, notes=())
-    if d.close_at is not None:
+        return Outcome(**dict(BLANK, status="cancelled", cancelled_at=c.at, cancelled_why=c.why),
+                       notes=())
+    if x is not None:
         fill, filled_at = _position(d)
-        exit = d.close_price
+        exit = x.price
         if exit is None:
-            stop, target = model.in_force(d, d.close_at)
-            exit = stop if d.close_kind == "stop" else target
+            stop, target = model.in_force(d, x.at)
+            exit = stop if x.kind == "stop" else target
         r, cash = _money(side, fill, e.stop, exit, e.size, d.point_value)
-        return Outcome(**{**_BLANK, "status": "exited", "fill": fill, "filled_at": filled_at,
-                          "exit": exit, "exited_at": d.close_at, "exit_reason": d.close_kind,
-                          "r": r, "cash": cash},
+        return Outcome(**dict(BLANK, status="exited", fill=fill, filled_at=filled_at, exit=exit,
+                              exited_at=x.at, exit_kind=x.kind, r=r, cash=cash),
                        notes=(NO_1R,) if e.stop is not None and r is None else ())
     return base
 
 
-def replay(d: model.Decisions, *, side: str, stopped: dt.datetime | None = None) -> Outcome:
+def of(d: model.Decisions, *, side: str, stopped: dt.datetime | None = None) -> Outcome:
     """A trade's outcome from its record alone. A market entry, or a limit with a reported fill,
     reads open; a limit whose run has stopped reads cancelled at the stop."""
-    if d.entry.type == "market" or d.fill is not None:
+    if d.entry.type == "market" or d.filled is not None:
         fill, filled_at = _position(d)
-        base = dict(status="open", fill=fill, filled_at=filled_at)
+        base = dict(BLANK, status="open", fill=fill, filled_at=filled_at)
     elif stopped is not None:
-        base = dict(status="cancelled", cancelled_at=stopped, cancelled_why="run stopped")
+        base = dict(BLANK, status="cancelled", cancelled_at=stopped, cancelled_why="run stopped")
     else:
-        base = dict(status="pending")
-    return _ends(d, Outcome(**{**_BLANK, **base}, notes=()), side=side)
+        base = dict(BLANK, status="pending")
+    return _ends(d, Outcome(**base, notes=()), side=side)

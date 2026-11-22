@@ -11,7 +11,7 @@ AT = "2026-11-10T10:00:00+00:00"
 
 @pytest.fixture
 def con(tmp_path):
-    """A fresh v4 store with one strategy, one version, one run and one trade."""
+    """A fresh v5 store with one strategy, one version, one run and one trade."""
     db = tmp_path / "test.db"
     store.create(db)
     with store.open(db) as conn:
@@ -115,7 +115,7 @@ def test_a_successful_group_commits_both_rows(tmp_path):
 
 
 def test_a_failed_commit_leaves_the_connection_usable(tmp_path):
-    """Review item 7: a COMMIT refused because a reader held the file left the connection inside
+    """Review item 7: a COMMIT refused because a reader had the file left the connection inside
     its transaction, holding the write lock, so every later write failed with "cannot start a
     transaction within a transaction" until the process restarted."""
     db = tmp_path / "t.db"
@@ -124,7 +124,7 @@ def test_a_failed_commit_leaves_the_connection_usable(tmp_path):
     con.execute("PRAGMA busy_timeout = 50")
     reader = sqlite3.connect(db, isolation_level=None)
     reader.execute("BEGIN")
-    reader.execute("SELECT count(*) FROM strategies").fetchone()  # SHARED, held until COMMIT
+    reader.execute("SELECT count(*) FROM strategies").fetchone()  # SHARED, kept until COMMIT
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         with store.transaction(con):
             store.add_strategy(con, "beta", AT)
@@ -158,7 +158,7 @@ def test_a_v1_file_is_refused_as_the_wrong_schema_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 4"):
+    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 5"):
         store.open(old)
     assert _md5(old) == before
 
@@ -172,7 +172,7 @@ def test_a_0_5_desk_db_is_refused_untouched_naming_its_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 2, expected 4") as e:
+    with pytest.raises(store.NotADeskDatabase, match="schema version 2, expected 5") as e:
         store.open(old)
     # F11: the tmp path may hold "v2", so the old wording is matched with what followed it
     assert "no migration" in str(e.value) and "v2 desk.db" not in str(e.value)
@@ -188,12 +188,12 @@ def test_a_0_6_desk_db_is_refused_untouched_naming_its_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 3, expected 4"):
+    with pytest.raises(store.NotADeskDatabase, match="schema version 3, expected 5"):
         store.open(old)
     assert _md5(old) == before
 
 
-def test_the_v4_schema_has_no_trackers_table(con):
+def test_the_v5_schema_has_no_trackers_table(con):
     names = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
     assert not {n for n in names if "tracker" in n}
 
