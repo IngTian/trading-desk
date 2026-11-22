@@ -276,7 +276,8 @@ TOOLS: dict[str, Tool] = {
         "value, in the trade's currency. `judged`: the bars' own reading of a live trade (null "
         "in replay), and `differs`: the fields where it and the outcome part. `checks_shown`: "
         "the rule results shown at entry; `checks_now`: as they read now, from the run's "
-        "current trades; `checks_differ`: the rules whose result changed. A live trade is "
+        "current trades; `checks_differ`: the rules whose result changed (null for a voided trade, "
+        "or when the entry stored no results to compare). A live trade is "
         "judged from bars fetched as it is read; what the bars cannot give is null, with a "
         "note."), {
         "trade": _TRADE,
@@ -285,8 +286,9 @@ TOOLS: dict[str, Tool] = {
         "Every trade in recording order, voids included, narrowed to a run or a strategy, and "
         "to the open ones (`true`) or the rest (`false`). Open means pending, open or closing, "
         "or not judged with no close or cancellation to end it. Each trade carries its whole "
-        "record, as get_trade gives it without `checks_now`, so narrow to a run, and to "
-        "`open: true`, when you can."), {
+        "record, as get_trade gives it, except that `checks_now` and `checks_differ` are null: "
+        "only get_trade works them out, so narrow to a run, and to `open: true`, when you "
+        "can."), {
         "run": _p("string", "A run's id, to list only its trades."),
         "strategy": _p("string", "A strategy's id, to list only its runs' trades."),
         "open": _p("boolean", "true: only the open trades; false: only the rest; left out: "

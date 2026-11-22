@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, bars, config, indicators, judge, model, store, yahoo
+from desk import api, bars, config, indicators, judge, model, server, store, yahoo
 
 NOW = datetime(2026, 3, 2, 15, 5, tzinfo=UTC)    # Monday; 5 minutes into a 15m bar
 START = NOW - timedelta(days=30)
@@ -603,7 +603,7 @@ def test_an_entered_event_without_results_reads_none_shown(con):
                  payload={"entry_type": "market", "entry": 100.0, "stop": 98.0, "target": 104.0,
                           "size": 10, "reasons": "Written by hand.", "screenshots": []})
     v = api.get_trade(con, "raw-1", now=NOW)
-    assert v.checks_shown is None and v.checks_differ == ()
+    assert v.checks_shown is None and v.checks_differ is None
     assert [r.name for r in v.checks_now] == [
         "min_reward_risk", "max_risk_per_trade", "max_open_trades"]
 
@@ -619,11 +619,20 @@ def test_reads_other_than_get_trade_do_not_recompute(con):
               api.report(con, u.id, state="exited", kind="hand", price=101.0, at=NOW,
                          reason="Invented.", now=NOW),
               api.void_trade(con, t.id, reason="Invented.", now=NOW)):
-        assert v.checks_now is None and v.checks_differ == ()
+        assert v.checks_now is None and v.checks_differ is None
 
 
 def test_a_void_trade_has_no_results_now(con):
     t = enter(con)
     api.void_trade(con, t.id, reason="Invented.", now=NOW)
     v = api.get_trade(con, t.id, now=NOW)
-    assert v.checks_now is None and v.checks_differ == ()
+    assert v.checks_now is None and v.checks_differ is None
+
+
+def test_checks_differ_is_null_unless_get_trade_compared(con):
+    t = enter(con)
+    assert t.checks_differ is None                                 # the entry's own reply
+    assert api.get_trade(con, t.id, now=NOW).checks_differ == ()   # compared: nothing changed
+    listed = api.list_trades(con, now=NOW)
+    assert {v.checks_differ for v in listed} == {None}
+    assert all(v["checks_differ"] is None for v in server.plain(listed))   # null over MCP, not []

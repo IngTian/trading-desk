@@ -342,7 +342,7 @@ class TradeView:
     # unanswered one reads verdict "not answered", reason None. Never scored.
     checklist: tuple[dict, ...] = ()
     checks_now: tuple[checks.Result, ...] | None = None
-    checks_differ: tuple[str, ...] = ()
+    checks_differ: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -617,10 +617,11 @@ def _results_now(con, row: sqlite3.Row, d: model.Decisions, others: tuple[checks
 
 
 def _differ(shown: tuple[checks.Result, ...] | None, now: tuple[checks.Result, ...]
-            ) -> tuple[str, ...]:
-    """The names whose (ok, figure) differ between the results shown and now, or are in one only."""
+            ) -> tuple[str, ...] | None:
+    """The names whose (ok, figure) differ between the results shown and now, or are in one only;
+    None when no results were shown to compare."""
     if shown is None:
-        return ()
+        return None
     then = {r.name: (r.ok, r.figure) for r in shown}
     here = {r.name: (r.ok, r.figure) for r in now}
     return tuple(dict.fromkeys(n for n in [*here, *then]
