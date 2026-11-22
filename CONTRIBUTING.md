@@ -1,19 +1,23 @@
 # Contributing
 
 Thanks for looking. Two principles decide most questions about this tool, and both are in
-[docs/how-it-works.md](docs/how-it-works.md): **only decisions and bars are stored** (decisions
-include reports; everything else is derived on read), and **one timing rule**. A change that stores
+[docs/how-it-works.md](docs/how-it-works.md): **only decisions are stored** (decisions include
+reports; everything else is derived on read), and **one timing rule**. A change that stores
 something derived (an exit, a P&L, a check result beyond the ones shown at entry, which that doc
 names as the one exception) or that dates a decision any other way is a design change. Please open
 an issue and make the case before writing it.
+
+So is a change that makes the desk read market data. A trade's fill, exit and cancellation come
+from reports, and every indicator value and declared fact from the agent's `market` argument; the
+desk makes no network call.
 
 ## Ground rules
 
 - `uv run pytest -q`, `uv run ruff check .` and `uv run python tools/no_real_figures.py` all
   pass. CI runs ruff and pytest on Python 3.11 and 3.14. A packaging job builds a wheel, checks its
   shape (`tools/check_wheel.py`) and installs it in a clean environment that records trades, reads
-  their outcomes and serves the 16 tools over MCP, with no network (`tools/smoke_wheel.sh`). A
-  third job runs the figure guard.
+  their outcomes and serves the 14 tools over MCP (`tools/smoke_wheel.sh`). A third job runs the
+  figure guard.
 - **New behaviour comes with a test that fails without it.** If reverting your change does
   not turn your test red, the test is not testing your change.
 - **A refusal says what was wrong and how to fix it.** Every refusal from the API and the
@@ -28,12 +32,12 @@ an issue and make the case before writing it.
 - **Nothing is silently dropped or guessed.** An unknown rule, a value in the wrong unit or a
   time without a timezone is refused rather than read as something else. A figure that
   cannot be computed is withheld, never shown as zero.
-- **The log is append-only.** Triggers keep events and versions insert-only, and the bars and
-  spans in bars.db too. A correction is a new event read in place of the old one; nothing is
-  updated or deleted.
-- **Tests never reach the network.** `tests/conftest.py` replaces `yahoo.fetch`, the desk's
-  one network call, in every test; a test that wants Yahoo bars installs the `fake_yahoo`
-  fixture.
+- **The log is append-only.** Triggers keep events and versions insert-only. A correction is a new
+  event read in place of the old one; nothing is updated or deleted.
+- **`except Exception` stays at the reporting edges only**: the server's reply path and the
+  integrity checker. Everywhere else an exception is a bug, and a bug is not caught and reworded.
+- **Tests never reach the network.** The desk reads no market data and makes no network call, so
+  there is nothing to stub.
 - **Reads that decide a write go inside `store.transaction(con)`**, which takes the write lock
   first, so two sessions cannot both pass a check and then both write.
 - **Fixtures and examples use obviously invented data.** This is a tool for someone's own
@@ -44,20 +48,17 @@ an issue and make the case before writing it.
 
 | File | Holds |
 |---|---|
-| `desk/schema.sql` | desk.db's SQLite schema, version 4. There is no migration: `store.open` refuses a desk.db whose version differs from `store.SCHEMA_VERSION`, so a schema change is a design change. |
+| `desk/schema.sql` | desk.db's SQLite schema, version 5. There is no migration: `store.open` refuses a desk.db stamped with any version but `store.SCHEMA_VERSION`, so a schema change is a design change. |
 | `desk/store.py` | The only module that writes desk.db. |
-| `desk/bars.py`, `desk/bars.sql` | bars.db and its schema: the only module that writes bars.db. |
-| `desk/yahoo.py` | Yahoo's bars for live runs, through yfinance, which it imports only inside the call; `fetch` is the one network call. |
-| `desk/judge.py` | Pure: the bar walk, with a table-driven test, and the replay and live readers. |
-| `desk/config.py` | Where the data lives, and the order `TRADING_DESK_DB` and `TRADING_DESK_HOME` are read in; and the guards the openers run: `refuse_legacy_db`, for a config.toml that still sets `db` (`store.create` and `store.open`, given no path), and the iCloud placeholder checks, for a file evicted from the Mac (those two and `bars.open`). |
+| `desk/config.py` | Where the data lives, and the order `TRADING_DESK_DB` and `TRADING_DESK_HOME` are read in; and the guards the opener runs: `refuse_legacy_db`, for a config.toml that still sets `db`, and the iCloud placeholder check, for a desk.db evicted from the Mac. |
 | `desk/strategy.py`, `desk/rules.py` | Reading a strategy's Markdown and its rules block. |
 | `desk/checks.py` | Each rule's value reader and its check. |
-| `desk/indicators.py` | Pure: the indicator formulas (TradingView Pine v6's), and how many bars each needs. |
-| `desk/model.py` | Folding a trade's decisions into one current view, and `report_problem`, the one place a report's rules live. |
+| `desk/model.py` | Folding a trade's decisions into one current view, and `record_problem`, the one validator: every rule about what a trade's record may hold. |
+| `desk/outcome.py` | Pure: what a trade's record reads as — its fill, exit, R and cash. |
 | `desk/stats.py` | Pure: the stats over one scope's trades, which `api.stats` builds the rows for. |
 | `desk/errors.py` | `Refused`, which every layer raises, and `shown`, which writes a value as JSON for a message. |
 | `desk/api.py` | The public API: one function per MCP tool. |
-| `desk/server.py` | The MCP server and its 16 tools, each one `api` function (`trading-desk mcp`). |
+| `desk/server.py` | The MCP server and its 14 tools, each one `api` function (`trading-desk mcp`). |
 | `desk/instructions.md` | The agent's standing instructions, which the server sends at the start of every session. |
 | `desk/integrity.py` | The checks `trading-desk integrity` runs. |
 | `desk/cli.py` | The two commands, `trading-desk mcp` and `trading-desk integrity`. |

@@ -95,15 +95,6 @@ def test_an_empty_id_lists_nothing(con):
     assert len(api.list_trades(con, now=NOW)) == 1
 
 
-def test_trade_bars_before_and_after_are_at_most_10000(con):
-    run = api.start_run(con, "tester", mode="live", currency="USD", at=START, now=START).id
-    t = api.trade(con, run, **ENTRY, at=START, now=START)
-    for name in ("before", "after"):
-        with pytest.raises(Refused, match="from 0 to 10000"):
-            api.trade_bars(con, t.id, **{name: 10_001}, now=NOW)
-    assert api.trade_bars(con, t.id, before=10_000, after=10_000, now=NOW).trade == t.id
-
-
 @pytest.mark.parametrize("move", [True, "0", [0], -1, 1.5])
 def test_a_correction_whose_move_is_not_a_place_is_refused_as_such(con, move):
     t = api.trade(con, replay(con), **ENTRY, stop=99.0, at=START, now=NOW)

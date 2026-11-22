@@ -10,17 +10,14 @@ The desk records the user's trades under versioned strategies, checks each trade
 - A refusal says what to change. If the change is to the form of the call (a type, a key, a format), make it and call again. If it would change a time, a price, a size, a reason or a report, or calls for a void, ask the user first.
 
 ## Entering a trade
-- Supply `market` at entry. In a replay run: every indicator key the rules name and every declared fact, read off the chart at the bar acted on (a regular-hours chart for stocks, extended hours for futures). In a live run: every declared fact (the desk computes none), the indicator keys for futures, whose Yahoo bars are delayed 10 to 30 minutes, and any value you trust over the desk's.
-- Answer every checklist item with `verdict` "pass" or "fail" and a one-line `reason`, as you judge it.
+- Supply `market` at entry: every indicator key the rules name and every declared fact (the desk computes none), read off the chart at the bar acted on (a regular-hours chart for stocks, extended hours for futures). A key left out reads unknown for good, since `market` is not corrected.
+- Answer every checklist item with `verdict` "pass" or "fail" and a one-line `reason`, as you read it.
 - Screenshots are full file paths or https:// links. For an image pasted into the chat, pass the file path you are shown for it, even a temporary one: the desk copies the file when the trade is recorded. If no path is shown, ask the user for one.
 
 ## After entry
-- In a replay run the desk reads nothing but your reports: report each limit's fill or cancellation, and each exit with its kind, and its price for a hand exit or a fill away from the level.
+- The desk learns nothing on its own: it reads nothing but your reports. Report each limit's fill or cancellation, and each exit with its kind, and its price for a hand exit or a fill away from the level.
+- Report a stop-out at its real time (`exited`, kind "stop"), with the broker's fill price when the user has it.
 - Report each expired day order as `cancelled`, why "not filled", dated at the session close it expired at.
-- In a live run, report a stop-out at its real time (`exited`, kind "stop"), with the broker's fill price when the user has it: the bars date it at its bar's close, and a trade entered inside that bar does not see it.
-- If the bars ended a live position the broker still holds, report it `open`, dated at or after the judged exit, at a moment it was still held.
-- Before entering a trade on a live run, settle that run's futures trades for the rules that read the run's other trades, since Yahoo's futures feed lags: report a position the user confirms the broker still holds as `open` at the current time, one that was stopped out as `exited` at its real time with its price, and a limit that filled as `filled`.
-- Read each open live trade with `get_trade` at least weekly: Yahoo keeps 1-minute bars for about 30 days.
-- When you report a futures trade `open` before a new entry on its run, give the report and the entry the same `at`: the trade is known open only to the end of that minute.
+- Before entering a trade on a run whose rules read its other trades (how many are open, a daily loss limit, consecutive losses, a cooldown), bring those trades up to date: report any fill, exit or cancellation the user confirms, and a position the user confirms the broker still holds as `open`.
 - Stop a run, or void a whole trade, only on the user's word: neither can be undone.
 - Fix a mistake with `correct_trade` or `void_trade`, never with a new trade on top.

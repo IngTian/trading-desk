@@ -10,7 +10,6 @@ lives under one data root:
     ~/Documents/trading-desk/
         desk.db       the store: the owner's decisions, an append-only log
         attachments/  screenshots attached to trades, named by content hash
-        bars.db       price bars for live runs, insert-only, and the spans each fetch covered
 
 The ROOT is $TRADING_DESK_HOME, else ~/Documents/trading-desk. The desk reads no settings
 file: where the data is belongs with the data, never in the repo.
@@ -23,10 +22,9 @@ desk.db resolves most explicit first:
 
 (2) lets a one-off `TRADING_DESK_DB=/tmp/scratch.db trading-desk integrity` read there.
 
-ISOLATING A RUN: set $TRADING_DESK_HOME (which moves attachments/ and bars.db too).
-$TRADING_DESK_DB moves desk.db alone, so screenshots and bars.db still go to the real root.
-The test suite clears the override and points the root at a temp dir before every test
-(conftest.py).
+ISOLATING A RUN: set $TRADING_DESK_HOME (which moves attachments/ too). $TRADING_DESK_DB
+moves desk.db alone, so screenshots still go to the real root. The test suite clears the
+override and points the root at a temp dir before every test (conftest.py).
 
 NOTE ON SYNCED FOLDERS. The default root is under ~/Documents, which iCloud syncs on many
 Macs. store.open() sets journal_mode=DELETE precisely so there is no -wal sidecar for a
@@ -37,10 +35,9 @@ time.
 from __future__ import annotations
 
 import os
-import tomllib
 from pathlib import Path
 
-from desk.errors import Refused, shown
+from desk.errors import Refused
 
 ENV_HOME = "TRADING_DESK_HOME"
 ENV_DB = "TRADING_DESK_DB"
@@ -66,26 +63,6 @@ def db_path(explicit: str | os.PathLike | None = None) -> Path:
     if from_env:
         return Path(from_env).expanduser().resolve()
     return (home() / "desk.db").resolve()
-
-
-def refuse_legacy_db() -> None:
-    """0.8 read `db` from <root>/config.toml; 0.9 does not. Refuse, rather than quietly open a
-    new empty desk.db, when the default location is in use and that file still sets `db`."""
-    if os.environ.get(ENV_DB):
-        return
-    try:
-        db = tomllib.loads((home() / "config.toml").read_text(encoding="utf-8")).get("db")
-    except (OSError, ValueError):   # no file, or one that is not TOML: ignored as before
-        return
-    if db is not None:
-        raise Refused(f"config.toml in {home()} sets db = {shown(db)}, which the desk no longer "
-                      f"reads; set TRADING_DESK_DB to that file (or move it to {home()}/desk.db), "
-                      "then remove the db line from config.toml.")
-
-
-def bars_path() -> Path:
-    """bars.db, the price bars. Always under the root: no environment override."""
-    return (home() / "bars.db").resolve()
 
 
 def attachments_dir() -> Path:
@@ -123,11 +100,6 @@ def schema_sql() -> Path:
     `desk/schema.sql` is a real file on disk either way -- no importlib.resources needed.
     """
     return Path(__file__).resolve().parent / "schema.sql"
-
-
-def bars_sql() -> Path:
-    """bars.db's schema. Package-relative, as schema_sql() is and for the same reason."""
-    return Path(__file__).resolve().parent / "bars.sql"
 
 
 def example_strategy() -> Path:

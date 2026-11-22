@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, judge, store, yahoo
+from desk import api, store
 
 NOW = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 LATER = NOW + timedelta(hours=3)
@@ -136,14 +136,6 @@ T = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)     # an invented Monday, 14:00 UTC
 NEXT_DAY = T + timedelta(days=1)
 
 
-def bars1(end, n, base=100.0):
-    """n invented 1-minute bars around 100, the last closing at `end`; never near a limit 10%
-    below."""
-    m = timedelta(minutes=1)
-    return [judge.Bar(end - m * (n - i), base, base + 0.5, base - 0.5, base + 0.1, 1000.0)
-            for i in range(n)]
-
-
 def run(con, mode, timeframes):
     """A new version of dip-buyer with these timeframes, and a run on it started a day before T."""
     rules = f"timeframes = {timeframes}\nmin_reward_risk = 2\n"
@@ -176,88 +168,15 @@ def test_stop_run_names_the_orders_it_cancelled(con):
     stopped = api.stop_run(con, r, at=NEXT_DAY, now=NEXT_DAY)
     assert isinstance(stopped, api.RunView) and stopped.stopped == NEXT_DAY
     assert stopped.cancelled == (a.id, b.id) and c.id not in stopped.cancelled
-    assert stopped.awaiting_bars == ()
-    assert stopped.needs_report == {}
 
 
-def test_a_live_stop_the_bars_have_not_reached_is_awaiting_them(con, fake_yahoo):
-    feed = bars1(T + timedelta(minutes=60), 60)        # 14:00 to 14:59, the last closing 15:00
-    fake_yahoo(feed, market_time=T + timedelta(minutes=60))
+def test_a_limit_pulled_before_the_stop_is_not_the_stops_to_cancel(con):
     r = run(con, "live", '["15m"]')
     t = limit(con, r)
-    stop = T + timedelta(minutes=62)
-    stopped = api.stop_run(con, r, at=stop, now=stop)
-    assert (stopped.cancelled, stopped.awaiting_bars) == ((), (t.id,))
-    assert stopped.needs_report == {}
-    fake_yahoo(feed + bars1(T + timedelta(minutes=75), 15), market_time=T + timedelta(minutes=75))
-    out = api.get_trade(con, t.id, now=T + timedelta(minutes=80)).outcome
-    assert (out.status, out.cancelled_why) == ("cancelled", "run stopped")
-
-
-def test_stop_run_cancels_a_daily_futures_limit_judged_on_1m_bars(con, fake_yahoo):
-    fake_yahoo(bars1(T + timedelta(minutes=40), 45), market_time=T + timedelta(minutes=40))
-    r = run(con, "live", '["1d"]')
-    t = limit(con, r, ticker="GC1!", instrument=None, point_value=100.0)
-    stopped = api.stop_run(con, r, at=T + timedelta(minutes=30),
-                           now=T + timedelta(minutes=41))
-    assert (stopped.cancelled, stopped.awaiting_bars) == ((t.id,), ())
-    assert stopped.needs_report == {}
-    assert not hasattr(stopped, "not_judged")
-
-
-@pytest.mark.parametrize("fails, says", [
-    (OSError("the network is off in tests"), "the network is off in tests"),
-    (ValueError("NOSUCH: possibly delisted; no price data found"), "possibly delisted"),
-])
-def test_a_live_stop_whose_bars_cannot_be_read_says_why(con, monkeypatch, fails, says):
-    def fetch(*a):
-        raise fails
-    monkeypatch.setattr(yahoo, "fetch", fetch)
-    r = run(con, "live", '["15m"]')
-    t = limit(con, r)
+    api.report(con, t.id, state="cancelled", reason="Changed my mind.", why="pulled",
+               at=T + timedelta(minutes=5), now=T + timedelta(minutes=5))
     stopped = api.stop_run(con, r, at=NEXT_DAY, now=NEXT_DAY)
-    assert (stopped.cancelled, stopped.awaiting_bars) == ((), ())
-    assert list(stopped.needs_report) == [t.id]
-    assert any(says in n for n in stopped.needs_report[t.id]), stopped.needs_report
-    o = api.report(con, t.id, state="cancelled", why="run stopped", at=NEXT_DAY,
-                   reason="Invented.", now=NEXT_DAY).outcome
-    assert (o.status, o.cancelled_why) == ("cancelled", "run stopped")
-
-
-def test_a_limit_pulled_before_the_stop_is_not_the_stops_to_report(con, monkeypatch):
-    def fetch(*a):
-        raise OSError("the network is off in tests")
-    monkeypatch.setattr(yahoo, "fetch", fetch)
-    r = run(con, "live", '["15m"]')
-    t = limit(con, r)
-    api.close_trade(con, t.id, reason="Changed my mind.", at=T + timedelta(minutes=5),
-                    now=T + timedelta(minutes=5))
-    stopped = api.stop_run(con, r, at=NEXT_DAY, now=NEXT_DAY)
-    assert (stopped.cancelled, stopped.awaiting_bars, stopped.needs_report) == ((), (), {})
-
-
-def _closed_after_a_backdated_stop(con):
-    r = run(con, "live", '["15m"]')
-    t = limit(con, r)
-    api.close_trade(con, t.id, reason="Changed my mind.", at=T + timedelta(minutes=30),
-                    now=T + timedelta(minutes=31))
-    return r, t
-
-
-def test_a_limit_closed_after_a_backdated_stop_is_the_stops_to_cancel(con, fake_yahoo):
-    fake_yahoo(bars1(T + timedelta(minutes=40), 45), market_time=T + timedelta(minutes=40))
-    r, t = _closed_after_a_backdated_stop(con)
-    stopped = api.stop_run(con, r, at=T + timedelta(minutes=20), now=T + timedelta(minutes=41))
-    assert (stopped.cancelled, stopped.awaiting_bars, stopped.needs_report) == ((t.id,), (), {})
-
-
-def test_an_unreadable_limit_closed_after_a_backdated_stop_is_in_no_group(con, monkeypatch):
-    def fetch(*a):
-        raise OSError("the network is off in tests")
-    monkeypatch.setattr(yahoo, "fetch", fetch)
-    r, _ = _closed_after_a_backdated_stop(con)
-    stopped = api.stop_run(con, r, at=T + timedelta(minutes=20), now=T + timedelta(minutes=41))
-    assert (stopped.cancelled, stopped.awaiting_bars, stopped.needs_report) == ((), (), {})
+    assert stopped.cancelled == ()
 
 
 def test_a_start_or_stop_dated_after_now_is_refused(con):

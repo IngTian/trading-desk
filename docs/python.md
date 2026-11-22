@@ -31,11 +31,11 @@ The functions are [the tools](tools.md), one for one, with the same arguments af
 Only Python has: `at` as an aware datetime or an ISO 8601 string with its offset; `now`, which
 tests inject, a keyword of every function but `get_strategy`, `list_strategies` and `list_runs`;
 and the frozen dataclasses returned, `StrategyView`, `RunView`, `api.StoppedRun` (from `stop_run`),
-`TradeView`, `CheckView` (from `trade` with `check_only=True`), `TradeBars` and `desk.stats.Stats`,
-whose id lists are plain tuples, without MCP's counts. The API may change before 1.0. A refusal
-raises `api.Refused`, whose message says what was wrong and how to fix it, and a refused call
-writes nothing.
+`TradeView`, `CheckView` (from `trade` with `check_only=True`), `desk.outcome.Outcome` and
+`desk.stats.Stats`, whose id lists are plain tuples, without MCP's counts. The API may change
+before 1.0. A refusal raises `api.Refused`, whose message says what was wrong and how to fix it,
+and a refused call writes nothing.
 
 Tracking a trade (its largest move for you or against you while it was open, the drift after the
-exit, anything per strategy) is your own code: it reads `get_trade` and `trade_bars` each time it
-runs, so a correction or a void shows up on its next run.
+exit, anything per strategy) is your own code: it reads `get_trade` each time it runs, so a
+correction or a void shows up on its next run.

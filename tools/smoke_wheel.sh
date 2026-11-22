@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Install a built wheel into a clean venv OUTSIDE the checkout and use it the way a new user
-# would: save the shipped example strategy, record one trade through the API, read a replay trade
-# from its reports and a live trade from bars already in bars.db (no network: the one fetch is
-# replaced in-process), run the integrity checker, and assert each outcome. Run by CI and by the
-# release, before publishing.
+# would: save the shipped example strategy, record one trade through the API, read a trade's
+# outcome from its reports on a live run and on a replay one, run the integrity checker, and
+# assert each outcome. Run by CI and by the release, before publishing.
 #
 #     bash tools/smoke_wheel.sh <dir holding the .whl>
 #
@@ -29,21 +28,31 @@ export TRADING_DESK_HOME="$work/home"
 mkdir -p "$TRADING_DESK_HOME"
 
 "$bin/trading-desk" --help > /dev/null
-"$bin/python" - "$work" <<'PY'
-import contextlib
+"$bin/python" - "$work" "$dist" <<'PY'
+import importlib.metadata
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import desk
-from desk import api, bars, config, judge, store, yahoo
+from desk import api, config, outcome, store
 
 where = Path(desk.__file__).resolve()
 assert str(where).startswith(sys.argv[1]), f"desk imported from {where}, not the clean venv"
+
+# The installed version is the one the wheel was built from, and its package data is there:
+# the example strategy a new user copies and the instructions the MCP server sends.
+version = importlib.metadata.version("trading-desk")
+wheels = list(Path(sys.argv[2]).glob("*.whl"))
+assert len(wheels) == 1 and f"-{version}-" in wheels[0].name, (version, wheels)
+text = config.example_strategy().read_text(encoding="utf-8")
+assert "```rules" in text, "the shipped example strategy has no rules block"
+assert config.instructions().read_text(encoding="utf-8").strip(), "the instructions are empty"
+
 now = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 store.create(config.db_path())
 with store.open() as con:
-    saved = api.save_strategy(con, "example", config.example_strategy().read_text(), now=now)
+    api.save_strategy(con, "example", text, now=now)
     run = api.start_run(con, "example", mode="live", currency="USD", at=now, now=now)
     # Invented figures: a market buy of 10 shares of a made-up ticker.
     t = api.trade(con, run.id, ticker="ACME", side="long", entry_type="market", entry=100.0,
@@ -54,45 +63,34 @@ with store.open() as con:
     assert len(store.trades(con)) == 1 and kinds == ["entered"], kinds
     later = now + timedelta(hours=1)   # a report may not be dated after its `now`
 
-    # Replay: the outcome is what is reported, and no bars are read.
+    # A live run reads its outcome from reports, exactly as a replay one does.
+    o = api.report(con, t.id, state="exited", kind="target", at=later, reason="Smoke test.",
+                   now=later).outcome
+    assert isinstance(o, outcome.Outcome), o
+    assert (o.status, o.fill, o.exit, o.exit_kind, o.r, o.cash) == (
+        "exited", 100.0, 103.0, "target", 2.0, 30.0), o
+    st = api.stats(con, run=run.id, now=later)
+    assert st.trades == (t.id,) and st.closed == (t.id,), st
+
+    # Replay: check_only writes nothing, and the recorded trade reads the same way.
     replay = api.start_run(con, "example", mode="replay", currency="USD", at=now, now=now)
     plan = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5,
                 target=104.0, size=10, currency="USD", instrument="stock",
                 reasons="Smoke test.", at=now, now=now)
-    # check_only: the example strategy's rules give results, and nothing is written.
     before = len(store.events(con))
     seen = api.trade(con, replay.id, check_only=True, **plan)
     assert seen.checks and len(store.events(con)) == before and len(store.trades(con)) == 1
     r = api.trade(con, replay.id, **plan)
+    assert api.get_trade(con, r.id, now=later).outcome.status == "pending"
     api.report(con, r.id, state="filled", at=now + timedelta(minutes=15), reason="Smoke test.",
                now=later)
     o = api.report(con, r.id, state="exited", kind="target", at=now + timedelta(minutes=30),
                    reason="Smoke test.", now=later).outcome
-    assert (o.status, o.exit, o.reported) == ("exited", 104.0, ("fill", "close")), o
+    assert (o.status, o.exit, o.exit_kind, o.cash) == ("exited", 104.0, "target", 40.0), o
+    assert abs(o.r - 4.0 / 1.5) < 1e-9, o
     st = api.stats(con, run=replay.id, now=later)
     assert st.trades == (r.id,) and st.closed == (r.id,), st
-
-    # Live, before any bars: the one fetch is replaced in-process, so it fails without reaching
-    # the network, and the read names the reason.
-    import yfinance   # the wheel declares it, so this import proves the dependency is installed
-
-    def offline(symbol, interval, start, end):
-        raise OSError("offline in the smoke test")
-
-    yahoo.fetch = offline
-    notes = api.get_trade(con, t.id, now=later).outcome.notes
-    assert any("offline in the smoke test" in n for n in notes), notes
-
-    # Live, from bars stored here: three quiet 1m bars, then one reaching the 103.0 target. The
-    # trade ended, so it is never fetched.
-    quiet = [judge.Bar(now + timedelta(minutes=i), 100.0, 101.0, 99.5, 100.5, None)
-             for i in range(3)]
-    q = quiet + [judge.Bar(now + timedelta(minutes=3), 100.5, 104.5, 100.0, 104.0, None)]
-    with contextlib.closing(bars.open()) as b:
-        bars.add(b, "yahoo", "ACME", 1, q, now, later, now)
-    o = api.get_trade(con, t.id, now=later).outcome
-    assert (o.status, o.exit, o.exit_reason) == ("exited", 103.0, "target"), o
-print(f"installed wheel recorded {t.id} through the API")
+print(f"installed wheel {version} recorded {t.id} and {r.id} through the API")
 PY
 "$bin/trading-desk" integrity
 
@@ -153,7 +151,7 @@ try:
                        "clientInfo": {"name": "smoke", "version": "0"}})
     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
     tools = ask("tools/list")["tools"]
-    assert len(tools) == 16, [t["name"] for t in tools]
+    assert len(tools) == 14, [t["name"] for t in tools]
 
     at = "2026-03-02T12:00:00Z"
     call("save_strategy", id="example",
@@ -174,5 +172,5 @@ try:
 finally:
     if p.poll() is None:
         p.kill()
-print("installed wheel served 16 tools over MCP")
+print("installed wheel served 14 tools over MCP")
 PY

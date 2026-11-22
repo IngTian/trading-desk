@@ -1,8 +1,8 @@
-"""`trading-desk mcp`: desk/api.py's 16 functions as MCP tools over stdio, with
+"""`trading-desk mcp`: desk/api.py's 14 functions as MCP tools over stdio, with
 desk/instructions.md as the server's `instructions`.
 
 On the MCP SDK's low-level server, never MCPServer: MCPServer coerces arguments ("1" and true
-reach an integer parameter as 1), and the API refuses a wrong type itself (design §9). The SDK
+reach an integer parameter as 1), and the API refuses a wrong type itself. The SDK
 frames messages, speaks both protocol eras, answers ping, skips bad lines, and points fd 0 and
 fd 1 away from the wire while serving. The desk adds what it does not: Python's buffered prints
 kept off the wire, one call at a time in a worker thread, and replies in strict JSON.
@@ -44,7 +44,7 @@ def _p(type_: str, description: str, **schema) -> dict:
 
 
 _TIME = ("a UTC ISO-8601 time with its offset, e.g. 2026-03-02T14:30:00Z; required in a replay "
-         "run (the close of the bar acted on), now by default in a live one")
+         "run, now by default in a live one")
 
 
 def _at(what: str) -> dict:
@@ -57,7 +57,7 @@ _VERSION = _p("integer", "A version of the strategy, from 1; left out: the lates
 TOOLS: dict[str, Tool] = {
     "save_strategy": Tool(api.save_strategy, (
         "Save a strategy's Markdown text: front matter with `name:`, prose, an optional "
-        "`## Checklist` section whose top-level bullets are the items judged at each entry, and "
+        "`## Checklist` section whose top-level bullets are the items answered at each entry, and "
         "exactly one fenced `rules` block in TOML, the rules every trade is checked against. A "
         "new id makes version 1. An existing id needs `if_current`, the `current_hash` from "
         "get_strategy, so a save never overwrites a change made since you read it; any change to "
@@ -85,15 +85,15 @@ TOOLS: dict[str, Tool] = {
         "gives."), {}),
     "start_run": Tool(api.start_run, (
         "Deploy a strategy version as a run, `<strategy>-r<N>`: one version traded over a "
-        "period, live (in real time, judged against Yahoo's price bars) or replay (re-running "
-        "past history, where your reports are the only source of outcomes). A run trades in one "
+        "period, live (in real time) or replay (re-running past history). Every trade's outcome "
+        "comes from your reports of it in either mode; the only difference is that `at` defaults "
+        "to now on a live run and is required on a replay one. A run trades in one "
         "currency: every trade on it is in that currency, and the rules' amounts are read in it. "
-        "Tags are free labels, kept verbatim and never interpreted; stats can narrow by them. A "
-        "live run is judged on Yahoo's 1-minute bars, whatever the strategy's timeframes. "
+        "Tags are free labels, kept verbatim and never interpreted; stats can narrow by them. "
         "Several runs may be open at once. The reply is the run, with its id and `started`."), {
         "strategy": _p("string", "The id of the strategy to deploy."),
-        "mode": _p("string", "live: real time, judged against Yahoo's bars; replay: re-running "
-                   "past history, judged by your reports alone.", enum=["live", "replay"]),
+        "mode": _p("string", "live: real time; replay: re-running past history.",
+                   enum=["live", "replay"]),
         "currency": _p("string", "The one currency every trade on the run is in.",
                        enum=["CAD", "USD"]),
         "tags": _p("array", "Free labels for the run, kept verbatim and never interpreted, e.g. "
@@ -103,16 +103,11 @@ TOOLS: dict[str, Tool] = {
     }, ("strategy", "mode", "currency")),
     "stop_run": Tool(api.stop_run, (
         "Stop a run: no trade may be entered at or after `at`, its pending limit orders (orders "
-        "to trade only at a set price or better, not yet filled) are cancelled with why \"run "
-        "stopped\", and open trades stay open and keep being judged. It is refused before the "
-        "run's start, and at or before a trade's entry. The reply is the run, with `stopped`, "
-        "and its unfilled limits in three groups, each in recording order. `cancelled`: the "
-        "stop cancelled them. `awaiting_bars`: the bars could be read but have not reached the "
-        "stop yet; read each again later with get_trade, and report nothing. `needs_report`: an "
-        "object from trade id to why its bars could not be read (the read's notes, such as Yahoo "
-        "failing, a ticker Yahoo does not know, or bars older than Yahoo keeps). Report each "
-        "one's fill, or its cancellation with why \"run stopped\" dated at the stop; if the "
-        "cause passes, reading it again with get_trade also settles it. It cannot be undone."), {
+        "to trade only at a set price or better, not yet filled) read cancelled with why \"run "
+        "stopped\", and open trades stay open until their exit is reported. It is refused before "
+        "the run's start, and at or before a trade's entry. The reply is the run, with `stopped`, "
+        "and `cancelled`: the ids of the limit orders the stop cancelled, in recording order. It "
+        "cannot be undone."), {
         "run": _p("string", "The run's id, e.g. dip-buyer-r1."),
         "at": _at("When the run stops"),
     }, ("run",)),
@@ -143,10 +138,8 @@ TOOLS: dict[str, Tool] = {
         "relative strength index, a 0 to 100 reading of recent gains against recent losses. "
         "`checklist` answers the version's checklist items, matched by their exact text.\n\n"
         "Before an entry whose rules read market keys, take them from get_strategy's "
-        "market_keys and supply each the instructions name (a replay run: all; a live run: the "
-        "facts, a future's indicator keys, and any value you trust over the desk's), read off "
-        "the last completed bar: a key left out reads unknown for good, since market is not "
-        "corrected. The rules that read the run's other "
+        "market_keys and supply each, read off the last completed bar: a key left out reads "
+        "unknown for good, since market is not corrected. The rules that read the run's other "
         "trades count this run only, and max_consecutive_losses counts within the day."), {
         "run": _p("string", "The id of the run the trade is on, e.g. dip-buyer-r1."),
         "ticker": _p("string", "The symbol, as the user's chart names it, e.g. ACME or GC1!."),
@@ -173,7 +166,7 @@ TOOLS: dict[str, Tool] = {
         "market": _p("object", "The figures the rules read that you supply, by key, each a "
                      "number read at the bar acted on, e.g. {\"rsi_14_15m\": 28.5}.",
                      additionalProperties={"type": "number"}),
-        "checklist": _p("array", "One answer per checklist item of the version, as you judge "
+        "checklist": _p("array", "One answer per checklist item of the version, as you read "
                         "it: the item's exact text, a verdict, and a one-line reason.",
                         items={"type": "object", "properties": {
                             "item": {"type": "string"},
@@ -185,62 +178,42 @@ TOOLS: dict[str, Tool] = {
                          "false: record the trade."),
     }, ("run", "ticker", "side", "entry_type", "entry", "size", "currency", "reasons")),
     "move_order": Tool(api.move_order, (
-        "Move a trade's stop, its target or both, from `at` on: the move is in force from the "
-        "first bar opening at or after it. Refused once the trade has closed, or once the bars "
-        "put its exit before `at`; that refusal says when and at what price, and an `open` "
-        "report dated at or after that exit sets aside an exit the broker never made. The reply "
-        "is the trade, with the move in `decisions.moves`, in time order."), {
+        "Move a trade's stop, its target or both, from `at` on. Refused once the trade has "
+        "exited, and on a limit order its run's stop cancelled. The reply is the trade, with the "
+        "move in `decisions.moves`, in time order."), {
         "trade": _TRADE,
         "reason": _p("string", "Why the order moves, exactly as the user wrote it."),
         "stop": _p("number", "The new stop price."),
         "target": _p("number", "The new target price."),
         "at": _at("When the order moved"),
     }, ("trade", "reason")),
-    "close_trade": Tool(api.close_trade, (
-        "Close a trade by hand at `at`: the user's decision to get out, with no price. It "
-        "cancels a pending limit, with why \"pulled\", and prices a live position from the "
-        "bars: the close of the last bar opening before `at`, reading \"closing\" until that bar "
-        "is complete. A replay position is refused; report its exit with its price instead "
-        "(report, state \"exited\", kind \"hand\"). A live limit that reads not judged (bars "
-        "that could not be read) is not cancelled: it stays so until its fill or cancellation "
-        "is reported. A trade is closed once. Use it when the user gives no price. When they "
-        "give the price they got out at, report the exit instead (report, state \"exited\", "
-        "kind \"hand\", price), which the bars never override; a close's price can be given "
-        "later with correct_trade, {\"report\": \"close\", \"price\": …}. To pull a live "
-        "limit the broker confirms unfilled, report it cancelled with why \"pulled\" instead "
-        "of closing it. The reply is the trade."), {
-        "trade": _TRADE,
-        "reason": _p("string", "Why the user gets out, exactly as they wrote it."),
-        "at": _at("When the user closed it"),
-    }, ("trade", "reason")),
     "report": Tool(api.report, (
         "Report the trade's state as of `at`, never after now. `filled`: a limit order filled, "
         "at the limit unless a price is given. `cancelled`: it never will; give `why`. `open`: "
-        "the position is still held. `exited`: it closed; give `kind`, and a hand exit gives "
-        "its price (a stop or target exit given none is at the level in force). Reports are how "
-        "a replay run's outcomes are recorded, and they override the bars in a live one. A "
+        "the position is still open. `exited`: the position is out; give `kind`, and a hand "
+        "exit gives "
+        "its price (a stop or target exit given none is at the level in force). Reports are the "
+        "only source of a trade's outcome, in a live run as in a replay one. A "
         "limit's fill is reported before its exit. A wrong report is fixed with correct_trade "
-        "or withdrawn with void_trade. The reply is the trade: `outcome` is the reports over "
-        "the bars, `judged` the bars' own reading (null in replay), and `differs` the fields "
-        "where they part."), {
+        "or withdrawn with void_trade. The reply is the trade, with `outcome` read from its "
+        "record."), {
         "trade": _TRADE,
         "state": _p("string", "filled: the limit order filled; cancelled: it never will; open: "
-                    "the position is still held; exited: it closed.",
+                    "the position is still open; exited: the position is out.",
                     enum=["filled", "cancelled", "open", "exited"]),
         "at": _p("string", "The moment the trade was in that state: a UTC ISO-8601 time with "
-                 "its offset, e.g. 2026-03-02T14:30:00Z; in a replay run, the close of the bar "
-                 "acted on."),
+                 "its offset, e.g. 2026-03-02T14:30:00Z."),
         "reason": _p("string", "What the report rests on: the user's words when they gave them; "
                      "otherwise what you read, marked as yours, e.g. \"chart: the 15:00 bar "
                      "traded down to 100\"."),
         "price": _p("number", "filled: the fill price (left out: the limit); exited: the exit "
                     "price, required for a hand exit."),
         "kind": _p("string", "exited only: stop (the stop filled), target (the target filled) "
-                   "or hand (closed by hand; left out: hand).", enum=["hand", "stop", "target"]),
+                   "or hand (exited by hand; left out: hand).", enum=["hand", "stop", "target"]),
         "why": _p("string", "cancelled only, and required there: not filled (the market never "
                   "reached the limit, or the order expired), pulled (withdrawn) or run "
-                  "stopped (the run's stop cancelled it, for an order whose bars cannot settle "
-                  "it; only on a stopped run, dated at its stop).",
+                  "stopped (the run's stop cancelled it; only on a stopped run, dated at its "
+                  "stop).",
                   enum=["not filled", "pulled", "run stopped"]),
     }, ("trade", "state", "at", "reason")),
     "correct_trade": Tool(api.correct_trade, (
@@ -249,7 +222,7 @@ TOOLS: dict[str, Tool] = {
         "`target`, `size`, `at`, or `point_value`, e.g. "
         "{\"stop\": 97.5}. One move: {\"move\": i, …} with its `stop`, `target` or `at`, where "
         "i is the move's place in get_trade's `decisions.moves`, from 0. One standing report: "
-        "{\"report\": \"fill\" | \"cancel\" | \"open\" | \"close\", …} with its `price`, `at`, "
+        "{\"report\": \"filled\" | \"cancelled\" | \"open\" | \"exited\", …} with its `price`, "
         "`why` or `kind`, where \"open\" is the latest open report. A field given as null is "
         "read as not given, so a correction never removes a stop or a target. A wrong run, "
         "ticker or side is not corrected: void the trade and enter it again with its original "
@@ -267,27 +240,25 @@ TOOLS: dict[str, Tool] = {
         "trade": _TRADE,
         "reason": _p("string", "Why it is withdrawn, exactly as the user wrote it."),
         "report": _p("string", "The one standing report to withdraw instead of the trade; "
-                     "open: the latest open report.", enum=["fill", "cancel", "open", "close"]),
+                     "open: the latest open report.",
+                     enum=["filled", "cancelled", "open", "exited"]),
     }, ("trade", "reason")),
     "get_trade": Tool(api.get_trade, (
-        "One trade, read now. `decisions`: the entry, its moves, its close and its reports, as "
-        "corrected. `outcome`: the reports over the bars, with `status` (pending, open, closing, "
-        "exited, cancelled or not judged), the fill, the exit, R and cash. R is the move from "
+        "One trade, read now. `decisions`: the entry, its moves and its reports, as "
+        "corrected. `outcome`: what its record reads as, with `status` (pending, open, exited or "
+        "cancelled), the fill, the exit, R and cash. R is the move from "
         "the fill to the exit divided by the risk, the distance from the fill to the entry's "
         "stop (never a moved stop); cash is the price move times the size times the point "
-        "value, in the trade's currency. `judged`: the bars' own reading of a live trade (null "
-        "in replay), and `differs`: the fields where it and the outcome part. `checks_shown`: "
+        "value, in the trade's currency. `checks_shown`: "
         "the rule results shown at entry; `checks_now`: as they read now, from the run's "
         "current trades; `checks_differ`: the rules whose result changed (null for a voided trade, "
-        "or when the entry stored no results to compare). A live trade is "
-        "judged from bars fetched as it is read; what the bars cannot give is null, with a "
-        "note."), {
+        "or when the entry stored no results to compare)."), {
         "trade": _TRADE,
     }, ("trade",)),
     "list_trades": Tool(api.list_trades, (
         "Every trade in recording order, voids included, narrowed to a run or a strategy, and "
-        "to the open ones (`true`) or the rest (`false`). Open means pending, open or closing, "
-        "or not judged with no close or cancellation to end it. Each trade carries its whole "
+        "to the open ones (`true`) or the rest (`false`). Open means a status of pending or open. "
+        "Each trade carries its whole "
         "record, as get_trade gives it, except that `checks_now` and `checks_differ` are null: "
         "only get_trade works them out, so narrow to a run, and to `open: true`, when you "
         "can."), {
@@ -296,21 +267,6 @@ TOOLS: dict[str, Tool] = {
         "open": _p("boolean", "true: only the open trades; false: only the rest; left out: "
                    "all."),
     }),
-    "trade_bars": Tool(api.trade_bars, (
-        "A live trade's price bars, each with its open time in UTC and its open, high, low, "
-        "close and volume, on one of its run's timeframes (default: the finest), or on 1m, the "
-        "bars it is judged on. They run from "
-        "`before` bars ahead of the bar holding its entry to `after` bars past its exit or "
-        "cancellation, or to the latest bar while it has not ended. `missing` gives the ranges "
-        "no fetch covered, and `notes` why. Replay trades have no bars."), {
-        "trade": _p("string", "A live trade's id."),
-        "timeframe": _p("string", "One of its run's timeframes, e.g. 15m, or 1m, the bars it is "
-                        "judged on; left out: the finest."),
-        "before": _p("integer", "Bars to include ahead of the bar holding the entry; left out: "
-                     "0.", minimum=0, maximum=10000),
-        "after": _p("integer", "Bars to include past the exit or cancellation; left out: 0.",
-                    minimum=0, maximum=10000),
-    }, ("trade",)),
     "stats": Tool(api.stats, (
         "Counts, rates and averages for one scope's non-void trades: a run, a strategy, or a "
         "strategy with a version, narrowed by mode, by tags and by `conforming_only`. Never a "
@@ -320,12 +276,11 @@ TOOLS: dict[str, Tool] = {
         "wins over closed, and `average_r`, `total_r`, `average_win`, `average_loss` (negative) "
         "and `average_planned_rr` (the planned reward over the risk, from the entry's target "
         "and stop) are over closed. `closed_no_r`: exits without R, whose cash is in `pnl`, the "
-        "profit or loss per currency, gross of fees, never converted. `open`, `pending`, "
-        "`cancelled` (by why) and `not_judged` (each with its missing range and the report that "
-        "settles it) are the rest. `limits` is the limit orders' fill rate: filled over placed, "
-        "less those pending, not judged or cancelled by a run stop. `left_out`: what "
-        "conforming_only left out. `rests_on`: the trades by mode, tag set and version, and the "
-        "live exits by reported or judged. A figure with nothing under it is null."), {
+        "profit or loss per currency, gross of fees, never converted. `open`, `pending` and "
+        "`cancelled` (by why) are the rest. `limits` is the limit orders' fill rate: filled over "
+        "placed, less those pending or cancelled by a run stop. `left_out`: what "
+        "conforming_only left out. `rests_on`: the trades by mode, tag set and version. A figure "
+        "with nothing under it is null."), {
         "strategy": _p("string", "A strategy's id: the scope, alone or with a version."),
         "version": _p("integer", "With strategy: that version alone, from 1.", minimum=1),
         "run": _p("string", "A run's id: the scope alone, since a run names its strategy and "
@@ -381,17 +336,15 @@ def _counted(s: dict) -> dict:
               "open", "pending"):
         s[k] = _ids(s[k])
     s["cancelled"] = _each(s["cancelled"])
-    s["not_judged"] = {"count": len(s["not_judged"]), "trades": s["not_judged"]}
     limits = s["limits"]
-    limits.update(_each({k: limits[k] for k in ("placed", "filled", "pending", "not_judged")}),
+    limits.update(_each({k: limits[k] for k in ("placed", "filled", "pending")}),
                   cancelled=_each(limits["cancelled"]))
     if s["left_out"]:
         s["left_out"] = {"breached": _ids(s["left_out"]["breached"]),
                          "unknown": _each(s["left_out"]["unknown"])}
     r = s["rests_on"]
     s["rests_on"] = {"mode": _each(r["mode"]), "version": _each(r["version"]),
-                     "tags": [{"tags": g["tags"], "trades": _ids(g["trades"])} for g in r["tags"]],
-                     "live_exits": _each(r["live_exits"])}
+                     "tags": [{"tags": g["tags"], "trades": _ids(g["trades"])} for g in r["tags"]]}
     return s
 
 
@@ -440,7 +393,6 @@ def first_start() -> None:
     """Create desk.db when neither it nor its iCloud placeholder exists, so a desk.db iCloud has
     evicted is never covered over. A failure goes to stderr, and every call then names it."""
     try:
-        config.refuse_legacy_db()
         path = config.db_path()
         if not path.exists() and not config.icloud_placeholder(path).exists():
             store.create(path)
@@ -463,8 +415,8 @@ async def _call_tool(ctx, params):
     if params.name not in TOOLS:   # the spec's protocol error, not a tool result
         raise MCPError(mcp_types.INVALID_PARAMS, f"Unknown tool: {shown(params.name)}")
     async with _lock:
-        # A worker thread keeps the loop free to answer a ping during a Yahoo fetch; `call`
-        # opens its connection there, since a sqlite3 connection stays in its thread.
+        # A worker thread keeps the loop free to answer a ping; `call` opens its connection
+        # there, since a sqlite3 connection stays in its thread.
         return await anyio.to_thread.run_sync(call, params.name, params.arguments or {})
 
 

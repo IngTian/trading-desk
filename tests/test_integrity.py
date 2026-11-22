@@ -1,4 +1,4 @@
-"""Tests for the v3 integrity checker. Violations are written as raw SQL with foreign keys OFF,
+"""Tests for the integrity checker. Violations are written as raw SQL with foreign keys OFF,
 the way a damaged or hand-edited file would hold them; the healthy log goes through the API.
 Every figure is invented."""
 import json
@@ -22,16 +22,16 @@ RUN = "dip-buyer-r1"
 @pytest.fixture
 def con(tmp_path):
     """A healthy log built through the API: one replay run, a trade with a move, a correction
-    and a hand close, and a second trade that is voided."""
+    and a hand exit, and a second trade that is voided."""
     db = tmp_path / "desk.db"
     store.create(db)
     with store.open(db) as conn:
         api.save_strategy(conn, "dip-buyer", TEXT, now=NOW)
         api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
-        t = api.trade(conn, RUN, **BASE, at=T1, now=LATER)
+        t = api.trade(conn, RUN, **{**BASE, "entry_type": "market"}, at=T1, now=LATER)
         api.move_order(conn, t.id, stop=99.0, reason="Trail.", at=T2, now=LATER)
         api.correct_trade(conn, t.id, fields={"stop": 98.0}, reason="Typo.", now=LATER)
-        api.close_trade(conn, t.id, reason="Out.", at=T3, now=LATER)
+        api.report(conn, t.id, state="exited", price=101.0, reason="Out.", at=T3, now=LATER)
         v = api.trade(conn, RUN, **{**BASE, "ticker": "WXYZ"}, at=T1, now=LATER)
         api.void_trade(conn, v.id, reason="Wrong run.", now=LATER)
         conn.execute("PRAGMA foreign_keys = OFF")
@@ -56,12 +56,12 @@ def tid(con, ticker):
     return con.execute("SELECT id FROM trades WHERE ticker = ?", (ticker,)).fetchone()[0]
 
 
-def raw_trade(con, id, *, at=T1, run=RUN, entered=True):
+def raw_trade(con, id, *, at=T1, run=RUN, entered=True, entry_type="limit"):
     con.execute("INSERT INTO trades (id, run_id, ticker, side, instrument, point_value, currency)"
                 " VALUES (?, ?, 'ACME', 'long', 'stock', 1.0, 'USD')", (id, run))
     if entered:
         ev(con, "entered", at, trade=id, run=run, payload={
-            "entry_type": "limit", "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
+            "entry_type": entry_type, "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
             "reasons": "x", "screenshots": []})
 
 
@@ -86,7 +86,8 @@ def test_a_healthy_log_reports_nothing(con):
 
 
 def test_the_count_is_returned_and_printed(con, capsys):
-    ev(con, "closed", T4, trade=tid(con, "ACME"))  # a second close
+    ev(con, "exited", T4, trade=tid(con, "ACME"),
+       payload={"kind": "hand"})  # a second exit
     count = integrity.run(con)
     assert count == 1
     assert "1 integrity violation(s) found" in capsys.readouterr().out
@@ -124,7 +125,7 @@ def test_a_run_with_two_stops_is_reported(con):
 
 
 def test_a_stop_before_the_start_is_reported_and_one_second_after_is_not(con):
-    # A run with no trades, so no entry falls after the stop (decision_dates' half).
+    # A run with no trades, so no entry falls after the stop (record's half).
     con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
                 " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'replay', '[]', 'USD')")
     ev(con, "run_started", NOW, run="dip-buyer-r2")
@@ -140,7 +141,7 @@ def test_a_stop_before_the_start_is_reported_and_one_second_after_is_not(con):
 def test_a_move_before_the_entry_is_reported(con):
     ev(con, "order_moved", T1 - timedelta(seconds=1), trade=tid(con, "ACME"),
        payload={"stop": 99.0, "reason": "x"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 def test_a_move_at_the_entry_is_healthy(con):
@@ -148,29 +149,33 @@ def test_a_move_at_the_entry_is_healthy(con):
     assert found(con)[0] == 0
 
 
-def test_a_close_before_the_entry_is_reported(con):
-    raw_trade(con, "CLOS-1", at=T2)
-    ev(con, "closed", T2 - timedelta(seconds=1), trade="CLOS-1", payload={"reason": "x"})
-    assert only(con, "decision_dates") == 1
+def test_an_exit_before_the_entry_is_reported(con):
+    raw_trade(con, "EXIT-1", at=T2, entry_type="market")
+    ev(con, "exited", T2 - timedelta(seconds=1), trade="EXIT-1",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
+    assert only(con, "record") == 1
 
 
-def test_a_close_at_the_entry_is_reported_and_one_second_later_is_not(con):
-    raw_trade(con, "CLOS-1", at=T2)
-    ev(con, "closed", T2 + timedelta(seconds=1), trade="CLOS-1", payload={"reason": "x"})
+def test_an_exit_at_the_entry_is_reported_and_one_second_later_is_not(con):
+    raw_trade(con, "EXIT-1", at=T2, entry_type="market")
+    ev(con, "exited", T2 + timedelta(seconds=1), trade="EXIT-1",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
     assert found(con)[0] == 0
-    raw_trade(con, "CLOS-2", at=T2)
-    ev(con, "closed", T2, trade="CLOS-2", payload={"reason": "x"})
-    assert only(con, "decision_dates") == 1
+    raw_trade(con, "EXIT-2", at=T2, entry_type="market")
+    ev(con, "exited", T2, trade="EXIT-2",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
+    assert only(con, "record") == 1
 
 
-def test_a_move_at_the_hand_close_is_reported_and_one_second_before_is_not(con):
-    raw_trade(con, "MOVE-1", at=T1)
-    ev(con, "closed", T3, trade="MOVE-1", payload={"reason": "x"})
+def test_a_move_at_the_hand_exit_is_reported_and_one_second_before_is_not(con):
+    raw_trade(con, "MOVE-1", at=T1, entry_type="market")
+    ev(con, "exited", T3, trade="MOVE-1",
+       payload={"reason": "x", "price": 101.0, "kind": "hand"})
     ev(con, "order_moved", T3 - timedelta(seconds=1), trade="MOVE-1",
        payload={"stop": 99.0, "reason": "x"})
     assert found(con)[0] == 0
     ev(con, "order_moved", T3, trade="MOVE-1", payload={"stop": 99.0, "reason": "x"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 @pytest.mark.parametrize(("stop", "reported"), [(T1, 1), (T1 + timedelta(seconds=1), 0)])
@@ -179,22 +184,22 @@ def test_a_trade_entered_at_or_after_its_runs_stop_is_reported_unless_void(con, 
     the void WXYZ are both entered at T1; only ACME counts."""
     ev(con, "run_stopped", stop)
     if reported:
-        assert only(con, "decision_dates") == reported
+        assert only(con, "record") == reported
     else:
         assert found(con) == (0, [])
 
 
 def test_an_entry_before_the_run_started_is_reported(con):
     raw_trade(con, "EARL-1", at=NOW - timedelta(seconds=1))
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 def test_a_decision_is_dated_by_its_corrected_time(con):
-    """A correction moves the entry earlier than the run's start: judged by effective times."""
+    """A correction moves the entry earlier than the run's start: read by effective times."""
     entered = store.events(con, trade_id=tid(con, "ACME"))[0]["id"]
     ev(con, "corrected", LATER, trade=tid(con, "ACME"), corrects=entered,
        payload={"fields": {"at": (NOW - timedelta(hours=1)).isoformat()}, "reason": "x"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 # --- corrections -------------------------------------------------------------------------------
@@ -236,15 +241,15 @@ def test_a_correction_naming_a_later_event_is_reported(con):
     assert any(ln.startswith("file: ") for ln in found(con)[1])
 
 
-# --- void and close are final ------------------------------------------------------------------
+# --- void and exit are final ------------------------------------------------------------------
 
 def test_an_event_after_a_void_is_reported(con):
     ev(con, "order_moved", T4, trade=tid(con, "WXYZ"), payload={"stop": 99.0, "reason": "x"})
     assert only(con, "nothing_after_void") == 1
 
 
-def test_two_closes_are_reported(con):
-    ev(con, "closed", T4, trade=tid(con, "ACME"), payload={"reason": "again"})
+def test_two_exits_are_reported(con):
+    ev(con, "exited", T4, trade=tid(con, "ACME"), payload={"reason": "again", "kind": "hand"})
     assert only(con, "one_report") == 1
 
 
@@ -266,29 +271,29 @@ def test_a_log_with_reports_a_withdrawal_and_a_corrected_report_reports_nothing(
        payload={"fields": {"price": 99.75}, "reason": "x"})
     # A move after a withdrawal: not after a void. Then still open at T3.
     ev(con, "order_moved", T3, trade="RAW-1", payload={"stop": 99.0, "reason": "x"})
-    ev(con, "held", T3, trade="RAW-1", payload={"reason": "x"})
-    ev(con, "closed", T4, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    ev(con, "open", T3, trade="RAW-1", payload={"reason": "x"})
+    ev(con, "exited", T4, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
     assert found(con) == (0, [])
 
 
 def test_an_exit_with_no_position_is_reported(con):
     raw_trade(con, "RAW-1")
-    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
-    assert only(con, "reports") == 1
+    ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    assert only(con, "record") == 1
 
 
 def test_an_exit_kind_that_is_not_known_is_reported(con):
     raw_trade(con, "RAW-1")
-    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "trailing"})
-    assert only(con, "reports") == 1
+    ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "trailing"})
+    assert only(con, "record") == 1
 
 
-def test_an_open_report_at_or_after_the_close_is_reported(con):
+def test_an_open_report_at_or_after_the_exit_is_reported(con):
     raw_trade(con, "RAW-1")
     ev(con, "filled", T2, trade="RAW-1", payload={"reason": "x"})
-    ev(con, "closed", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
-    ev(con, "held", T4, trade="RAW-1", payload={"reason": "x"})
-    assert only(con, "reports") == 1
+    ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
+    ev(con, "open", T4, trade="RAW-1", payload={"reason": "x"})
+    assert only(con, "record") == 1
 
 
 # --- versions ----------------------------------------------------------------------------------
@@ -333,11 +338,11 @@ def test_the_checker_never_raises_on_a_damaged_log(con):
     entered = store.events(con, trade_id="RAW-1")[0]["id"]
     ev(con, "corrected", LATER, trade="RAW-1", corrects=entered,
        payload={"fields": "not a dict", "reason": "x"})
-    raw_trade(con, "RAW-2")  # its report folds, but its price breaks the report check
+    raw_trade(con, "RAW-2")  # its report folds, but its price breaks the record check
     ev(con, "filled", T2, trade="RAW-2", payload={"reason": "x", "price": "abc"})
     lines: list[str] = []
     assert integrity.run(con, emit=lines.append) >= 4
-    assert any("trade RAW-2: report check failed: TypeError" in ln for ln in lines)
+    assert any("trade RAW-2: fold failed: TypeError" in ln for ln in lines)
 
 
 ENTERED = {"entry_type": "limit", "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
@@ -404,7 +409,7 @@ def test_a_trade_whose_run_is_missing_is_reported(con):
     lines = []
     integrity.run(con, emit=lines.append)
     assert "run_currency: trade ghost-1: its run ghost-r1 does not exist" in lines
-    assert not [ln for ln in lines if ln.startswith("reports:") and "ghost-1" in ln]
+    assert not [ln for ln in lines if ln.startswith("record:") and "ghost-1" in ln]
 
 
 @pytest.mark.parametrize("at, lines", [(T2, 1), (T4, 0)])
@@ -412,4 +417,4 @@ def test_integrity_reads_run_stopped_only_at_the_stop(con, at, lines):
     ev(con, "run_stopped", T4)
     raw_trade(con, "X")                                                # a limit entered at T1
     ev(con, "cancelled", at, trade="X", payload={"reason": "x", "why": "run stopped"})
-    assert len([ln for ln in found(con)[1] if ln.startswith("reports: ")]) == lines
+    assert len([ln for ln in found(con)[1] if ln.startswith("record: ")]) == lines

@@ -76,11 +76,6 @@ def test_timeframes_are_required_and_strict(tf, match):
         strategy.parse(make(rules))
 
 
-def test_the_old_line_format_is_refused_with_the_toml_form():
-    with pytest.raises(Refused, match=r'write timeframes = \["1h", "15m"\]'):
-        strategy.parse(make("timeframes: 1h, 15m\nmin_reward_risk: 2"))
-
-
 def test_an_indicator_may_name_only_a_declared_timeframe():
     with pytest.raises(Refused, match="4h is not one of this strategy's timeframes"):
         strategy.parse(make('timeframes = ["1h"]\n[rsi]\ntimeframe = "4h"\nat_most = 30'))
@@ -166,15 +161,10 @@ def test_a_repeated_timeframe_is_kept_once():
     ('"60m", "1h"', "60m and 1h"), ('"1h", "15m", "60m"', "1h and 60m"),
     ('"1d", "24h"', "1d and 24h"), ('"7d", "1w"', "7d and 1w")])
 def test_two_names_for_one_timeframe_are_refused(frames, same):
-    """Review item 10: 60m and 1h tied, so their stored order followed hash randomisation, and
-    plan 3 reads the finest first."""
+    """Two names for one timeframe tied, so which stored first followed hash randomisation; the
+    plan needs the finest first, so the tie is refused rather than left to chance."""
     with pytest.raises(Refused, match=f"{same} are the same timeframe; keep one"):
         strategy.parse(make(f"timeframes = [{frames}]"))
-
-
-def test_a_retired_rule_is_refused_as_retired_not_as_a_typo():
-    with pytest.raises(Refused, match="not a rule in this version"):
-        strategy.parse(make('timeframes = ["1h"]\nmax_session_length = "2h"'))
 
 
 def test_an_unknown_rule_is_refused_as_not_checkable():

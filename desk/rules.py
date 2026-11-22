@@ -18,15 +18,6 @@ ORDER = ("min_reward_risk", "max_risk_per_trade", "stop_required", "target_requi
          "daily_loss_limit", "cooldown_after_loss", "trading_hours", "stop_atr", "rsi", "macd",
          "ema", "sma", "facts")
 INDICATORS = ("stop_atr", "rsi", "macd", "ema", "sma")
-RETIRED = {
-    "size": "max_risk_per_trade's result names the largest size that passes; delete size",
-    "banned": "use sides = [...] and instruments = [...]",
-    "stop_headroom_candles": "use [stop_atr]",
-    "cooldown_after_stop": "use cooldown_after_loss = { minutes = … }",
-    "no_open_trade_in_group": "delete it",
-    "max_session_length": "delete it",
-    "max_volatility_ratio": "delete it",
-}
 _COMPARES = ("at_least", "at_most", "between")
 _SIDES = ("long", "short")
 _DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -38,9 +29,6 @@ _TIME = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 _FACT = re.compile(r"[a-z][a-z0-9_]{0,63}")
 _FACT_PREFIXES = ("rsi_", "atr_", "macd_", "ema_", "sma_", "close_", "stop_atr_")
 _AT = re.compile(r"\s*\(at (?:line (\d+), column \d+|end of document)\)$")
-_OLD_LINE = re.compile(r"^\s*[A-Za-z_]+\s*:\s*\S")
-_HINT = ('; from 0.7 the rules block is TOML: write timeframes = ["1h", "15m"], not '
-         "timeframes: 1h, 15m")
 
 
 @dataclass(frozen=True)
@@ -77,7 +65,7 @@ def read_block(text: str, origin: str) -> dict:
     never closed, text that is not TOML (a key or table set twice included).
     ~~~rules and ````rules are read, as Markdown reads them.
     """
-    bodies: list[tuple[int, list[str], int]] = []   # (fence line, body lines, closing line)
+    bodies: list[tuple[int, list[str], int]] = []   # (fence line, body lines, end line)
     fence: tuple[str, int, bool] | None = None      # (char, length, is a rules fence)
     number = 0
     for number, line in enumerate(text.split("\n"), 1):
@@ -114,9 +102,8 @@ def read_block(text: str, origin: str) -> dict:
     except tomllib.TOMLDecodeError as e:
         found = _AT.search(str(e))
         at = start + int(found.group(1)) if found and found.group(1) else end
-        hint = _HINT if any(_OLD_LINE.match(ln) for ln in lines) else ""
         raise Refused(f"{origin}:{at}: the rules block is not valid TOML: "
-                      f"{_AT.sub('', str(e))}{hint}") from None
+                      f"{_AT.sub('', str(e))}") from None
 
 
 def _no(path: str, why: str, fix: str = "") -> Refused:
@@ -280,9 +267,6 @@ def validate(values: dict, timeframes: tuple[str, ...]) -> None:
 
     `timeframes` is the strategy's, finest first."""
     for rule, v in values.items():
-        if rule in RETIRED:
-            raise Refused(f"strategy: {shown(rule)} is not a rule in this version of the desk; "
-                          f"{RETIRED[rule]}")
         if rule not in ORDER:
             raise Refused(f"strategy: {shown(rule)} is not a rule the desk knows; the rules are "
                           f"{', '.join(ORDER)}")

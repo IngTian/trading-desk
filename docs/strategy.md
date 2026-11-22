@@ -41,7 +41,7 @@ fix. No rule is silently dropped.
 
 | Rule | Meaning |
 |---|---|
-| `timeframes` | Required: the bar sizes the rules read, e.g. `["15m", "1h"]`, and what `trade_bars` serves by default (the finest). A live run is judged on Yahoo's 1-minute bars, whatever these are. |
+| `timeframes` | Required: the bar sizes the rules read, e.g. `["15m", "1h"]`, finest first. Each names the indicator keys you supply in `market`, such as `rsi_14_15m`. |
 | `min_reward_risk` | The smallest reward-to-risk you will take: the distance from the entry to the target over the distance from the entry to the stop. That second distance, the risk, is 1R. |
 | `max_risk_per_trade` | The most you will lose if the stop is hit, per currency, e.g. `{ USD = 100, CAD = 130 }`: size × the stop's distance × the point value. The result names the largest size that passes. |
 | `stop_required`, `target_required` | `true` or `false`. |
@@ -67,7 +67,6 @@ reason; the answers are shown apart and take no part in whether a trade kept its
 
 **`market_keys`:** `get_strategy` names every key the rules read, such as `rsi_14_15m`,
 `macd_hist_12_26_9_15m`, `ema_50_1h`, `close_1h` or a fact's own name, and `trade`'s `market` gives
-a number per key. In a replay run the desk computes nothing, so give every key. In a live run it
-computes an indicator from Yahoo's completed bars before the trade's `at`; your value is used in its
-place, and both are kept, so the gap from your chart shows. A key that neither you nor the desk
-gives reads unknown for good, since `market` is not corrected.
+a number per key. The desk computes none of them, on a live run as on a replay one, so supply every
+key, read off your chart at the bar you acted on. A key you leave out reads unknown for good, since
+`market` is not corrected.

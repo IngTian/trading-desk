@@ -1,12 +1,12 @@
-"""Stats over one scope's non-void trades (design §8): counts, rates and averages, each beside the
-trade ids it rests on. Never a verdict, a grade or a ranking. Pure: api.stats builds the rows."""
+"""Stats over one scope's non-void trades: counts, rates and averages, each beside the trade ids
+it rests on. Never a verdict, a grade or a ranking. Pure: api.stats builds the rows."""
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from desk import judge
+from desk import outcome
 
 _RESIDUE = 1e-9   # an R this close to 0 is a breakeven: float residue, not a win or a loss
 
@@ -21,9 +21,8 @@ class Row:
     tags: tuple[str, ...]          # its run's
     entry_type: str
     currency: str
-    outcome: judge.Outcome         # effective: the reports over the judge
+    outcome: outcome.Outcome
     planned_rr: float | None       # checks.reward_risk of the entry as corrected
-    settles: str                   # the report that settles it while it is not judged
 
 
 @dataclass(frozen=True)
@@ -51,12 +50,11 @@ class Stats:
     open: tuple[str, ...]
     pending: tuple[str, ...]
     cancelled: dict[str, tuple[str, ...]]     # by why
-    not_judged: dict[str, dict]               # id -> {"missing": (from, to | None), "settles"}
-    # {"placed", "filled", "pending", "not_judged": ids, "cancelled": {why: ids}, "rate"}
+    # {"placed", "filled", "pending", "cancelled": {why: ids}, "rate"}
     limits: dict
     left_out: dict    # conforming_only: {"breached": ids, "unknown": {result name: ids}}; else {}
     # Trade ids, in `trades`' order: {"mode": {m: ids}, "tags": [{"tags": [...], "trades": ids}],
-    #  "version": {v: ids}, "live_exits": {"reported": ids, "judged": ids}}
+    #  "version": {v: ids}}
     rests_on: dict
 
 
@@ -87,7 +85,7 @@ def _by_why(rows: Sequence[Row]) -> dict[str, tuple[str, ...]]:
 def summarise(rows: Sequence[Row], *, strategy: str, version: int | None, run: str | None,
               mode: str | None, tags: tuple[str, ...], conforming_only: bool,
               left_out: dict) -> Stats:
-    """The buckets read the effective outcome only. A figure with nothing under it is None."""
+    """The buckets read the outcome only. A figure with nothing under it is None."""
     def having(*status: str) -> list[Row]:
         return [r for r in rows if r.outcome.status in status]
     exited = having("exited")
@@ -103,13 +101,10 @@ def summarise(rows: Sequence[Row], *, strategy: str, version: int | None, run: s
     limit = [r for r in rows if r.entry_type == "limit"]
     by_why = _by_why(limit)
     l_pending = [r for r in limit if r.outcome.status == "pending"]
-    l_unjudged = [r for r in limit if r.outcome.status == "not judged" and r.outcome.fill is None]
     filled = [r for r in limit if r.outcome.fill is not None and r.outcome.status != "cancelled"]
     # `run stopped` ends an order for a reason unrelated to its market, so it is left out
-    base = len(limit) - len(l_pending) - len(l_unjudged) - len(by_why.get("run stopped", ()))
+    base = len(limit) - len(l_pending) - len(by_why.get("run stopped", ()))
 
-    live_exits = [r for r in exited if r.mode == "live"]
-    reported = [r for r in live_exits if "close" in r.outcome.reported]
     return Stats(
         strategy=strategy, version=version, run=run, mode=mode, tags=tags,
         conforming_only=conforming_only, trades=_ids(rows), closed=_ids(closed),
@@ -123,17 +118,13 @@ def summarise(rows: Sequence[Row], *, strategy: str, version: int | None, run: s
         no_planned_rr=_ids([r for r in closed if r.planned_rr is None]),
         closed_no_r=_ids([r for r in exited if r.outcome.r is None]),
         pnl={c: math.fsum(xs) for c, xs in cash.items()},
-        open=_ids(having("open", "closing")), pending=_ids(having("pending")),
+        open=_ids(having("open")), pending=_ids(having("pending")),
         cancelled=_by_why(rows),
-        not_judged={r.id: {"missing": r.outcome.missing, "settles": r.settles}
-                    for r in having("not judged")},
         limits={"placed": _ids(limit), "filled": _ids(filled), "pending": _ids(l_pending),
-                "not_judged": _ids(l_unjudged), "cancelled": by_why,
+                "cancelled": by_why,
                 "rate": len(filled) / base if base else None},
         left_out=left_out,
         rests_on={"mode": _grouped(rows, lambda r: r.mode),
                   "tags": [{"tags": list(t), "trades": ids}
                            for t, ids in _grouped(rows, lambda r: r.tags).items()],
-                  "version": _grouped(rows, lambda r: r.version),
-                  "live_exits": {"reported": _ids(reported),
-                                 "judged": _ids([r for r in live_exits if r not in reported])}})
+                  "version": _grouped(rows, lambda r: r.version)})

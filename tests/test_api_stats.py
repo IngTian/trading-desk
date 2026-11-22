@@ -1,11 +1,10 @@
 """api.stats: one scope, type-checked filters, narrowing before any trade is read, and
 conforming_only from the results now. Every figure is invented."""
-import sqlite3
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, bars, store
+from desk import api, store
 
 NOW = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
 START = NOW - timedelta(days=30)
@@ -117,7 +116,7 @@ def test_mode_and_tags_narrow_exactly(con, monkeypatch):
     swing, cap, live = run(con, tags=["paper", "swing"]), run(con, tags=["Paper"]), run(
         con, "live", tags=["paper"])
     ids = {r: enter(con, r).id for r in ("s-r1", swing, cap)}
-    ids[live] = enter(con, live).id      # the network is off: not judged
+    ids[live] = enter(con, live).id
 
     def trades(**kw):
         return api.stats(con, strategy="s", now=NOW, **kw).trades
@@ -126,7 +125,6 @@ def test_mode_and_tags_narrow_exactly(con, monkeypatch):
     assert trades(tags=["paper", "swing"]) == (ids[swing],)
     assert trades(tags=["swing", "Paper"]) == ()
     assert trades(mode="live") == (ids[live],)
-    assert api.stats(con, strategy="s", mode="live", now=NOW).not_judged.keys() == {ids[live]}
     assert trades(mode="replay", tags=["paper"]) == (ids[swing],)
     s = api.stats(con, strategy="s", tags=["paper"], now=NOW)
     assert (s.tags, s.mode) == (("paper",), None)
@@ -185,25 +183,3 @@ def test_conforming_only_reads_the_results_now_and_names_what_it_left_out(con, m
     assert (s.limits["placed"], s.limits["cancelled"], s.limits["rate"]) == (
         (u.id,), {"not filled": (u.id,)}, 0.0)
     assert s.pnl == {"USD": 50.0}
-
-
-def test_stats_never_raises_when_a_live_trades_bars_cannot_be_read(con, monkeypatch):
-    version(con, 'timeframes = ["15m"]\nrsi = { at_most = 30 }\n')
-    live = run(con, "live")
-    t = enter(con, live, at=h(2))                 # the network is off: no bars since the entry
-    assert t.outcome.status == "not judged"
-    s = api.stats(con, run=live, now=NOW)
-    assert s.not_judged == {t.id: {"missing": t.outcome.missing, "settles": api._settles(
-        t.outcome)}}
-    assert t.outcome.missing[0] == h(2) and s.not_judged[t.id]["settles"].startswith(
-        "report its exit")
-    assert s.rests_on["live_exits"] == {"reported": (), "judged": ()}
-    s = api.stats(con, run=live, conforming_only=True, now=NOW)
-    assert s.trades == () and s.left_out == {"breached": (), "unknown": {"rsi_14_15m": (t.id,)}}
-
-    def broken(path=None):
-        raise sqlite3.OperationalError("an invented locked database")
-    monkeypatch.setattr(bars, "open", broken)
-    for conforming in (None, True):
-        s = api.stats(con, strategy="s", mode="live", conforming_only=conforming, now=NOW)
-        assert s.not_judged.keys() == ({t.id} if conforming is None else set())

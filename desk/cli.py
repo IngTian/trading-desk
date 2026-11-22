@@ -1,5 +1,5 @@
-"""Command-line interface: `trading-desk mcp`, the desk's one interface, and `trading-desk
-integrity`. Recording goes through desk/api.py."""
+"""Command-line interface: `trading-desk mcp`, how an agent reaches the desk, and `trading-desk
+integrity`. Recording goes through desk/api.py, which Python imports directly."""
 from __future__ import annotations
 
 import argparse
@@ -27,7 +27,7 @@ def cmd_integrity(args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
-    """Serve the desk's 16 tools over stdio until the client closes stdin."""
+    """Serve the desk's 14 tools over stdio until the client closes stdin."""
     from desk import server  # the MCP SDK is imported only by the command that serves it
     try:
         return server.serve()

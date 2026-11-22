@@ -1,16 +1,15 @@
 """trade() runs the run's version's rules as of `at`, keeps the results it shows, and with
 check_only writes nothing. Every figure is invented."""
 import json
-import sqlite3
 import time
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, bars, config, indicators, judge, model, server, store, yahoo
+from desk import api, config, model, server, store
 
-NOW = datetime(2026, 3, 2, 15, 5, tzinfo=UTC)    # Monday; 5 minutes into a 15m bar
+NOW = datetime(2026, 3, 2, 15, 5, tzinfo=UTC)    # a Monday
 START = NOW - timedelta(days=30)
 RULES = ('timeframes = ["15m", "1h"]\nmin_reward_risk = 2\nmax_risk_per_trade = { USD = 20 }\n'
          'max_open_trades = 1\n')
@@ -56,19 +55,6 @@ def result(view, name):
 
 def payload(con, trade_id):
     return json.loads(store.events(con, trade_id=trade_id)[0]["payload"])
-
-
-def bars_of(minutes, end, n, base=100.0):
-    """n invented bars, the last closing at `end`; a sawtooth, so RSI is neither 0 nor 100."""
-    m = timedelta(minutes=minutes)
-    return [judge.Bar(end - m * (n - i), base + i % 7 - (i % 3) * 0.5, base + i % 7 + 0.5,
-                      base + i % 7 - 1.0, base + i % 7 - (i % 3) * 0.5 + 0.1, 1000.0)
-            for i in range(n)]
-
-
-def bars15(end, n, base=100.0):
-    """n invented 15m bars, the last closing at `end`."""
-    return bars_of(15, end, n, base)
 
 
 def test_trade_returns_and_keeps_the_results_shown(con):
@@ -165,7 +151,7 @@ def test_a_damaged_stored_market_value_reads_not_supplied(con, stored):
                           "size": 10, "reasons": "Written by hand.", "screenshots": [],
                           "market": stored})
     r = now_of(api.get_trade(con, "raw-1", now=NOW), "rvol")
-    assert (r.ok, r.says) == (None, "supply rvol")
+    assert (r.ok, r.says) == (None, "supply rvol, read off the chart at the bar acted on")
     assert "rvol" in api.stats(con, run=replay, conforming_only=True, now=NOW).left_out["unknown"]
 
 
@@ -212,157 +198,14 @@ def test_checklist_answers_are_kept_as_given(con):
     assert len(store.trades(con)) == 1
 
 
-def test_replay_indicators_come_from_market(con):
-    _, replay = version(con, RSI)
-    r = result(enter(con, replay), "rsi_14_15m")
-    assert r.ok is None and r.says == ("a replay run keeps no bars: supply rsi_14_15m, read off "
-                                       "the chart at the bar acted on")
-    r = result(enter(con, replay, market={"rsi_14_15m": 28.0}), "rsi_14_15m")
-    assert (r.ok, r.figure, r.computed) == (True, 28.0, {})
-
-
-def test_live_indicators_are_computed_from_completed_bars(con, fake_yahoo):
-    rows = bars15(NOW - timedelta(minutes=5), 300)
-    fake_yahoo(rows)
-    live, _ = version(con, RSI)
-    desk = indicators.rsi([b.close for b in rows[-250:]], 14)
-    assert desk is not None
-    r = result(enter(con, live, at=None), "rsi_14_15m")
-    assert (r.ok, r.figure, r.computed) == (desk <= 30, desk, {"rsi_14_15m": desk})
-    assert "opened 2026-03-02 14:45 UTC" in r.says
-    r = result(enter(con, live, at=None, market={"rsi_14_15m": 55.0}), "rsi_14_15m")
-    assert (r.ok, r.figure, r.computed) == (False, 55.0, {"rsi_14_15m": desk})
-    # at 14:55 the 14:45 bar, kept since, was still forming: the bar before it is read
-    r = result(enter(con, live, at=NOW - timedelta(minutes=10), check_only=True), "rsi_14_15m")
-    assert "opened 2026-03-02 14:30 UTC" in r.says
-    assert r.figure == indicators.rsi([b.close for b in rows[-251:-1]], 14)
-
-
-def test_a_bar_acted_on_missing_from_the_feed_reads_unknown(con, fake_yahoo):
-    fake_yahoo(bars15(NOW - timedelta(minutes=35), 300), market_time=NOW - timedelta(minutes=30))
-    live, _ = version(con, RSI)
-    r = result(enter(con, live, **GOLD), "rsi_14_15m")
-    assert (r.ok, r.figure, r.computed) == (None, None, {})
-    assert "not in Yahoo's feed yet" in r.says and r.says.endswith("supply rsi_14_15m")
-    r = result(enter(con, live, **GOLD, market={"rsi_14_15m": 28.0}), "rsi_14_15m")
-    assert (r.ok, r.figure, r.computed) == (True, 28.0, {})
-
-
-def test_a_stock_in_a_sessions_first_bar_reads_the_last_sessions_bar(con, fake_yahoo):
-    rows = bars_of(60, datetime(2026, 3, 2, 21, 0, tzinfo=UTC), 300)
-    fake_yahoo({"60m": rows})
-    live, _ = version(con, RULES + 'rsi = { timeframe = "1h", at_most = 30 }\n')
-    at = datetime(2026, 3, 3, 15, 0, tzinfo=UTC)   # 10:00 EST: the 14:30 bar is still forming
-    r = result(enter(con, live, at=at, now=at), "rsi_14_1h")
-    assert r.ok is not None and "opened 2026-03-02 20:00 UTC" in r.says
-    assert r.figure == indicators.rsi([b.close for b in rows[-250:]], 14)
-
-
-def test_a_stock_whose_fetch_failed_reads_unknown_naming_why(con, fake_yahoo, monkeypatch):
-    earlier = NOW - timedelta(hours=2)
-    fake_yahoo(bars15(earlier, 300))
-    live, _ = version(con, RSI)
-    assert result(enter(con, live, at=None, now=earlier, check_only=True),
-                  "rsi_14_15m").ok is not None   # the bars are kept now
-
-    def down(symbol, interval, start, end):
-        raise OSError("an invented outage")
-    monkeypatch.setattr(yahoo, "fetch", down)
-    r = result(enter(con, live, at=None), "rsi_14_15m")
-    assert r.ok is None and "could not give" in r.says and r.says.endswith("supply rsi_14_15m")
-
-
-def test_the_warm_up_fetch_stops_at_yahoos_retention(con, fake_yahoo):
-    # ema 200 needs 891 bars, a span past Yahoo's 59 days of 15m bars; a stock's entry after a
-    # quiet day reads its last bar, with no retention reason for bars the warm-up does not need
-    rows = bars15(NOW - timedelta(days=1), 900)
-    fake_yahoo(rows)
-    live, _ = version(con, 'timeframes = ["15m"]\nema = { length = 200, long = "above" }\n')
-    r = result(enter(con, live, at=None), "ema_200_15m")
-    closes = [b.close for b in rows]
-    assert r.ok is not None and "59 days" not in r.says
-    assert r.figure == closes[-1] - indicators.ema(closes[-891:], 200)
-
-
-def test_a_warm_up_shortfall_cut_by_yahoos_retention_names_the_days(con, fake_yahoo):
-    fake_yahoo(bars15(NOW - timedelta(minutes=5), 100))
-    live, _ = version(con, 'timeframes = ["15m"]\nema = { length = 200, long = "above" }\n')
-    r = result(enter(con, live, at=None), "ema_200_15m")
-    assert r.ok is None
-    assert f"as Yahoo keeps 15m bars for about {yahoo.RETENTION_DAYS[15]} days" in r.says
-    assert "reach back only to" not in r.says
-
-
-def test_bars_db_failing_reads_unknown_and_never_refuses_the_trade(con, monkeypatch):
-    def broken(path=None):
-        raise sqlite3.OperationalError("an invented locked database")
-    monkeypatch.setattr(bars, "open", broken)
-    live, _ = version(con, RSI)
-    cv = enter(con, live, at=None, check_only=True)
-    t = enter(con, live, at=None)
-    for r in (result(cv, "rsi_14_15m"), result(t, "rsi_14_15m")):
-        assert r.ok is None and r.says == ("bars could not be read: OperationalError: an invented "
-                                           "locked database; supply rsi_14_15m")
-    assert [x["id"] for x in store.trades(con)] == [t.id] and t.outcome.status == "not judged"
-
-
-def test_a_warm_up_shortfall_inside_yahoos_retention_names_the_bars_kept(con, fake_yahoo):
-    fake_yahoo(bars15(NOW - timedelta(minutes=5), 100))
-    live, _ = version(con, RSI)
-    r = result(enter(con, live, at=None), "rsi_14_15m")
-    assert r.ok is None
-    assert ("100 of the 250 15m bars this needs are kept; the 15m bars kept reach back only to "
-            in r.says)
-    assert "Yahoo keeps" not in r.says
-
-
-def test_a_warm_up_shortfall_inside_retention_keeps_the_fetchs_own_failure(
-        con, fake_yahoo, monkeypatch):
-    fake_yahoo(bars15(NOW - timedelta(minutes=5), 100))
-    short, _ = version(con, RULES + "sma = { length = 5, long = \"above\" }\n")
-    enter(con, short, at=None, check_only=True)     # stores only the bars a 5-bar sma needs
-    live, _ = version(con, RSI)
-
-    def down(symbol, interval, start, end):
-        raise OSError("an invented outage")
-    monkeypatch.setattr(yahoo, "fetch", down)
-    later = NOW
-    r = result(enter(con, live, at=later, now=later), "rsi_14_15m")
-    assert r.ok is None and "the 15m bars kept reach back only to " in r.says
-    assert "an invented outage" in r.says
-
-
-def test_a_timeframe_yahoo_lacks_reads_unknown(con):
-    live, _ = version(con, 'timeframes = ["15m", "4h"]\nrsi = { timeframe = "4h", at_most = 30 }\n')
-    r = result(enter(con, live, at=None), "rsi_14_4h")
-    assert (r.ok, r.says) == (None, "Yahoo has no 4h bars: supply rsi_14_4h")
-
-
-def test_a_future_on_daily_bars_reads_unknown_unless_supplied(con):
-    live, _ = version(con, 'timeframes = ["1d"]\nrsi = { at_most = 30 }\n')
-    r = result(enter(con, live, **GOLD), "rsi_14_1d")
-    assert r.ok is None and "midnight exchange time" in r.says
-    assert r.says.endswith("supply rsi_14_1d")
-    r = result(enter(con, live, **GOLD, market={"rsi_14_1d": 35.0}), "rsi_14_1d")
-    assert (r.ok, r.figure) == (False, 35.0)
-
-
-def test_no_fetch_runs_under_the_write_lock(con, monkeypatch):
-    rows = bars15(NOW - timedelta(minutes=5), 300)
-    under: list[bool] = []
-
-    def fetch(symbol, interval, start, end):   # yahoo.ensure swallows a raise, so record it
-        under.append(con.in_transaction)
-        return yahoo.Fetched(tuple(r for r in rows if start <= r.open_time < end), end)
-    monkeypatch.setattr(yahoo, "fetch", fetch)
-    live, _ = version(con, RSI)
-    wide = dict(stop=90.0, target=120.0, at=None)   # open while the next trades are entered
-    enter(con, live, **wide, now=NOW - timedelta(hours=1))
-    enter(con, live, **wide, check_only=True)
-    before = len(under)
-    t = enter(con, live, **wide, now=NOW + timedelta(minutes=20))
-    assert len(under) > before and not any(under)
-    assert result(t, "rsi_14_15m").figure is not None
+def test_indicators_come_from_market(con):
+    live, replay = version(con, RSI)
+    for run in (live, replay):
+        r = result(enter(con, run), "rsi_14_15m")
+        assert r.ok is None and r.says == ("supply rsi_14_15m, read off the chart at the bar "
+                                           "acted on")
+        r = result(enter(con, run, market={"rsi_14_15m": 28.0}), "rsi_14_15m")
+        assert (r.ok, r.figure) == (True, 28.0)
 
 
 def test_the_run_as_of_at_reads_the_effective_outcomes(con):
@@ -378,113 +221,16 @@ def test_the_run_as_of_at_reads_the_effective_outcomes(con):
     assert result(enter(con, at=t2, check_only=True), "max_open_trades").ok is True
 
 
-def test_another_trades_unknown_state_withholds_and_names_the_report_that_settles_it(
-        con, fake_yahoo):
-    # a future not judged (the network is off); reported open, it is known open up to that report
-    live, _ = version(con, 'timeframes = ["1d"]\nmax_open_trades = 1\n')
-    a = enter(con, live, **{**GOLD, "at": NOW - timedelta(days=2)})
-    api.report(con, a.id, state="open", at=NOW - timedelta(days=1), reason="Invented.", now=NOW)
-    held = enter(con, live, **{**GOLD, "at": NOW - timedelta(hours=36)}, check_only=True)
-    assert result(held, "max_open_trades").ok is False
-    r = result(enter(con, live, **GOLD, check_only=True), "max_open_trades")
-    assert r.ok is None and a.id in r.says and "report its exit, or that it is still open" in r.says
-
-    # a hand close whose last bar is still forming reads closing until the bar is complete
-    fake_yahoo(bars_of(1, NOW - timedelta(minutes=5), 300))
-    live, _ = version(con, 'timeframes = ["15m"]\ndaily_loss_limit = { R = 1 }\n')
-    wide = dict(stop=90.0, target=120.0)
-    a = enter(con, live, **wide, at=NOW - timedelta(hours=1))
-    assert api.close_trade(con, a.id, reason="Invented.", at=NOW, now=NOW).outcome.status == (
-        "closing")
-    later = NOW + timedelta(minutes=5)
-    r = result(enter(con, live, **wide, at=later, now=later, check_only=True), "daily_loss_limit")
-    assert r.ok is None and a.id in r.says
-    assert "give the broker's price with correct_trade, {\"report\": \"close\"" in r.says
-
-
-LAGGED = ('timeframes = ["15m"]\nmax_open_trades = 1\ndaily_loss_limit = { R = 0.5 }\n'
-          'cooldown_after_loss = { minutes = 30 }\n')
-RECORD = ("max_open_trades", "daily_loss_limit", "cooldown_after_loss")
-T14 = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
-T15 = T14 + timedelta(hours=1)
-QUIET = [judge.Bar(T14 + timedelta(minutes=i), 100.0, 100.5, 99.5, 100.0, 1000.0)
-         for i in range(30)]                                    # 14:00 to 14:29
-STOPPED = judge.Bar(T14 + timedelta(minutes=30), 99.0, 99.5, 97.5, 98.0, 1000.0)   # the 14:30
-
-
-def lagged(con, fake_yahoo, *, current: bool, **a):
-    """Trade A at 14:00, read at 15:00, stopped out in the 14:30 bar (dated 14:31) when the feed
-    is current; with Yahoo's delay, the feed ends at the 14:29 bar."""
-    fake_yahoo(QUIET + [STOPPED] if current else QUIET,
-               market_time=None if current else T14 + timedelta(minutes=30))
-    live, _ = version(con, LAGGED)
-    return live, enter(con, live, **{**a, "at": T14, "now": T15})
-
-
-def record(con, live, minutes, now=T15):
-    cv = enter(con, live, at=T14 + timedelta(minutes=minutes), now=now, check_only=True)
-    return [result(cv, n) for n in RECORD]
-
-
-def test_a_live_futures_exit_the_feed_has_not_delivered_reads_unknown(con, fake_yahoo):
-    live, a = lagged(con, fake_yahoo, current=False, **GOLD)
-    assert (a.outcome.status, a.outcome.judged_through) == ("open", T14 + timedelta(minutes=30))
-    # at 14:30:30 the 14:30 bar is forming, and an exit in it is dated 14:31: A is known open
-    assert [r.ok for r in record(con, live, 30.5)] == [False, True, True]
-    for minutes in (31, 60):   # a bar past what A was judged through could hold its exit
-        for r in record(con, live, minutes):
-            assert r.ok is None and a.id in r.says, r
-            assert "report its exit, or that it is still open" in r.says
-            assert "judged only through 2026-03-02T14:30:00+00:00" in r.says    # R11
-            assert ".999999" not in r.says and "not judged" not in r.says
-    b = enter(con, live, at=T15, now=T15)
-    left = api.stats(con, run=live, conforming_only=True, now=T15).left_out
-    assert left == {"breached": (), "unknown": {n: (b.id,) for n in RECORD}}
-
-
-def test_a_futures_open_report_inside_an_undelivered_bar_is_unknown_from_that_bars_close(
-        con, fake_yahoo):
-    live, a = lagged(con, fake_yahoo, current=False, **GOLD)
-    h = T15 + timedelta(minutes=7)
-    held = api.report(con, a.id, state="open", at=h, reason="Invented.", now=h)
-    assert held.outcome.judged_through == h   # the 15:07 bar, holding h, is not in the feed yet
-    at = T15 + timedelta(minutes=7.5)
-    assert [r.ok for r in record(con, live, 67.5, now=at)] == [False, True, True]
-    for r in record(con, live, 68, now=T15 + timedelta(minutes=8)):
-        assert r.ok is None and a.id in r.says, r
-    # the feed catches up: the 15:07 bar stops A out, dated its close, 15:08
-    fake_yahoo(QUIET + [replace(QUIET[0], open_time=T14 + timedelta(minutes=i))
-                        for i in range(30, 67)] + [replace(STOPPED, open_time=h)])
-    out = api.get_trade(con, a.id, now=T15 + timedelta(minutes=50)).outcome
-    assert (out.exited_at, out.r) == (T15 + timedelta(minutes=8), -1.0)
-
-
-def test_a_futures_open_report_is_known_to_the_end_of_its_minute(con, fake_yahoo):
-    fake_yahoo([])
-    live, _ = version(con, LAGGED)
-    a = enter(con, live, **{**GOLD, "at": T14, "now": T14})
-    h = T15 + timedelta(minutes=7, seconds=20)
-    api.report(con, a.id, state="open", at=h, reason="Invented.", now=h)
-    same = enter(con, live, at=h, now=h, check_only=True)
-    assert all(result(same, n).ok is not None for n in RECORD)       # the same `at`: known
-    inside = h + timedelta(seconds=30)                                # 15:07:50, same minute
-    assert all(result(enter(con, live, at=inside, now=inside, check_only=True), n).ok
-               is not None for n in RECORD)
-    nxt = T15 + timedelta(minutes=8)                                  # the minute it may end in
-    for r in (result(enter(con, live, at=nxt, now=nxt, check_only=True), n) for n in RECORD):
-        assert r.ok is None and a.id in r.says and "2026-03-02T15:08:00+00:00" in r.says, r
-
-
-def test_a_mid_bar_futures_entry_is_known_until_the_first_bar_it_can_end_in(con, fake_yahoo):
-    fake_yahoo(QUIET, market_time=T14 + timedelta(minutes=30))   # 14:00 to 14:29 delivered
-    live, _ = version(con, LAGGED)
-    at = T14 + timedelta(minutes=30.5)      # inside the 14:30 bar; its first bar is 14:31's
-    a = enter(con, live, **{**GOLD, "at": at, "now": at})
-    assert a.outcome.judged_through == at
-    assert [r.ok for r in record(con, live, 31, now=T14 + timedelta(minutes=31))] == [
-        False, True, True]                  # it read unknown from 14:31 before (over-withheld)
-    for r in record(con, live, 32, now=T14 + timedelta(minutes=32)):
-        assert r.ok is None and a.id in r.says, r
+def test_max_open_trades_counts_a_live_trade_as_open_until_its_exit_is_reported(con):
+    live, _ = version(con, 'timeframes = ["15m"]\nmax_open_trades = 1\n')
+    a = enter(con, live, at=NOW - timedelta(hours=2))
+    assert a.outcome.status == "open"                     # a live trade reads from its record
+    opened = enter(con, live, at=NOW - timedelta(hours=1), check_only=True)
+    assert result(opened, "max_open_trades").ok is False
+    out = api.report(con, a.id, state="exited", kind="hand", price=101.0,
+                     at=NOW - timedelta(minutes=30), reason="Invented.", now=NOW)
+    assert (out.outcome.status, out.outcome.exited_at) == ("exited", NOW - timedelta(minutes=30))
+    assert result(enter(con, live, at=NOW, check_only=True), "max_open_trades").ok is True
 
 
 def test_an_entry_on_a_version_with_no_record_rule_reads_no_other_trade(con, monkeypatch):
@@ -498,17 +244,7 @@ def test_an_entry_on_a_version_with_no_record_rule_reads_no_other_trade(con, mon
     assert [r.name for r in api.get_trade(con, b.id, now=NOW).checks_now] == ["min_reward_risk"]
 
 
-@pytest.mark.parametrize("a, current, ok", [
-    (GOLD, True, [True, False, False]),   # the feed current: out at 14:31 at -1R
-    ({}, False, [False, True, True])])    # a stock's empty stretch reads as the market shut
-def test_a_futures_exit_the_feed_has_delivered_or_a_stocks_lag_reads_known(con, fake_yahoo, a,
-                                                                            current, ok):
-    live, t = lagged(con, fake_yahoo, current=current, **a)
-    assert t.outcome.status == ("exited" if current else "open")
-    assert [r.ok for r in record(con, live, 60)] == ok
-
-
-def test_the_day_is_the_system_timezones_midnight_to_midnight(con, fake_yahoo, monkeypatch):
+def test_the_day_is_the_system_timezones_midnight_to_midnight(con, monkeypatch):
     monkeypatch.setenv("TZ", "America/Toronto")
     time.tzset()
     later = datetime(2026, 3, 4, tzinfo=UTC)
@@ -527,13 +263,12 @@ def test_the_day_is_the_system_timezones_midnight_to_midnight(con, fake_yahoo, m
     assert day_r(replay, utc(3, 5, 10)) == (True, 0.0)      # 00:10 EST: the next day
     assert day_r(replay, utc(3, 4, 45)) == (True, -1.0)     # 23:45 EST: the same day, at -1R
 
-    fake_yahoo([judge.Bar(utc(3, 4, 58), 100.0, 100.5, 99.5, 100.0, 1000.0),
-                judge.Bar(utc(3, 4, 59), 99.0, 99.5, 97.5, 98.5, 1000.0),    # 23:59 EST: the stop
-                judge.Bar(utc(3, 5), 98.5, 99.0, 98.2, 98.5, 1000.0)])
     a = enter(con, live, at=utc(3, 4, 58) + timedelta(seconds=30), now=later)
-    assert (a.outcome.exited_at, a.outcome.r) == (utc(3, 5), -1.0)   # dated 00:00 EST, Mar 3
+    out = api.report(con, a.id, state="exited", kind="stop", at=utc(3, 5), reason="Invented.",
+                     now=later)                             # at its stop, 98: -1R
+    assert (out.outcome.exited_at, out.outcome.r) == (utc(3, 5), -1.0)   # 00:00 EST, Mar 3
     assert day_r(live, utc(3, 5, 30)) == (True, -1.0)       # 00:30 EST sees it, on its date's day
-    assert day_r(live, utc(3, 4, 59)) == (True, 0.0)        # 23:59 EST, inside its bar: does not
+    assert day_r(live, utc(3, 4, 59)) == (True, 0.0)        # 23:59 EST, before the exit: does not
 
     _, replay = version(con, 'timeframes = ["1h"]\ntrading_hours = { start = "09:30", '
                              'end = "16:00" }\n')
@@ -550,7 +285,7 @@ def now_of(view, name):
     return next(r for r in view.checks_now if r.name == name)
 
 
-def test_get_trade_shows_both_sets_and_names_what_differs(con):
+def test_get_trade_shows_both_sets_and_names_the_difference(con):
     _, replay = version(con, 'timeframes = ["15m"]\nmax_open_trades = 1\n')
     a = enter(con, replay, at=NOW - timedelta(hours=2))
     b = enter(con, replay, at=NOW - timedelta(hours=1))

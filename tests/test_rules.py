@@ -28,15 +28,9 @@ def test_a_toml_error_names_the_file_line():
         rules.read_block(block('timeframes = ["1h"]\nmin_reward_risk = \n'), "strategy")
 
 
-def test_an_error_at_the_end_of_the_document_names_the_closing_fence():
+def test_an_error_at_the_end_of_the_document_names_the_unended_fence():
     with pytest.raises(Refused, match=r"strategy:8: the rules block is not valid TOML"):
         rules.read_block(block('timeframes = ["1h"\n'), "strategy")
-
-
-def test_the_old_line_format_is_refused_with_the_toml_form():
-    with pytest.raises(Refused,
-                       match=r'from 0\.7 the rules block is TOML: write timeframes = \["1h"'):
-        rules.read_block(block("timeframes: 1h\nmin_reward_risk: 2\n"), "strategy")
 
 
 def test_a_key_or_table_set_twice_is_refused():
@@ -74,11 +68,6 @@ TF = ("15m", "1h")
 
 @pytest.mark.parametrize("values, match", [
     ({"foo": 1}, "\"foo\" is not a rule the desk knows"),
-    ({"size": "computed"}, "size.*largest size"),
-    ({"banned": "shorts"}, "sides = "),
-    ({"stop_headroom_candles": 1.5}, r"\[stop_atr\]"),
-    ({"cooldown_after_stop": "1h"}, "cooldown_after_loss"),
-    ({"max_session_length": "2h"}, "delete it"),
     ({"min_reward_risk": "2"}, "min_reward_risk: \"2\" is not a number"),
     ({"min_reward_risk": True}, "is not a number"),
     ({"min_reward_risk": dt.date(1979, 5, 27)}, r"^(?!.*datetime\.date\().*1979-05-27"),
