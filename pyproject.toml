@@ -8,13 +8,13 @@ build-backend = "setuptools.build_meta"
 # nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
 # along with `tradingdesk` and `trade-desk`.
 name = "trading-desk"
-version = "0.9.0"
-description = "Record your trades under versioned strategies: reasons, screenshots and every later decision, in an append-only SQLite log"
+version = "0.10.0"
+description = "An MCP server that keeps your trading record: trades under versioned strategies, checked against their rules, with outcomes and stats"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["trading", "strategy", "trade-journal", "replay", "sqlite", "event-sourcing"]
+keywords = ["trading", "strategy", "trade-journal", "mcp", "claude-code", "replay", "sqlite", "event-sourcing"]
 # `mcp` is required: MCP is the desk's only interface (`trading-desk mcp`), served on the SDK's
 # low-level server, which passes the agent's arguments through unchanged for the API to check.
 # The upper bound is deliberate: 2.x renamed and rewrote its own API within two months, so a
@@ -22,7 +22,7 @@ keywords = ["trading", "strategy", "trade-journal", "replay", "sqlite", "event-s
 # is imported only inside `desk/yahoo.py`'s call, so the MCP server starts without pandas.
 dependencies = ["mcp>=2.3,<3", "yfinance>=1.8,<2"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: MacOS",
