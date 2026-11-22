@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Nightly, so a change in the runners, Python or uv that breaks the build shows up with
+  # nothing pushed.
+  schedule:
+    - cron: "23 6 * * *"
+  # So a red nightly can be re-checked after a fix without an empty commit.
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # THE FLOOR AND THE CEILING. `requires-python = ">=3.11"` is a promise to anyone
+      # installing from PyPI, and the only way to keep it is to run on 3.11 -- the dev
+      # machine is on 3.14, so a 3.12+ syntax or stdlib call would otherwise ship and fail
+      # for the users the classifier invited. Two versions rather than four: the middle one
+      # cannot break in a way the ends both miss.
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      # `uv sync`, not `pip install -e '.[dev]'`, because the dev tools are declared in
+      # [dependency-groups] -- see pyproject.toml for why. It also installs from the lock
+      # file, so CI resolves what the dev machine resolved.
+      - run: uv sync --python ${{ matrix.python }}
+      - run: uv run ruff check .
+      - run: uv run pytest -q
+
+      # NO "run the checker here" STEP. One was drafted and deleted before it shipped,
+      # because it seeded a book and then ran `true` -- a step that reports success without
+      # asserting anything, which is precisely the tests/schema_attack.sh failure this repo
+      # already removed once ("a file that looks like coverage and is not is worse than no
+      # file"). `trading-desk integrity` IS exercised end to end, against a store made by the
+      # installed wheel, in the packaging job below. Once is enough and there it means
+      # something.
+
+  # An editable install reads the source tree, so it cannot catch a missing package-data
+  # declaration. Build a real wheel, assert its shape, then RUN it from a clean venv.
+  packaging:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: uv build --wheel --out-dir dist_check
+      - name: the wheel has the shape the package needs
+        run: python tools/check_wheel.py dist_check
+      - name: the installed wheel records a trade and passes its own integrity check
+        run: bash tools/smoke_wheel.sh dist_check
+
+  # The repo is published, so a real figure from the author's own book is a leak rather than
+  # a typo. Every amount in the tree is an invented round one; this is the grep that keeps
+  # it that way, because "we scrubbed it once" is not a property, it is a memory.
+  no-real-figures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: no money figures outside the allowed shapes
+        run: python tools/no_real_figures.py

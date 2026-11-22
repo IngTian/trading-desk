@@ -1,0 +1,105 @@
+name: Release
+
+# Publishes `trading-desk` to PyPI when a version tag is pushed:
+#
+#     git tag v0.5.0 && git push origin v0.5.0
+#
+# Authentication is PyPI Trusted Publishing (OIDC), so there is no API token in the
+# repository or in Actions secrets -- nothing to leak and nothing to rotate. PyPI trusts
+# owner `IngTian`, repository `trading-desk`, workflow `release.yml`, environment `pypi`
+# (set up once, before 0.4.0). If the publish step fails, the build artifacts are still
+# attached to the GitHub release, so a tag is never wasted.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # The tag is the release's identity, so a tag that disagrees with the version in the
+      # package would publish something misnamed. Fail here rather than on PyPI, where a
+      # filename cannot be taken back.
+      - name: the tag matches the declared version
+        run: |
+          declared=$(python -c "import tomllib,pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")
+          tagged="${GITHUB_REF_NAME#v}"
+          echo "tag=$tagged pyproject=$declared"
+          test "$tagged" = "$declared"
+
+      - run: uv build --sdist --wheel --out-dir dist
+
+      # THE SUITE, AFTER THE BUILD. ci.yml triggers on `push: branches: [main]` and
+      # `pull_request` -- a tag ref matches neither -- so without this, pushing a tag would
+      # publish to PyPI without running a single test.
+      #
+      # After the build, not before, on purpose: installing the project leaves .egg-info and
+      # __pycache__ in the tree, which is the dirty-tree class the wheel-shape check exists
+      # to catch. Build from a clean checkout, then test.
+      #
+      # No ruff here. Both later jobs are `needs: build`, so a lint failure would produce
+      # nothing and force a tag delete and re-push -- against this workflow's own rule that a
+      # tag is never wasted. Lint is CI's job, on the commit, before the tag.
+      - name: the suite passes on the tagged commit
+        run: |
+          uv sync
+          uv run pytest -q
+
+      # The same two scripts CI runs, so the release cannot check less than a pull request.
+      - name: the wheel has the shape the package needs
+        run: python tools/check_wheel.py dist
+
+      # The one step that proves the artifact about to be published is usable at all: a file
+      # uploaded to PyPI cannot be taken back, and a version once passed every shape check
+      # while shipping a tool that could not create its store.
+      - name: the installed wheel records a trade and passes its own integrity check
+        run: bash tools/smoke_wheel.sh dist
+
+      # Publishing is what makes a leftover figure a leak, so the guard runs on the tag too.
+      - run: python tools/no_real_figures.py
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  github-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: attach the artifacts to a GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$REPO" --title "$GITHUB_REF_NAME" --generate-notes
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # the OIDC token trusted publishing exchanges for an upload
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

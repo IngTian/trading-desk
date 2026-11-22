@@ -1,0 +1,7 @@
+{
+  "name": "trading-desk",
+  "description": "The trading-desk MCP server, for an agent to keep your trading record. Needs the trading-desk command on your PATH (pip or uv install; see the README).",
+  "author": {"name": "IngTian"},
+  "repository": "https://github.com/IngTian/trading-desk",
+  "license": "MIT"
+}

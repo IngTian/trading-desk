@@ -1,0 +1,304 @@
+"""The judge, row by row: design §6.2 and the timing rule (§3), long and mirrored short. The
+judge reads live runs only (§14), so every row has a `now`: h(48) unless the row names one.
+Every figure is invented."""
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from desk import judge, model
+
+B = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)   # bar n opens at B + n hours; 1h bars
+
+
+def h(n):
+    return B + timedelta(hours=n)
+
+
+def bar(n, o, hi, lo, c):
+    return judge.Bar(h(n), o, hi, lo, c, None)
+
+
+def decisions(type="market", price=100.0, stop=98.0, target=104.0, at=1, moves=(), close=None):
+    return model.Decisions(
+        entry=model.Entry(type=type, price=price, stop=stop, target=target, size=10, at=h(at)),
+        moves=tuple(model.Move(at=h(a), stop=s, target=t, reason="r") for a, s, t in moves),
+        close_at=None if close is None else h(close),
+        close_reason=None if close is None else "r",
+        voided=False, reasons="r", screenshots=(), point_value=1.0, currency="USD")
+
+
+LIMIT = dict(type="limit")
+CASES = [  # (id, decision kwargs, bars, judge kwargs, expected Outcome fields;
+    #       "note" is a substring of one note)
+    ("a bar reaching the stop exits at the stop, dated at its close", {},
+     [bar(1, 100, 101, 97.5, 99)], {},
+     dict(status="exited", fill=100.0, filled_at=h(1), exit=98.0, exited_at=h(2),
+          exit_reason="stop", r=-1.0, cash=-20.0)),
+    ("a bar opening beyond the stop exits at its open", {},
+     [bar(1, 100, 101, 99, 100.5), bar(2, 97, 99, 96, 98.5)], {},
+     dict(status="exited", exit=97.0, exited_at=h(3), exit_reason="stop", r=-1.5)),
+    ("a bar reaching the target exits at the target", {},
+     [bar(1, 100, 104.5, 99.5, 104)], {},
+     dict(status="exited", exit=104.0, exited_at=h(2), exit_reason="target", r=2.0, cash=40.0)),
+    ("a bar opening beyond the target still exits at the target", {},
+     [bar(1, 100, 103, 99.5, 102.5), bar(2, 105, 106, 104.5, 105.5)], {},
+     dict(status="exited", exit=104.0, exited_at=h(3), exit_reason="target", r=2.0)),
+    ("a bar reaching both exits at the stop", {},
+     [bar(1, 100, 104.5, 97.5, 101)], {},
+     dict(status="exited", exit=98.0, exited_at=h(2), exit_reason="stop")),
+    ("a bar opening beyond the stop and reaching the target exits at its open", {},
+     [bar(1, 100, 101, 99, 100), bar(2, 97, 105, 96.5, 104)], {},
+     dict(status="exited", exit=97.0, exited_at=h(3), exit_reason="stop")),
+    ("a limit is pending until a bar reaches it, and fills at the limit at that bar's close", LIMIT,
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 101.5, 99.5, 100.5),
+      bar(3, 100.5, 104.5, 100, 104)], {},
+     dict(status="exited", fill=100.0, filled_at=h(3), exit=104.0, exited_at=h(4),
+          exit_reason="target", r=2.0)),
+    ("a bar opening through the limit fills at the limit, never better", LIMIT,
+     [bar(1, 99, 99.5, 98.5, 99)], {},
+     dict(status="open", fill=100.0, filled_at=h(2), exit=None, judged_through=h(2))),
+    ("in the fill bar the stop counts, at the stop price even if the bar opened beyond it", LIMIT,
+     [bar(1, 97, 99, 96, 98.5)], {},
+     dict(status="exited", fill=100.0, filled_at=h(2), exit=98.0, exited_at=h(2),
+          exit_reason="stop", r=-1.0)),
+    # Ruling R7: a stop at or beyond the fill has fired the moment the limit fills.
+    ("in the fill bar the entry's stop at or beyond the limit exits at the fill, never better",
+     dict(LIMIT, stop=100.5),
+     [bar(1, 101, 101.5, 99.5, 100.5)], {},
+     dict(status="exited", fill=100.0, filled_at=h(2), exit=100.0, exited_at=h(2),
+          exit_reason="stop", r=None, cash=0.0, note="no 1R")),
+    ("in the fill bar a stop moved at or beyond the limit while pending exits at the fill",
+     dict(LIMIT, moves=((2, 100.5, None),)),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 101.5, 99.5, 100.5)], {},
+     dict(status="exited", fill=100.0, filled_at=h(3), exit=100.0, exited_at=h(3),
+          exit_reason="stop", r=0.0, cash=0.0)),
+    # Ruling R8 (R7 generalised): so has one in force as a market entry opens, bar or no bar.
+    ("a market entry with its stop at or beyond its price is out at once at it, never better",
+     dict(stop=100.5),
+     [bar(1, 101, 101.5, 100.25, 101)], {},
+     dict(status="exited", fill=100.0, filled_at=h(1), exit=100.0, exited_at=h(2),
+          exit_reason="stop", r=None, cash=0.0, note="no 1R")),
+    ("a stop moved at or beyond a market entry at its `at`: out at once, at its skipped bar's"
+     " close",
+     dict(at=1.5, moves=((1.5, 100.5, None),)),
+     [bar(1, 100, 101, 99.5, 100.75), bar(2, 101, 101.5, 100.75, 101.25)], {},
+     dict(status="exited", exit=100.0, exited_at=h(2), exit_reason="stop", r=0.0, cash=0.0,
+          notes=())),
+    ("a market entry's stop at or beyond it, its bar missing: out at once, dated on the bars' grid",
+     dict(at=1.75, stop=100.5),
+     [bar(3.5, 100.5, 101, 100, 100.75)], dict(covered=[(h(3.5), h(4.5))]),
+     dict(status="exited", exit=100.0, exited_at=h(2.5), exit_reason="stop", r=None, cash=0.0)),
+    ("out at once is dated at its own bar's close, off the grid of earlier bars (a clock change)",
+     dict(at=1.5, stop=100.5),
+     [bar(-2.5, 100, 100.5, 99.5, 100), bar(1, 100, 101, 99.5, 100.75)], {},
+     dict(status="exited", exit=100.0, exited_at=h(2), exit_reason="stop", r=None, cash=0.0)),
+    ("in the fill bar the target does not count", LIMIT,
+     [bar(1, 101, 105, 99.5, 104.5), bar(2, 104.5, 105, 103, 104)], {},
+     dict(status="exited", filled_at=h(2), exit=104.0, exited_at=h(3), exit_reason="target")),
+    ("a move takes effect from the first bar opening at or after it",
+     dict(moves=((2, 99.5, None),)),
+     [bar(1, 100, 101, 99.25, 100.5), bar(2, 100.5, 101, 99.25, 100)], {},
+     dict(status="exited", exit=99.5, exited_at=h(3), exit_reason="stop", r=-0.25)),
+    ("a move made mid-bar does not count in that bar", dict(moves=((1.5, 99.5, None),)),
+     [bar(1, 100, 101, 99.25, 100.5), bar(2, 100.5, 101, 100.25, 100.75)], {},
+     dict(status="open", judged_through=h(3))),
+    ("a moved target is in force the same way", dict(moves=((2, None, 102.0),)),
+     [bar(1, 100, 102.5, 99.5, 101), bar(2, 101, 102.5, 100.5, 102)], {},
+     dict(status="exited", exit=102.0, exited_at=h(3), exit_reason="target", r=1.0)),
+    ("a market entry's own bar is skipped, and noted when it reached the stop or target",
+     dict(at=1.5),
+     [bar(1, 100, 101, 97.5, 100), bar(2, 100, 101, 99, 100.5)], {},
+     dict(status="open", judged_through=h(3), note="entry bar skipped")),
+    ("the entry bar is skipped without a note when it reached neither", dict(at=1.5),
+     [bar(1, 100, 101, 99, 100), bar(2, 100, 101, 99, 100.5)], {},
+     dict(status="open", notes=())),
+    ("a limit's own bar is skipped, and noted when it reached the limit", dict(LIMIT, at=1.5),
+     [bar(1, 101, 101.5, 99.5, 100.5), bar(2, 100.5, 101, 100.25, 100.75)], {},
+     dict(status="pending", fill=None, judged_through=h(3), note="entry bar skipped")),
+    ("a hand close exits at the close of the last bar opening before it; later bars do not count",
+     dict(close=3),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 103.5, 100, 103),
+      bar(3, 103, 105, 102, 104.5)], {},
+     dict(status="exited", exit=103.0, exited_at=h(3), exit_reason="hand", r=1.5)),
+    ("a last bar finished at the close is judged in full: its target counts,"
+     " the close had no effect",
+     dict(close=3),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 104.5, 100, 103),
+      bar(3, 103, 105, 102, 104.5)], {},
+     dict(status="exited", exit=104.0, exited_at=h(3), exit_reason="target", r=2.0,
+          note="had no effect")),
+    ("in a finished last bar the stop counts", dict(close=3),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 97.5, 99)], {},
+     dict(status="exited", exit=98.0, exited_at=h(3), exit_reason="stop")),
+    ("in a finished last bar a stop gapped through exits at the open", dict(close=3),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 97, 99, 96.5, 98.5)], {},
+     dict(status="exited", exit=97.0, exited_at=h(3), exit_reason="stop")),
+    ("live: a close on a bar boundary judges the bar before it in full", dict(close=3),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 104.5, 100, 103), bar(3, 103, 103.5, 102.5, 103)],
+     dict(now=h(4.5)),
+     dict(status="exited", exit=104.0, exited_at=h(3), exit_reason="target", note="had no effect")),
+    ("live: in a last bar still forming at the close the target does not count", dict(close=2.5),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 104.5, 100, 103)], dict(now=h(3.5)),
+     dict(status="exited", exit=103.0, exited_at=h(3), exit_reason="hand", r=1.5)),
+    ("live: in a last bar still forming at the close the stop counts", dict(close=2.5),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 97.5, 99)], dict(now=h(3.5)),
+     dict(status="exited", exit=98.0, exited_at=h(3), exit_reason="stop", r=-1.0)),
+    ("live: in a last bar still forming at the close a stop gapped through exits at the open",
+     dict(close=2.5),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 97, 99, 96.5, 98.5)], dict(now=h(3.5)),
+     dict(status="exited", exit=97.0, exited_at=h(3), exit_reason="stop", r=-1.5)),
+    ("a hand close cancels a limit still pending", dict(LIMIT, close=3),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101.5, 102, 100.25, 101),
+      bar(3, 99.5, 100.5, 99, 100)], {},
+     dict(status="cancelled", cancelled_at=h(3), cancelled_why="pulled", fill=None)),
+    ("a limit can fill in the last bar before the close, and exits at that bar's close",
+     dict(LIMIT, close=3),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 101.5, 99.5, 100.5)], {},
+     dict(status="exited", fill=100.0, filled_at=h(3), exit=100.5, exited_at=h(3),
+          exit_reason="hand", r=0.25)),
+    ("a limit filling in a finished last bar: its target does not count, out at that bar's close",
+     dict(LIMIT, close=3),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 104.5, 99.5, 103)], {},
+     dict(status="exited", fill=100.0, filled_at=h(3), exit=103.0, exited_at=h(3),
+          exit_reason="hand", r=1.5)),
+    ("a limit filling in a finished last bar: its stop counts, at the stop price",
+     dict(LIMIT, close=3),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 97, 101, 96.5, 99)], {},
+     dict(status="exited", fill=100.0, filled_at=h(3), exit=98.0, exited_at=h(3),
+          exit_reason="stop", r=-1.0)),
+    ("a run stop cancels a pending limit from the first bar opening at or after it", LIMIT,
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101.5, 102, 100.25, 101),
+      bar(3, 99.5, 100.5, 99, 100)],
+     dict(stopped=h(3)),
+     dict(status="cancelled", cancelled_at=h(3), cancelled_why="run stopped", fill=None)),
+    ("a run stop leaves an open trade to run until it exits", {},
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 99.5, 100), bar(3, 100, 100.5, 97.5, 98)],
+     dict(stopped=h(2)),
+     dict(status="exited", exit=98.0, exited_at=h(4), exit_reason="stop")),
+    ("a hole makes it not judged from the first missing bar, and nothing after is claimed", {},
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 99.5, 100), bar(5, 100, 100.5, 97, 97.5)],
+     dict(covered=[(h(0), h(3)), (h(5), h(6))]),
+     dict(status="not judged", missing=(h(3), h(5)), judged_through=h(3), exit=None)),
+    ("a gap inside a covered range is a closed market, walked across", {},
+     [bar(1, 100, 101, 99, 100.5), bar(4, 100.5, 104.5, 100, 104)], {},
+     dict(status="exited", exit=104.0, exited_at=h(5), exit_reason="target")),
+    ("no bars at the entry: not judged, naming the range", {},
+     [bar(3, 100, 101, 99, 100)], dict(covered=[(h(3), h(4))]),
+     dict(status="not judged", missing=(h(1), h(3)))),
+    ("live: a hand close in a bar not yet complete reads closing", dict(close=3.25),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 99.5, 100)], dict(now=h(3.5)),
+     dict(status="closing", judged_through=h(3),
+          note="closing at the close of the last bar opening before 17:15 UTC")),
+    ("live: a close mid-bar with nothing walked yet reads closing", dict(at=1.25, close=1.75),
+     [], dict(now=h(1.9), covered=[(h(0), h(1))]),
+     dict(status="closing", note="closing at the close of the last bar opening before 15:45 UTC")),
+    ("live: open where the complete bars end", {},
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 99.5, 100), bar(3, 100, 101, 99.5, 100.5)],
+     dict(now=h(4.5)),
+     dict(status="open", judged_through=h(4), missing=None)),
+    ("live: bars that could not be fetched make it not judged, with the reason", {},
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 99.5, 100), bar(3, 100, 101, 99.5, 100.5)],
+     dict(now=h(5.5), unavailable="Yahoo could not be reached: timed out"),
+     dict(status="not judged", missing=(h(4), h(5.5)), note="timed out")),
+    ("live: a failed fetch less than a bar after the last bar leaves the status standing", {},
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 99.5, 100), bar(3, 100, 101, 99.5, 100.5)],
+     dict(now=h(4.5), unavailable="Yahoo could not be reached: timed out"),
+     dict(status="open", judged_through=h(4), missing=None)),
+    ("live: a hand close inside the entry bar exits at that bar's close, the bar unjudged",
+     dict(at=1.25, close=1.75),
+     [bar(1, 100, 101, 97.5, 99.5)], dict(now=h(3), covered=[(h(1), h(2))]),
+     dict(status="exited", exit=99.5, exited_at=h(2), exit_reason="hand", r=-0.25,
+          note="entry bar skipped")),
+    ("no stop at entry: no R, cash still", dict(stop=None),
+     [bar(1, 100, 104.5, 99.5, 104)], {},
+     dict(status="exited", exit=104.0, r=None, cash=40.0)),
+    ("a decision after the exit has no effect, and says so",
+     dict(moves=((1.5, 99.0, None),), close=3),
+     [bar(1, 100, 101, 97.5, 99), bar(2, 99, 100, 98.5, 99.5)], {},
+     dict(status="exited", exit=98.0, exited_at=h(2), exit_reason="stop", note="no effect")),
+    ("a move made while a limit is pending applies once it fills",
+     dict(LIMIT, moves=((2, 99.0, None),)),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 101.5, 99.5, 100.5),
+      bar(3, 100.5, 101, 98.75, 99.5)], {},
+     dict(status="exited", fill=100.0, filled_at=h(3), exit=99.0, exited_at=h(4),
+          exit_reason="stop", r=-0.5)),
+    ("two moves are each in force from their own bar",
+     dict(moves=((2, 99.0, None), (3, 99.5, None))),
+     [bar(1, 100, 101, 99.5, 100.5), bar(2, 100.5, 101, 99.25, 100),
+      bar(3, 100, 101, 99.25, 100)], {},
+     dict(status="exited", exit=99.5, exited_at=h(4), exit_reason="stop", r=-0.25)),
+    ("a moved stop is in force in the last bar before a hand close",
+     dict(moves=((2, 99.5, None),), close=3),
+     [bar(1, 100, 101, 99.5, 100.5), bar(2, 100.5, 104.5, 99.25, 103)], {},
+     dict(status="exited", exit=99.5, exited_at=h(3), exit_reason="stop")),
+    ("a run stop made mid-bar lets the limit fill in that bar", LIMIT,
+     [bar(1, 101, 102, 99.5, 101.5), bar(2, 101, 102, 100.5, 101.5)], dict(stopped=h(1.5)),
+     dict(status="open", fill=100.0, filled_at=h(2))),
+    ("a move can add a stop to a trade entered without one; R stays withheld",
+     dict(stop=None, moves=((2, 99.0, None),)),
+     [bar(1, 100, 101, 98, 100.5), bar(2, 100.5, 101, 98.5, 99)], {},
+     dict(status="exited", exit=99.0, exited_at=h(3), exit_reason="stop", r=None, cash=-10.0)),
+    ("a run stop at the end of the bars cancels a pending limit", LIMIT,
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 102, 100.5, 101.5)],
+     dict(stopped=h(3), covered=[(h(0), h(3))]),
+     dict(status="cancelled", cancelled_at=h(3), cancelled_why="run stopped")),
+    ("a run stop settles a pending limit before a later hole", LIMIT,
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 102, 100.5, 101.5),
+      bar(5, 101, 102, 100.5, 101.5)],
+     dict(stopped=h(3), covered=[(h(0), h(3)), (h(5), h(6))]),
+     dict(status="cancelled", cancelled_at=h(3), cancelled_why="run stopped")),
+    ("a run stop inside the last bar before a later hand close cancels the limit at the run stop",
+     dict(LIMIT, close=2.75),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 102, 100.5, 101.5)], dict(stopped=h(2.5)),
+     dict(status="cancelled", cancelled_at=h(2.5), cancelled_why="run stopped")),
+    ("a stop at or beyond the entry leaves R withheld, said; cash still", dict(stop=100.5),
+     [bar(1, 100, 101, 99.5, 100.5), bar(2, 100.5, 101, 100, 100.5)], {},
+     dict(status="exited", exit=100.0, exited_at=h(2), exit_reason="stop", r=None, cash=0.0,
+          note="no 1R")),
+    ("a hand close inside a hole is not judged", dict(close=4),
+     [bar(1, 100, 101, 99, 100.5), bar(2, 100.5, 101, 99.5, 100), bar(5, 100, 100.5, 97, 97.5)],
+     dict(covered=[(h(0), h(3)), (h(5), h(6))]),
+     dict(status="not judged", exit=None, missing=(h(3), h(5)))),
+    ("a pending limit closed inside a hole is not judged", dict(LIMIT, close=4),
+     [bar(1, 101, 102, 100.5, 101.5), bar(2, 101, 102, 100.5, 101.5),
+      bar(5, 101, 102, 100.5, 101.5)],
+     dict(covered=[(h(0), h(3)), (h(5), h(6))]),
+     dict(status="not judged", cancelled_at=None, missing=(h(3), h(5)))),
+    ("no bar between the entry and the close: out at the entry price, said", dict(at=6, close=7),
+     [bar(19, 100, 101, 99, 100.5), bar(20, 100.5, 101, 99.5, 100)],
+     dict(covered=[(h(5), h(21))], now=h(21)),
+     dict(status="exited", exit=100.0, exited_at=h(7), exit_reason="hand", r=0.0, cash=0.0,
+          note="no bar traded between the entry and the close")),
+]
+
+
+def mirror(case):
+    """The same case as a short: every price p becomes 200 - p, so high and low swap."""
+    name, d, bars, j, want = case
+    flip = lambda p: None if p is None else 200.0 - p  # noqa: E731
+    d = {**d, **{k: flip(d.get(k, v))
+                 for k, v in (("price", 100.0), ("stop", 98.0), ("target", 104.0))},
+         "moves": tuple((a, flip(s), flip(t)) for a, s, t in d.get("moves", ()))}
+    bars = [judge.Bar(b.open_time, 200 - b.open, 200 - b.low, 200 - b.high, 200 - b.close, None)
+            for b in bars]
+    want = {k: flip(v) if k in ("fill", "exit") else v for k, v in want.items()}
+    return (f"short: {name}", d, bars, {**j, "side": "short"}, want)
+
+
+@pytest.mark.parametrize(("d", "bars", "j", "want"),
+                         [c[1:] for c in CASES + [mirror(c) for c in CASES]],
+                         ids=[c[0] for c in CASES + [mirror(c) for c in CASES]])
+def test_the_judge(d, bars, j, want):
+    j, want = dict(j), dict(want)
+    side = j.pop("side", "long")
+    covered = j.pop("covered", [(h(0), bars[-1].open_time + timedelta(hours=1))] if bars else [])
+    o = judge.judge(decisions(**d), side=side, minutes=60, bars=bars, covered=covered,
+                    **{"now": h(48), **j})
+    note = want.pop("note", None)
+    assert {k: getattr(o, k) for k in want} == want
+    assert note is None or any(note in n for n in o.notes), o.notes
+
+
+def test_an_r_too_large_to_state_is_withheld_and_its_cash_kept():
+    r, cash = judge._money("long", 1e-300, 5e-301, 1e300, 1, 1.0)
+    assert r is None and cash == 1e300 - 1e-300

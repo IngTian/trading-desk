@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# `trading-desk`, matching the repository and the daylogs pattern: repo `daylogs`,
+# package `daylogs`, command `day`. It was `trades`, which matched neither the repo
+# nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
+# along with `tradingdesk` and `trade-desk`.
+name = "trading-desk"
+version = "0.9.0"
+description = "Record your trades under versioned strategies: reasons, screenshots and every later decision, in an append-only SQLite log"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["trading", "strategy", "trade-journal", "replay", "sqlite", "event-sourcing"]
+# `mcp` is required: MCP is the desk's only interface (`trading-desk mcp`), served on the SDK's
+# low-level server, which passes the agent's arguments through unchanged for the API to check.
+# The upper bound is deliberate: 2.x renamed and rewrote its own API within two months, so a
+# 3.0 is not taken unseen. yfinance is required too, so every install can judge live runs; it
+# is imported only inside `desk/yahoo.py`'s call, so the MCP server starts without pandas.
+dependencies = ["mcp>=2.3,<3", "yfinance>=1.8,<2"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/IngTian/trading-desk"
+Repository = "https://github.com/IngTian/trading-desk"
+Issues = "https://github.com/IngTian/trading-desk/issues"
+
+[project.scripts]
+trading-desk = "desk.cli:main"
+
+# [dependency-groups] AND NOT [project.optional-dependencies], which is where this
+# diverges from daylogs deliberately. `uv sync` installs dependency groups BY DEFAULT
+# and extras only with --extra, so declaring the dev tools as an extra meant a plain
+# `uv sync` produced a venv with no pytest in it -- which is exactly what happened the
+# first time this project was made installable. CI therefore uses `uv sync` rather than
+# daylogs' `pip install -e '.[dev]'`; one declaration that cannot drift from a second.
+[dependency-groups]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+
+[tool.setuptools.packages.find]
+include = ["desk*"]
+
+# `schema.sql`: the schema IS the tool, and it used to live in book/ which was not a
+# package. An installed copy resolved it to `site-packages/book/schema.sql`, which does
+# not exist -- so `pip install trading-desk` produced something that could not create a
+# book. Proven by installing the wheel in a clean venv. Asserted by CI against
+# a real built wheel, because an editable install reads the source tree and so cannot
+# catch a missing declaration.
+[tool.setuptools.package-data]
+"desk" = ["schema.sql", "bars.sql", "strategy.example.md", "instructions.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

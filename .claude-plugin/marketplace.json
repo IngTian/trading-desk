@@ -1,0 +1,12 @@
+{
+  "name": "trading-desk",
+  "owner": {"name": "IngTian"},
+  "description": "Record your trades under versioned strategies, checked against each version's rules, through the trading-desk MCP server.",
+  "plugins": [
+    {
+      "name": "trading-desk",
+      "source": "./plugin",
+      "description": "The trading-desk MCP server: strategies, runs, trades, reports and stats, for an agent to keep your record."
+    }
+  ]
+}
