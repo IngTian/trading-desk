@@ -1,4 +1,4 @@
-"""The 1.0 checks: one pure function of the plan, the rules and the run as it stood at `at`.
+"""The checks: one pure function of the plan, the rules and the run as it stood at `at`.
 
 **The AI never does a rule's arithmetic.** Every figure is computed here, in Python, from the
 plan, the run's other trades and the indicator values the agent supplies under `market`.

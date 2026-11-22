@@ -161,8 +161,8 @@ def test_a_repeated_timeframe_is_kept_once():
     ('"60m", "1h"', "60m and 1h"), ('"1h", "15m", "60m"', "1h and 60m"),
     ('"1d", "24h"', "1d and 24h"), ('"7d", "1w"', "7d and 1w")])
 def test_two_names_for_one_timeframe_are_refused(frames, same):
-    """Review item 10: 60m and 1h tied, so their stored order followed hash randomisation, and
-    plan 3 reads the finest first."""
+    """Two names for one timeframe tied, so which stored first followed hash randomisation; the
+    plan needs the finest first, so the tie is refused rather than left to chance."""
     with pytest.raises(Refused, match=f"{same} are the same timeframe; keep one"):
         strategy.parse(make(f"timeframes = [{frames}]"))
 
