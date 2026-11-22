@@ -70,6 +70,42 @@ You tell the agent what you did and why, and it calls the desk's tools. A sessio
    could not be read: report each).
 8. **Read the stats** of a run, a version or a strategy.
 
+Say you tell the agent about an entry on the pullback strategy:
+
+> **you:** I'm long ACME at 100, stop 98.5, target 103, 10 shares. The pullback held the 1h EMA
+> on lighter volume, and no tier-1 news inside the next hour.
+
+The agent answers the checklist, fills in the `market` keys the rules read (on a replay run, read
+off your chart), and checks the trade first with `check_only`, which records nothing:
+
+```
+min_reward_risk     kept  reward to risk 2.00 against a minimum of 2
+max_risk_per_trade  kept  risk 15.00 USD against a limit of 100 USD; a size of up to 66 shares passes
+stop_required       kept  the stop 98.5 is below the entry 100, which is the risk side for a long
+target_required     kept  the target 103 is above the entry 100, which is the reward side for a long
+sides               kept  the plan's side long is listed: long
+max_open_trades     kept  0 trades open; this would make 1 against a limit of 2
+daily_loss_limit    kept  the realised R of 2026-03-02 is +0.00 against a floor of -2 R
+cooldown_after_loss kept  no loss on ACME before this trade
+ema_50_1h           kept  close_1h 100.1 (supplied) is above ema_50_1h 99.4 (supplied)
+```
+
+A breach never refuses a trade: these results are kept with it, and `get_trade` works them out
+again later as `checks_now`. The next day you report the exit, and the trade reads:
+
+```
+outcome  exited: fill 100.0, exit 103.0 at its target, r 2.0, cash 30.0
+```
+
+And the run's stats, worked out from nothing but the decisions you reported:
+
+```
+stats  wins 1 of 1 closed · win_rate 1.0 · average_r 2.0 · pnl USD 30.0
+```
+
+Every figure above is the desk's actual reply to that session, run end to end while writing this
+README.
+
 Every tool, argument by argument, and the standing instructions the agent gets, are in
 [The tools](https://github.com/IngTian/trading-desk/blob/main/docs/tools.md).
 
