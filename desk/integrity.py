@@ -239,9 +239,7 @@ _RESULT = {"name": (lambda v: isinstance(v, str), "text"),
            "figure": (lambda v: v is None or _finite_number(v), "a finite number or null"),
            "limit": (lambda v: isinstance(v, str), "text"),
            "says": (lambda v: isinstance(v, str), "text"),
-           "unit": (lambda v: v is None or isinstance(v, str), "text or null"),
-           "computed": (lambda v: isinstance(v, dict) and all(map(_finite_number, v.values())),
-                        "a mapping of finite numbers")}
+           "unit": (lambda v: v is None or isinstance(v, str), "text or null")}
 
 
 def _shown_problems(p: dict) -> list[str]:

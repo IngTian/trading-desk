@@ -1,13 +1,13 @@
 """The 1.0 checks: one pure function of the plan, the rules and the run as it stood at `at`.
 
 **The AI never does a rule's arithmetic.** Every figure is computed here, in Python, from the
-plan, the run's other trades and the indicator values (the agent's under `market`, else the
-desk's own under `computed`). Nothing here fetches, reads a clock or writes.
+plan, the run's other trades and the indicator values the agent supplies under `market`.
+Nothing here fetches, reads a clock or writes.
 
 **A result is a fact, never a block and never a grade.** `ok` is True (kept), False (breached) or
 None (unknown, and `says` names what is missing). Nothing reads kept for want of data, and a
-record rule is withheld only when an unknown trade could change its answer (design §7.1, Q8),
-naming that trade and the report that settles it.
+record rule is withheld only when an unknown trade could change its answer, naming that trade
+and the report that settles it.
 """
 from __future__ import annotations
 
@@ -31,13 +31,6 @@ class Result:
     limit: str            # the setting that applied, in short words: "2", "150 USD", "at_most 30"
     says: str             # the fact; when unknown, what is missing
     unit: str | None
-    computed: dict[str, float] = field(default_factory=dict)   # live: the desk's figure per key
-
-
-@dataclass(frozen=True)
-class Figure:
-    value: float | None
-    says: str             # the bar it was read on, or why there is no value
 
 
 @dataclass(frozen=True)
@@ -64,7 +57,6 @@ class Context:
     currency: str | None = None     # the run's
     others: tuple[Other, ...] = ()
     market: Mapping[str, float] = field(default_factory=dict)      # the agent's
-    computed: Mapping[str, Figure] = field(default_factory=dict)   # the desk's, by market key
 
 
 # ------------------------------------------------------------ arithmetic ---
@@ -370,15 +362,11 @@ def _cooldown_after_loss(plan: Plan, v: dict, ctx: Context) -> Result:
 
 # --------------------------------------------------- indicators and facts ---
 def _read(key: str, ctx: Context) -> tuple[float | None, str]:
-    """The value a check uses: the agent's, else the desk's, else (None, what is missing)."""
+    """The value a check uses: the agent's, else (None, what is missing)."""
     if key in ctx.market:
         value, src = ctx.market[key], "supplied"
-    elif key in ctx.computed:
-        value, src = ctx.computed[key].value, ctx.computed[key].says
-        if value is None:
-            return None, src
     else:
-        return None, f"supply {key}"
+        return None, f"supply {key}, read off the chart at the bar acted on"
     if not math.isfinite(value):
         return None, f"{key} is {value}, not a finite number: supply {key}"
     return value, src
@@ -404,24 +392,22 @@ def _compared(figure: float, cmp: dict) -> tuple[bool, str]:
 def _indicator(plan: Plan, rule: str, label: str, keys: tuple[str, ...], compare: dict,
                ctx: Context) -> Result:
     """An indicator check, or a fact (rule = label = its name, keys = (its name,))."""
-    desk = {k: ctx.computed[k].value for k in keys if k in ctx.computed
-            and ctx.computed[k].value is not None and math.isfinite(ctx.computed[k].value)}
     cmp = compare.get(plan.side) if any(s in compare for s in ("long", "short")) else compare
-    if cmp is None:   # Notes 3: kept, and no market key is read
+    if cmp is None:   # kept, and no market key is read
         return Result(label, True, None, "none", f"{rule} sets no comparison for a {plan.side}",
-                      None, desk)
+                      None)
     if rule in ("ema", "sma"):
         (line, line_src), (close, close_src) = _read(keys[0], ctx), _read(keys[1], ctx)
         if line is None or close is None:
             why = "; ".join(src for v, src in ((line, line_src), (close, close_src)) if v is None)
-            return Result(label, None, None, cmp, why, None, desk)
+            return Result(label, None, None, cmp, why, None)
         return Result(label, close > line if cmp == "above" else close < line, close - line, cmp,
                       f"{keys[1]} {close} ({close_src}) is {_side_word(close, line)} {keys[0]} "
-                      f"{line} ({line_src})", None, desk)
+                      f"{line} ({line_src})", None)
     limit, unit = _limit(cmp), "ATR" if rule == "stop_atr" else None
 
     def unknown(why: str) -> Result:
-        return Result(label, None, None, limit, why, unit, desk)
+        return Result(label, None, None, limit, why, unit)
 
     value, src = _read(keys[0], ctx)
     if rule != "stop_atr":
@@ -429,7 +415,7 @@ def _indicator(plan: Plan, rule: str, label: str, keys: tuple[str, ...], compare
             return unknown(src)
         ok, shown = _compared(value, cmp)
         return Result(label, ok, value, limit, f"{keys[0]} is {shown} ({src}), against {limit}",
-                      unit, desk)
+                      unit)
     distance, why = _stop_distance(plan, "the stop in ATR")
     if distance is None:   # the plan's half first: it is the half the owner can fix
         return unknown(why)
@@ -440,7 +426,7 @@ def _indicator(plan: Plan, rule: str, label: str, keys: tuple[str, ...], compare
     ok, shown = _compared(distance / value, cmp)
     return Result(label, ok, distance / value, limit,
                   f"the stop is {shown} ATR from the entry, on {keys[0]} {value} ({src}), "
-                  f"against {limit}", unit, desk)
+                  f"against {limit}", unit)
 
 
 _RULES = {

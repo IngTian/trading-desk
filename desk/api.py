@@ -10,27 +10,23 @@ import json
 import os
 import re
 import sqlite3
-from bisect import bisect_left, bisect_right
 from contextlib import closing
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from desk import bars, checks, config, indicators, judge, model, store, strategy, yahoo
+from desk import bars, checks, config, judge, model, store, strategy, yahoo
 from desk.errors import Refused, shown
-from desk.rules import Indicator, Rules, _finite, market_keys
-from desk.rules import indicators as indicator_checks  # `indicators` is the formulas' module
+from desk.rules import Rules, _finite, market_keys
 from desk.stats import Row, Stats, summarise  # `stats` below shadows the module's name
-from desk.strategy import minutes  # start_run's `strategy` parameter shadows the module
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "CheckView", "trade",
            "move_order", "close_trade", "report", "correct_trade", "void_trade", "get_trade",
-           "list_trades", "TradeBars", "trade_bars", "Stats", "stats", "StoppedRun"]
+           "list_trades", "Stats", "stats", "StoppedRun"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
-_YAHOO_HAS = "1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w"   # yahoo.INTERVALS, as a refusal names them
-_JUDGED = 1   # the minutes every live run is judged on, Yahoo's "1m" (the author's ruling)
+_JUDGED = 1   # the minutes every live run is judged on, Yahoo's "1m"
 
 
 def _aware(when, name: str = "now") -> datetime:
@@ -91,7 +87,7 @@ class StrategyView:
     rules: dict
     timeframes: tuple[str, ...]
     checklist: tuple[str, ...]
-    market_keys: tuple[str, ...]   # what a trade's `market` may supply, or Yahoo's bars give
+    market_keys: tuple[str, ...]   # what a trade's `market` may supply
     current_hash: str   # the latest version's text_hash: pass it back as `if_current`
     saved: str          # "version 3 created" | "unchanged"
 
@@ -367,18 +363,6 @@ def _version(con, run_row: sqlite3.Row) -> tuple[Rules, tuple[str, ...]]:
             tuple(json.loads(v["checklist"])))
 
 
-def _timeframes(con, run_row: sqlite3.Row) -> dict[int, str]:
-    """The run's version's timeframes, minutes -> name, finest first."""
-    return {minutes(n): n for n in _version(con, run_row)[0].timeframes}
-
-
-def _r6(timeframe: str) -> str:
-    """Ruling R6: why a future's daily or weekly Yahoo bar is not read."""
-    return (f"Yahoo stamps a future's {timeframe} bar at midnight exchange time, after its session "
-            "opened the evening before, so an entry made that evening would be judged against "
-            "prices from before it")
-
-
 def _not_judged(row: sqlite3.Row, d: model.Decisions, note: str, *, live: bool
                 ) -> tuple[judge.Outcome, judge.Outcome | None]:
     """The reports over "not judged", and it (None when not live): the reports need no bars."""
@@ -600,20 +584,18 @@ def _plan(row: sqlite3.Row, d: model.Decisions) -> model.Plan:
                       e.price, e.stop, e.target, e.size)
 
 
-def _results_now(con, row: sqlite3.Row, d: model.Decisions, others: tuple[checks.Other, ...],
-                 now: datetime) -> tuple[checks.Result, ...]:
+def _results_now(con, row: sqlite3.Row, d: model.Decisions, others: tuple[checks.Other, ...]
+                 ) -> tuple[checks.Result, ...]:
     """The run's version's rules on the record as it stands, as of the entry's `at`. `others` never
-    holds this trade. It fetches, so it is never called under the write lock."""
+    holds this trade."""
     run = store.run(con, row["run_id"])
     rules = _version(con, run)[0]
     seq = next(i for i, t in enumerate(store.trades(con, run["id"])) if t["id"] == row["id"])
-    # a damaged stored value reads not supplied (integrity reports it), as a checklist does (R5)
+    # a damaged stored value reads not supplied (integrity reports it), as a checklist does
     market = {k: v for k, v in (d.market.items() if isinstance(d.market, dict) else ())
               if isinstance(v, int | float) and not isinstance(v, bool) and _finite(v)}
     return tuple(checks.run_checks(_plan(row, d), rules, checks.Context(
-        at=d.entry.at, seq=seq, currency=run["currency"], others=others, market=market,
-        computed=_figures(con, run, row["ticker"], row["instrument"], d.currency, rules,
-                          d.entry.at, now))))
+        at=d.entry.at, seq=seq, currency=run["currency"], others=others, market=market)))
 
 
 def _differ(shown: tuple[checks.Result, ...] | None, now: tuple[checks.Result, ...]
@@ -626,111 +608,6 @@ def _differ(shown: tuple[checks.Result, ...] | None, now: tuple[checks.Result, .
     here = {r.name: (r.ok, r.figure) for r in now}
     return tuple(dict.fromkeys(n for n in [*here, *then]
                                if n not in then or n not in here or then[n] != here[n]))
-
-
-def _span(w: int, m: int) -> timedelta:
-    """How far back `w` bars of `m` minutes reach, nights, weekends and holidays included."""
-    # shortcut: a calendar estimate of W bars; widen it if a strategy reads unknown for want of
-    # warm-up
-    if m < 1440:
-        return timedelta(minutes=w * m * 6, days=4)
-    return timedelta(days=w * 1.6 + 10) if m == 1440 else timedelta(weeks=w * 1.1 + 3)
-
-
-def _value(i: Indicator, used: list[judge.Bar]) -> float | None:
-    """Indicator check `i`'s value on the bars `used`, by Pine's formula."""
-    closes, s = [b.close for b in used], i.settings
-    if i.rule == "stop_atr":
-        return indicators.atr(used, s["length"])
-    if i.rule == "macd":
-        out = indicators.macd(closes, s["fast"], s["slow"], s["signal"])
-        return None if out is None else out[("line", "signal", "histogram").index(s["output"])]
-    return {"rsi": indicators.rsi, "ema": indicators.ema, "sma": indicators.sma}[i.rule](
-        closes, s["length"])
-
-
-def _computed(bcon, symbol: str, instrument: str, tf: str, group: list[Indicator], at: datetime,
-              now: datetime) -> dict[str, checks.Figure]:
-    """The figures of the indicator checks on one Yahoo timeframe, from its completed bars before
-    `at`: never an older bar in silence (Notes 5), and each from exactly its warm-up's bars."""
-    m = minutes(tf)
-    bar = timedelta(minutes=m)
-    start = at - _span(max(indicators.warmup(i.rule, i.settings) for i in group), m)
-    days = yahoo.RETENTION_DAYS.get(m)
-    # Fetched no further back than Yahoo keeps, so `why` names no bars the warm-up does not
-    # need; bars kept from an earlier fetch are still read, so a recompute reads the same ones.
-    why = yahoo.ensure(bcon, symbol, m, start if days is None else
-                       max(start, now - timedelta(days=days)), now, end=at)
-    kept = [b for b in bars.read(bcon, yahoo.SOURCE, symbol, m, start, at)
-            if b.open_time + bar <= at]
-    covered = bars.covered(bcon, yahoo.SOURCE, symbol, m)
-    keys = [k for i in group for k in i.keys]
-
-    def unknown(reason: str) -> dict[str, checks.Figure]:
-        return {k: checks.Figure(None, f"{reason}; supply {k}") for k in keys}
-    if not kept:
-        return unknown(f"no {tf} bars kept before {at.isoformat()}" + (f"; {why}" if why else ""))
-    newest = kept[-1]
-    c = newest.open_time + bar
-    if not any(f <= c and to >= at for f, to in covered) and c + bar <= at:
-        if instrument == "future":
-            return unknown(f"the newest {tf} bar kept closed at {c.isoformat()}, a bar or more "
-                           f"before {at.isoformat()}: the bar acted on is not in Yahoo's feed yet "
-                           "(Yahoo delays futures 10 to 30 minutes)")
-        if why:   # else a stock's or an ETF's empty stretch reads as the market shut
-            return unknown(why)
-    opened = newest.open_time.astimezone(UTC)
-    says = f"computed on the {tf} bar that opened {opened:%Y-%m-%d %H:%M} UTC"
-    figures = {}
-    for i in group:
-        n = indicators.warmup(i.rule, i.settings)
-        used, key = kept[-n:], i.keys[0]
-        value = None
-        if gaps := yahoo._gaps(covered, used[0].open_time, c):
-            reason = "bars are missing " + ", ".join(
-                f"from {a.isoformat()} to {b.isoformat()}" for a, b in gaps)
-        elif len(used) < n:
-            cut = days is not None and start < now - timedelta(days=days)
-            reason = f"{len(used)} of the {n} {tf} bars this needs are kept" + (
-                f", as Yahoo keeps {tf} bars for about {days} days" if cut
-                else f"; the {tf} bars kept reach back only to {used[0].open_time.isoformat()}"
-                + (f"; {why}" if why else ""))
-        elif (value := _value(i, used)) is None:
-            reason = f"no close moved in the last {n} {tf} bars, so {key} has no value"
-        figures[key] = (checks.Figure(value, says) if value is not None
-                        else checks.Figure(None, f"{reason}; supply {key}"))
-        figures.update({k: checks.Figure(newest.close, says) for k in i.keys[1:]})  # close_<tf>
-    return figures
-
-
-def _figures(con, run_row: sqlite3.Row, ticker: str, instrument: str, currency: str,
-             rules: Rules, at: datetime, now: datetime) -> dict[str, checks.Figure]:
-    """The desk's own figure, or why there is none, for every indicator key the rules read; facts
-    are never computed. It always fetches, so it is never called under the write lock."""
-    found = indicator_checks(rules.values, rules.timeframes)
-    if run_row["mode"] == "replay":
-        return {k: checks.Figure(None, f"a replay run keeps no bars: supply {k}, read off the "
-                                       "chart at the bar acted on")
-                for i in found for k in i.keys}
-    figures: dict[str, checks.Figure] = {}
-    for tf in dict.fromkeys(i.timeframe for i in found):
-        group = [i for i in found if i.timeframe == tf]
-        keys = [k for i in group for k in i.keys]
-        if instrument == "future" and minutes(tf) in (1440, 10080):
-            figures.update({k: checks.Figure(None, f"{_r6(tf)}; supply {k}") for k in keys})
-        elif minutes(tf) not in yahoo.INTERVALS:
-            figures.update({k: checks.Figure(None, f"Yahoo has no {tf} bars: supply {k}")
-                            for k in keys})
-        else:
-            symbol = yahoo.ticker_symbol(ticker, instrument, currency)
-            try:
-                with closing(bars.open()) as bcon:
-                    figures.update(_computed(bcon, symbol, instrument, tf, group, at, now))
-            except Exception as e:  # bars.db locked, corrupt or foreign: a check never refuses
-                figures.update({k: checks.Figure(None, f"bars could not be read: "
-                                                       f"{type(e).__name__}: {e}; supply {k}")
-                                for k in keys})
-    return figures
 
 
 def _market(rules: Rules, market) -> dict[str, float]:
@@ -865,13 +742,10 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     _within_run(_run_view(con, row), when)   # before any fetch; again under the lock
     record = bool(set(checks.RECORD) & set(rules.values))   # else no rule reads another trade
     others = _others(con, row, now, fetch=True) if record else ()   # fetches, before the lock
-    # market data from insert-only bars, not the record: computed once, used again under the lock
-    figures = _figures(con, row, symbol, kind, currency, rules, when, now)
 
     def as_shown(others: tuple[checks.Other, ...], seq: int | None) -> tuple[checks.Result, ...]:
         return tuple(checks.run_checks(plan, rules, checks.Context(
-            at=when, seq=seq, currency=row["currency"], others=others, market=market,
-            computed=figures)))
+            at=when, seq=seq, currency=row["currency"], others=others, market=market)))
     if check_only:   # a preview needs no reasons yet
         return CheckView(run=run, at=when, ticker=symbol, side=side, instrument=kind,
                          point_value=float(point_value), currency=currency,
@@ -1334,7 +1208,7 @@ def get_trade(con: sqlite3.Connection, trade: str, *, now: datetime | None = Non
     run = store.run(con, row["run_id"])
     others = (_others(con, run, now, fetch=True, skip=row["id"])
               if set(checks.RECORD) & set(_version(con, run)[0].values) else ())
-    here = _results_now(con, row, d, others, now)
+    here = _results_now(con, row, d, others)
     return replace(view, checks_now=here, checks_differ=_differ(view.checks_shown, here))
 
 
@@ -1359,73 +1233,6 @@ def list_trades(con: sqlite3.Connection, run: str | None = None, strategy: str |
     rows = [r for r in store.trades(con, run)  # narrowed first: a view may fetch bars
             if strategy in (None, store.run(con, r["run_id"])["strategy_id"])]
     return [v for v in (_trade_view(con, r, now) for r in rows) if open in (None, _open(v))]
-
-
-@dataclass(frozen=True)
-class TradeBars:
-    trade: str
-    timeframe: str
-    bars: tuple[judge.Bar, ...]
-    # the uncovered ranges between the entry and the end anchor
-    missing: tuple[tuple[datetime, datetime | None], ...]
-    notes: tuple[str, ...]   # why bars are still missing (no yfinance, a failed fetch), if known
-
-
-def trade_bars(con: sqlite3.Connection, trade: str, *, timeframe: str | None = None,
-               before: int | None = 0, after: int | None = 0,
-               now: datetime | None = None) -> TradeBars:
-    """A live trade's bars at one of its run's version's timeframes (default: the finest), or at 1m,
-    the bars every live trade is judged on: from
-    `before` bars ahead of the bar holding the entry through `after` bars past the last bar
-    opening before the exit or cancellation, or through the latest bar while it has not ended.
-    `missing`: what no fetch covered from the entry to its end, or to now while it has not ended;
-    `notes`: why."""
-    now = _aware(now)
-    row = _trade_row(con, _text("trade", trade))
-    run = store.run(con, row["run_id"])
-    if run["mode"] == "replay":
-        raise Refused(f"Trade {shown(trade)} is on replay run {shown(row['run_id'])}, which keeps "
-                      f"no bars: "
-                      "a replay trade is read from what is reported. trade_bars serves live "
-                      "trades.")
-    names = tuple(_timeframes(con, run).values())
-    if timeframe is None:
-        timeframe = names[0]
-    elif timeframe not in (*names, yahoo.INTERVALS[_JUDGED]):
-        raise Refused(f"timeframe {shown(timeframe)} is not one of the timeframes of run "
-                      f"{shown(row['run_id'])}; use one of {', '.join(names)}, or 1m, the bars "
-                      "it is judged on, or leave it out for the finest.")
-    m = minutes(timeframe)
-    if m not in yahoo.INTERVALS:
-        raise Refused(f"Live runs read Yahoo, which has no {timeframe} bars; ask for 1m, the bars "
-                      f"run {shown(row['run_id'])} is judged on, or for another of its "
-                      f"timeframes ({', '.join(names)}) that Yahoo has: {_YAHOO_HAS}.")
-    for name, v in (("before", before), ("after", after)):
-        if v is not None and (isinstance(v, bool) or not isinstance(v, int)
-                              or not 0 <= v <= 10_000):
-            raise Refused(f"{name} must be a whole number of bars from 0 to 10000, e.g. 3, or "
-                          f"left out for 0; got {shown(v)}.")
-    before, after = before or 0, after or 0
-    d = model.decisions_of(con, row["id"])
-    o = _outcomes(con, row, d, now)[0]   # the effective end; fetches only until the trade ends
-    ended = o.exited_at or o.cancelled_at
-    bar = timedelta(minutes=m)
-    symbol = yahoo.ticker_symbol(row["ticker"], row["instrument"], d.currency)
-    # shortcut: 4 days spans a long weekend; a longer market closure returns fewer than `before`
-    # bars, so count back in sessions if that bites
-    start = d.entry.at - (before + 1) * bar - timedelta(days=4)
-    # an ended trade's window is fetched, never the time since
-    end = None if ended is None else min(now, ended + (after + 1) * bar + timedelta(days=4))
-    with closing(bars.open()) as bcon:
-        why = yahoo.ensure(bcon, symbol, m, start, now, end=end)
-        got = bars.read(bcon, yahoo.SOURCE, symbol, m, start, end)
-        missing = yahoo._gaps(bars.covered(bcon, yahoo.SOURCE, symbol, m), d.entry.at,
-                              ended or now)
-    times = [b.open_time for b in got]
-    first = max(bisect_right(times, d.entry.at) - 1 - before, 0)   # the entry anchor, less `before`
-    last = len(got) if ended is None else bisect_left(times, ended) + after
-    return TradeBars(trade, timeframe, tuple(got[first:last]), tuple(missing),
-                     () if why is None else (why,))
 
 
 _NO_SCOPE = ("stats needs one scope: a run, a strategy, or a strategy with a version; every "
@@ -1480,7 +1287,7 @@ def stats(con: sqlite3.Connection, *, strategy: str | None = None, version: int 
         breached, unknown, kept = [], {}, []
         for r, held, t, v, seq in read:
             results = _results_now(con, t, v.decisions,
-                                   tuple(o for o in others[r["id"]] if o.id != v.id), now)
+                                   tuple(o for o in others[r["id"]] if o.id != v.id))
             if any(x.ok is False for x in results):
                 breached.append(v.id)
             elif all(x.ok is True for x in results):   # no rules: kept

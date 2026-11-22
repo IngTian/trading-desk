@@ -1,4 +1,4 @@
-"""`trading-desk mcp`: the 16 tools on the MCP SDK's low-level server. Every figure is invented.
+"""`trading-desk mcp`: the 15 tools on the MCP SDK's low-level server. Every figure is invented.
 
 In process through `mcp.Client`, through `server.call` directly, and as a subprocess driven one
 message at a time, as a client drives it."""
@@ -26,7 +26,7 @@ from desk import api, config, server, store
 
 NAMES = ["save_strategy", "get_strategy", "list_strategies", "start_run", "stop_run", "list_runs",
          "trade", "move_order", "close_trade", "report", "correct_trade", "void_trade",
-         "get_trade", "list_trades", "trade_bars", "stats"]
+         "get_trade", "list_trades", "stats"]
 TEXT = ('---\nname: Tester\n---\n\n# Tester\n\nAll figures here are invented.\n\n```rules\n'
         'timeframes = ["15m"]\n\n[facts]\nrvol = { at_least = 2.0 }\n```\n\n## Checklist\n\n'
         '- Invented item.\n')
@@ -67,7 +67,7 @@ async def test_the_server_names_itself_and_carries_the_instructions():
 
 
 @pytest.mark.anyio
-async def test_the_tools_are_the_16_api_functions_one_to_one():
+async def test_the_tools_are_the_15_api_functions_one_to_one():
     async with mcp.Client(server.server) as c:
         listed = (await c.list_tools()).tools
     assert [t.name for t in listed] == NAMES
@@ -195,7 +195,6 @@ def _seed(tmp_path) -> dict[str, dict]:
         "void_trade": {"trade": a, "reason": "Invented."},
         "get_trade": {"trade": a},
         "list_trades": {"run": replay, "strategy": "s", "open": True},
-        "trade_bars": {"trade": c, "timeframe": "15m", "before": 1, "after": 1},
         "stats": {"strategy": "s", "version": 1, "mode": "replay", "tags": ["a"],
                   "conforming_only": True},
     }
@@ -470,4 +469,4 @@ def test_a_trade_reply_carries_its_rule_results_once_and_round_figures(desk):
 
 def test_trade_names_which_market_keys_to_supply():
     text = server.TOOLS["trade"].description
-    assert "supply each the instructions name (a replay run: all; a live run: the facts" in text
+    assert "supply each, read off the last completed bar" in text

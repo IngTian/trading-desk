@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from desk import checks, rules
-from desk.checks import Context, Figure, Other
+from desk.checks import Context, Other
 from desk.model import Plan
 
 AT = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)     # a Monday
@@ -180,16 +180,13 @@ def test_trading_hours_in_the_system_timezone(monkeypatch):
         assert checks.run_checks(P, rules.Rules(hours, ("15m",)), Context(at=when))[0].ok is ok
 
 
-def test_indicators_use_the_agents_value_over_the_desks_and_keep_both():
+def test_indicators_use_the_agents_value():
     rsi = {"rsi": {"length": 14, "long": {"at_most": 30}}}
-    desk = {"rsi_14_15m": Figure(29.1, "computed on the 15m bar that opened 2026-03-02 14:30 UTC")}
-    r = one(rsi, market={"rsi_14_15m": 31.0}, computed=desk)
-    assert (r.ok, r.figure, r.computed, r.name) == (False, 31.0, {"rsi_14_15m": 29.1},
-                                                    "rsi_14_15m")
-    assert one(rsi, computed=desk).figure == 29.1 and "14:30" in one(rsi, computed=desk).says
-    replay = {"rsi_14_15m": Figure(None, "a replay run keeps no bars: supply rsi_14_15m")}
-    assert one(rsi, computed=replay).ok is None
-    assert "supply rsi_14_15m" in one(rsi, computed=replay).says
+    r = one(rsi, market={"rsi_14_15m": 31.0})
+    assert (r.ok, r.figure, r.name) == (False, 31.0, "rsi_14_15m")
+    missing = one(rsi)
+    assert missing.ok is None
+    assert missing.says == "supply rsi_14_15m, read off the chart at the bar acted on"
     short = one(rsi, replace(P, side="short"))                    # no comparison for a short
     assert (short.ok, short.figure) == (True, None) and "no comparison for a short" in short.says
 
@@ -246,9 +243,6 @@ def test_each_rule_applies_at_its_edges():
     assert one(atr, market={"atr_14_15m": -1.0}).ok is None
     facts = {"facts": {"rvol": {"at_least": 2}}}
     assert one(facts, market={"rvol": float("nan")}).ok is None
-    rsi = {"rsi": {"length": 14, "at_most": 30}}
-    r = one(rsi, computed={"rsi_14_15m": Figure(float("nan"), "bar")})
-    assert (r.ok, r.computed) == (None, {})
     ema = {"ema": {"length": 200, "timeframe": "1h", "short": "below"}}
     flat = {"ema_200_1h": 101.0, "close_1h": 101.0}
     assert one(ema, replace(P, side="short"), market=flat).ok is False        # strict

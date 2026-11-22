@@ -28,7 +28,7 @@ def test_the_plugin_and_its_marketplace_agree():
         "mcpServers": {"desk": {"command": "trading-desk", "args": ["mcp"]}}
     }
     assert "version" not in plugin
-    assert len(TOOLS) == 16
+    assert len(TOOLS) == 15
     assert all(len(PREFIX + name) <= 128 for name in TOOLS)
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
     assert "trading-desk" in scripts

@@ -1,4 +1,4 @@
-"""`trading-desk mcp`: desk/api.py's 16 functions as MCP tools over stdio, with
+"""`trading-desk mcp`: desk/api.py's 15 functions as MCP tools over stdio, with
 desk/instructions.md as the server's `instructions`.
 
 On the MCP SDK's low-level server, never MCPServer: MCPServer coerces arguments ("1" and true
@@ -143,10 +143,8 @@ TOOLS: dict[str, Tool] = {
         "relative strength index, a 0 to 100 reading of recent gains against recent losses. "
         "`checklist` answers the version's checklist items, matched by their exact text.\n\n"
         "Before an entry whose rules read market keys, take them from get_strategy's "
-        "market_keys and supply each the instructions name (a replay run: all; a live run: the "
-        "facts, a future's indicator keys, and any value you trust over the desk's), read off "
-        "the last completed bar: a key left out reads unknown for good, since market is not "
-        "corrected. The rules that read the run's other "
+        "market_keys and supply each, read off the last completed bar: a key left out reads "
+        "unknown for good, since market is not corrected. The rules that read the run's other "
         "trades count this run only, and max_consecutive_losses counts within the day."), {
         "run": _p("string", "The id of the run the trade is on, e.g. dip-buyer-r1."),
         "ticker": _p("string", "The symbol, as the user's chart names it, e.g. ACME or GC1!."),
@@ -296,21 +294,6 @@ TOOLS: dict[str, Tool] = {
         "open": _p("boolean", "true: only the open trades; false: only the rest; left out: "
                    "all."),
     }),
-    "trade_bars": Tool(api.trade_bars, (
-        "A live trade's price bars, each with its open time in UTC and its open, high, low, "
-        "close and volume, on one of its run's timeframes (default: the finest), or on 1m, the "
-        "bars it is judged on. They run from "
-        "`before` bars ahead of the bar holding its entry to `after` bars past its exit or "
-        "cancellation, or to the latest bar while it has not ended. `missing` gives the ranges "
-        "no fetch covered, and `notes` why. Replay trades have no bars."), {
-        "trade": _p("string", "A live trade's id."),
-        "timeframe": _p("string", "One of its run's timeframes, e.g. 15m, or 1m, the bars it is "
-                        "judged on; left out: the finest."),
-        "before": _p("integer", "Bars to include ahead of the bar holding the entry; left out: "
-                     "0.", minimum=0, maximum=10000),
-        "after": _p("integer", "Bars to include past the exit or cancellation; left out: 0.",
-                    minimum=0, maximum=10000),
-    }, ("trade",)),
     "stats": Tool(api.stats, (
         "Counts, rates and averages for one scope's non-void trades: a run, a strategy, or a "
         "strategy with a version, narrowed by mode, by tags and by `conforming_only`. Never a "
