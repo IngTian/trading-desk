@@ -31,9 +31,9 @@ It will not place orders, send alerts or keep account balances: it is a record, 
 full list of what it does not do is in
 [Limits](https://github.com/IngTian/trading-desk/blob/main/docs/limits.md).
 
-**Contents:** [What the agent does for you](#what-the-agent-does-for-you) · [Install](#install) ·
-[Use it from Claude Code](#use-it-from-claude-code) · [Your data](#your-data) ·
-[Where to look for things](#where-to-look-for-things) · [Status](#status)
+**Contents:** [What the agent does for you](https://github.com/IngTian/trading-desk#what-the-agent-does-for-you) · [Install](https://github.com/IngTian/trading-desk#install) ·
+[Use it from Claude Code](https://github.com/IngTian/trading-desk#use-it-from-claude-code) · [Your data](https://github.com/IngTian/trading-desk#your-data) ·
+[Where to look for things](https://github.com/IngTian/trading-desk#where-to-look-for-things) · [Status](https://github.com/IngTian/trading-desk#status)
 
 ## What the agent does for you
 
@@ -106,7 +106,10 @@ stats  wins 1 of 1 closed · win_rate 1.0 · average_r 2.0 · pnl USD 30.0
 Every figure above is the desk's actual reply to that session, run end to end while writing this
 README.
 
-Every tool, argument by argument, and the standing instructions the agent gets, are in
+The 16 tools, grouped as they are in the reference: `save_strategy`, `get_strategy`,
+`list_strategies` · `start_run`, `stop_run`, `list_runs` · `trade`, `move_order`, `close_trade`,
+`report`, `correct_trade`, `void_trade` · `get_trade`, `list_trades`, `trade_bars`, `stats`.
+Every one, argument by argument, with the standing instructions the agent gets, is in
 [The tools](https://github.com/IngTian/trading-desk/blob/main/docs/tools.md).
 
 ## Install
