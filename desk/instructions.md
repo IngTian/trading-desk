@@ -11,7 +11,7 @@ The desk records the user's trades under versioned strategies, checks each trade
 
 ## Entering a trade
 - Supply `market` at entry: every indicator key the rules name and every declared fact (the desk computes none), read off the chart at the bar acted on (a regular-hours chart for stocks, extended hours for futures). A key left out reads unknown for good, since `market` is not corrected.
-- Answer every checklist item with `verdict` "pass" or "fail" and a one-line `reason`, as you judge it.
+- Answer every checklist item with `verdict` "pass" or "fail" and a one-line `reason`, as you read it.
 - Screenshots are full file paths or https:// links. For an image pasted into the chat, pass the file path you are shown for it, even a temporary one: the desk copies the file when the trade is recorded. If no path is shown, ask the user for one.
 
 ## After entry
