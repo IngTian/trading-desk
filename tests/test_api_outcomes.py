@@ -149,7 +149,7 @@ def test_reads_refuse_a_naive_now_and_arguments_of_the_wrong_type(con, call, say
 def test_a_move_on_a_limit_the_run_stop_cancelled_is_refused(con, run):
     t = enter(con, run, entry_type="limit", entry=90.0, stop=88.0, target=94.0, at=h(1), now=h(1))
     api.stop_run(con, run, at=h(2), now=h(4))
-    with pytest.raises(api.Refused, match=re.escape(f"cancelled at {h(2).isoformat()}")):
+    with pytest.raises(api.Refused, match=re.escape(f"the run's stop at {h(2).isoformat()}")):
         api.move_order(con, t.id, stop=89.0, reason="Tighter.", at=h(3), now=h(4))
     assert api.move_order(con, t.id, stop=89.0, reason="Tighter.", at=h(1.5),
                           now=h(4)).outcome.status == "cancelled"
@@ -158,5 +158,5 @@ def test_a_move_on_a_limit_the_run_stop_cancelled_is_refused(con, run):
 def test_a_move_at_the_moment_the_run_stop_cancelled_the_limit_is_refused(con):
     t = enter(con, "gold-r1", entry_type="limit", at=h(1), now=LATER)
     api.stop_run(con, "gold-r1", at=h(2), now=LATER)
-    with pytest.raises(api.Refused, match="no order to move"):
+    with pytest.raises(api.Refused, match="at or after the run's stop"):
         api.move_order(con, t.id, stop=97.0, reason="Tighter.", at=h(2), now=LATER)

@@ -213,7 +213,7 @@ def _fold(con: sqlite3.Connection, trade_id: str
         reasons=p["reasons"], screenshots=tuple(p["screenshots"]),
         point_value=p.get("point_value", row["point_value"]),
         currency=p.get("currency", row["currency"]),
-        # Read as stored, not coerced: a damaged price folds, and report_problem meets it.
+        # Read as stored, not coerced: a damaged price folds, and record_problem meets it.
         filled=report(filled, price=payload.get(filled, {}).get("price")),
         cancelled=report(cancelled, why=payload.get(cancelled, {}).get("why")),
         open=report(latest), open_first=report(earliest),
@@ -237,19 +237,60 @@ def in_force(d: Decisions, at: dt.datetime) -> tuple[float | None, float | None]
     return stop, target
 
 
-def report_problem(trade: str, d: Decisions, *, side: str,
-                   stopped: dt.datetime | None) -> str | None:
-    """The first way d's reports do not fit the record, as a refusal naming the fix; None when
-    they fit. The api's `_consistent` and integrity's `reports` both read it, so every report
-    rule lives here. A trade's entry against its run, a move against the entry and the exit,
-    and an exit against the entry stay the api's inline checks and integrity's decision_dates.
+def entry_outside_run(at: dt.datetime, started: dt.datetime | None,
+                      stopped: dt.datetime | None) -> str | None:
+    """Why an entry at `at` falls outside the run that started at `started` and stopped at
+    `stopped`; None when it falls inside. `record_problem` and the api's `_within_run` both read
+    it, so the rule is written once."""
+    if started is not None and at < started:
+        return (f"entered at {at.isoformat()}, before the run started at {started.isoformat()}; "
+                "a trade is entered inside its run, so give a later `at`.")
+    if stopped is not None and at >= stopped:
+        return (f"entered at {at.isoformat()}, at or after the run stopped at "
+                f"{stopped.isoformat()}; a trade is entered before its run stops, so give an "
+                "earlier `at`. A run stop, once recorded, cannot be moved: stop_run, if that is "
+                "the call refused, takes an `at` after the entry.")
+    return None
 
-    `stopped` is the run's stop, when it has one."""
+
+def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime | None,
+                   stopped: dt.datetime | None) -> str | None:
+    """The first way the record `d` is wrong, as a refusal that says what to change; None when
+    it is right. Every rule about what a trade's record may hold is here: the api's `_consistent`
+    asks it after every write, and integrity's `record` asks it over a whole database.
+
+    The record cannot say which call was refused, so a message describes the record and names
+    the fix from either side. `started` and `stopped` are the run's start and stop, each None
+    when the run has none."""
     e, f, c, h, h1, x = d.entry, d.filled, d.cancelled, d.open, d.open_first, d.exited
+    # 1-5: the record's dates. A voided trade is exempt from 2, as integrity has always read it.
+    if outside := entry_outside_run(e.at, started, None if d.voided else stopped):
+        return f"Trade {shown(trade)} was {outside}"
+    if (m := next((m for m in d.moves if m.at < e.at), None)):
+        return (f"Trade {shown(trade)} was entered at {e.at.isoformat()}; a move at "
+                f"{m.at.isoformat()} cannot be before that, so give one of them its real `at`.")
+    # The trade's end, past which there is nothing left to move: its exit, its reported
+    # cancellation, or, for a limit with no fill, the run's stop, which cancelled the order.
+    ended, at_end, by_stop = None, None, False
+    if x is not None:
+        ended, at_end = f"its exit at {x.at.isoformat()}", x.at
+    elif c is not None:
+        ended, at_end = f"its order's cancellation at {c.at.isoformat()}", c.at
+    elif e.type == "limit" and f is None and stopped is not None:
+        ended, at_end, by_stop = (f"the run's stop at {stopped.isoformat()}, which cancelled its "
+                                  "unfilled order"), stopped, True
+    if at_end is not None and (m := next((m for m in d.moves if m.at >= at_end), None)):
+        return (f"Trade {shown(trade)} has a move at {m.at.isoformat()}, at or after {ended}: "
+                "there is nothing left to move, so give one of them its real `at`."
+                + (" A run stop, once recorded, cannot be moved: stop_run, if that is the call "
+                   "refused, takes an `at` at or after the move." if by_stop else ""))
+    if x is not None and x.at <= e.at:
+        return (f"Trade {shown(trade)} was entered at {e.at.isoformat()}; its exit at "
+                f"{x.at.isoformat()} must come after that, so give one of them its real `at`.")
     fp = e.price if f is None or f.price is None else f.price
     position = e.type == "market" or f is not None
     exit_at = x.at.isoformat() if x is not None else None
-    # 1-5: the fill
+    # 6-10: the fill
     if e.type == "market" and (f or c):
         return (f"Trade {shown(trade)} was a market entry, filled when it was entered; only a "
                 f"limit "
@@ -274,7 +315,7 @@ def report_problem(trade: str, d: Decisions, *, side: str,
         return (f"The fill of trade {shown(trade)} at {fp} is worse than its limit {e.price}: a "
                 f"limit "
                 "order fills at its price or better, so give the price it filled at.")
-    # 6: the vocabulary, before any rule below reads a kind
+    # 11-14: the vocabulary, before any rule below reads a kind
     if x is not None and x.kind not in ("hand", "stop", "target"):
         return (f"The exit of trade {shown(trade)} has kind {shown(x.kind)}; use "
                 "\"hand\", \"stop\" or \"target\".")
@@ -282,7 +323,7 @@ def report_problem(trade: str, d: Decisions, *, side: str,
         return (f"The cancellation of trade {shown(trade)} has why {shown(c.why)}; use \"not "
                 f"filled\", "
                 "\"pulled\" or \"run stopped\".")
-    # before rule 7, so a "run stopped" after the stop gets this message, not the later one
+    # before rule 16, so a "run stopped" after the stop gets this message, not the later one
     if c and c.why == "run stopped":
         if stopped is None:
             return (f"The run of trade {shown(trade)} has not stopped; why \"run stopped\" says "
@@ -292,15 +333,10 @@ def report_problem(trade: str, d: Decisions, *, side: str,
             return (f"The cancellation of trade {shown(trade)} gives why \"run stopped\", so it "
                     f"is dated at its run's stop, {stopped.isoformat()}; give that `at`, or why "
                     "\"not filled\" or \"pulled\" for an order that ended before the stop.")
-    # 7-8: the cancellation
+    # 15-17: the cancellation
     if c and c.at <= e.at:
         return (f"Trade {shown(trade)} was entered at {e.at.isoformat()}; its cancellation at "
                 f"{c.at.isoformat()} must come after that, so give one of them its real `at`.")
-    if c and (m := next((m for m in d.moves if m.at >= c.at), None)):
-        return (f"Trade {shown(trade)} has a move at {m.at.isoformat()}; its order's cancellation "
-                f"at "
-                f"{c.at.isoformat()} must come after every move, since an order is moved only "
-                "while it stands.")
     if c and stopped is not None and c.at > stopped:
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, after "
                 f"its run "
@@ -316,7 +352,7 @@ def report_problem(trade: str, d: Decisions, *, side: str,
                 "void_trade with report \"cancelled\" or \"exited\"; to pull a limit you exited "
                 "by mistake, withdraw the exit (void_trade with report \"exited\"), then report "
                 "the cancellation.")
-    # 9-11: the exit
+    # 18-23: the exit
     if x is not None and not position:
         return (f"The exit of trade {shown(trade)} at {exit_at} needs a position, and its limit "
                 f"order has "
@@ -352,7 +388,7 @@ def report_problem(trade: str, d: Decisions, *, side: str,
             return (f"The target exit of trade {shown(trade)} at {price} is worse than its target "
                     f"{level}: a target fills at its price or better, so give the price it "
                     "filled at, or kind=\"hand\".")
-    # 12: an open report
+    # 24-27: an open report
     if h and c:
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, so it "
                 f"has no "

@@ -125,7 +125,7 @@ def test_a_run_with_two_stops_is_reported(con):
 
 
 def test_a_stop_before_the_start_is_reported_and_one_second_after_is_not(con):
-    # A run with no trades, so no entry falls after the stop (decision_dates' half).
+    # A run with no trades, so no entry falls after the stop (record's half).
     con.execute("INSERT INTO runs (id, strategy_id, version, mode, tags, currency)"
                 " VALUES ('dip-buyer-r2', 'dip-buyer', 1, 'replay', '[]', 'USD')")
     ev(con, "run_started", NOW, run="dip-buyer-r2")
@@ -141,7 +141,7 @@ def test_a_stop_before_the_start_is_reported_and_one_second_after_is_not(con):
 def test_a_move_before_the_entry_is_reported(con):
     ev(con, "order_moved", T1 - timedelta(seconds=1), trade=tid(con, "ACME"),
        payload={"stop": 99.0, "reason": "x"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 def test_a_move_at_the_entry_is_healthy(con):
@@ -153,7 +153,7 @@ def test_an_exit_before_the_entry_is_reported(con):
     raw_trade(con, "EXIT-1", at=T2, entry_type="market")
     ev(con, "exited", T2 - timedelta(seconds=1), trade="EXIT-1",
        payload={"reason": "x", "price": 101.0, "kind": "hand"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 def test_an_exit_at_the_entry_is_reported_and_one_second_later_is_not(con):
@@ -164,7 +164,7 @@ def test_an_exit_at_the_entry_is_reported_and_one_second_later_is_not(con):
     raw_trade(con, "EXIT-2", at=T2, entry_type="market")
     ev(con, "exited", T2, trade="EXIT-2",
        payload={"reason": "x", "price": 101.0, "kind": "hand"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 def test_a_move_at_the_hand_exit_is_reported_and_one_second_before_is_not(con):
@@ -175,7 +175,7 @@ def test_a_move_at_the_hand_exit_is_reported_and_one_second_before_is_not(con):
        payload={"stop": 99.0, "reason": "x"})
     assert found(con)[0] == 0
     ev(con, "order_moved", T3, trade="MOVE-1", payload={"stop": 99.0, "reason": "x"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 @pytest.mark.parametrize(("stop", "reported"), [(T1, 1), (T1 + timedelta(seconds=1), 0)])
@@ -184,14 +184,14 @@ def test_a_trade_entered_at_or_after_its_runs_stop_is_reported_unless_void(con, 
     the void WXYZ are both entered at T1; only ACME counts."""
     ev(con, "run_stopped", stop)
     if reported:
-        assert only(con, "decision_dates") == reported
+        assert only(con, "record") == reported
     else:
         assert found(con) == (0, [])
 
 
 def test_an_entry_before_the_run_started_is_reported(con):
     raw_trade(con, "EARL-1", at=NOW - timedelta(seconds=1))
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 def test_a_decision_is_dated_by_its_corrected_time(con):
@@ -199,7 +199,7 @@ def test_a_decision_is_dated_by_its_corrected_time(con):
     entered = store.events(con, trade_id=tid(con, "ACME"))[0]["id"]
     ev(con, "corrected", LATER, trade=tid(con, "ACME"), corrects=entered,
        payload={"fields": {"at": (NOW - timedelta(hours=1)).isoformat()}, "reason": "x"})
-    assert only(con, "decision_dates") == 1
+    assert only(con, "record") == 1
 
 
 # --- corrections -------------------------------------------------------------------------------
@@ -279,13 +279,13 @@ def test_a_log_with_reports_a_withdrawal_and_a_corrected_report_reports_nothing(
 def test_an_exit_with_no_position_is_reported(con):
     raw_trade(con, "RAW-1")
     ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
-    assert only(con, "reports") == 1
+    assert only(con, "record") == 1
 
 
 def test_an_exit_kind_that_is_not_known_is_reported(con):
     raw_trade(con, "RAW-1")
     ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "trailing"})
-    assert only(con, "reports") == 1
+    assert only(con, "record") == 1
 
 
 def test_an_open_report_at_or_after_the_exit_is_reported(con):
@@ -293,7 +293,7 @@ def test_an_open_report_at_or_after_the_exit_is_reported(con):
     ev(con, "filled", T2, trade="RAW-1", payload={"reason": "x"})
     ev(con, "exited", T3, trade="RAW-1", payload={"reason": "x", "kind": "stop"})
     ev(con, "open", T4, trade="RAW-1", payload={"reason": "x"})
-    assert only(con, "reports") == 1
+    assert only(con, "record") == 1
 
 
 # --- versions ----------------------------------------------------------------------------------
@@ -342,7 +342,7 @@ def test_the_checker_never_raises_on_a_damaged_log(con):
     ev(con, "filled", T2, trade="RAW-2", payload={"reason": "x", "price": "abc"})
     lines: list[str] = []
     assert integrity.run(con, emit=lines.append) >= 4
-    assert any("trade RAW-2: report check failed: TypeError" in ln for ln in lines)
+    assert any("trade RAW-2: record check failed: TypeError" in ln for ln in lines)
 
 
 ENTERED = {"entry_type": "limit", "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
@@ -409,7 +409,7 @@ def test_a_trade_whose_run_is_missing_is_reported(con):
     lines = []
     integrity.run(con, emit=lines.append)
     assert "run_currency: trade ghost-1: its run ghost-r1 does not exist" in lines
-    assert not [ln for ln in lines if ln.startswith("reports:") and "ghost-1" in ln]
+    assert not [ln for ln in lines if ln.startswith("record:") and "ghost-1" in ln]
 
 
 @pytest.mark.parametrize("at, lines", [(T2, 1), (T4, 0)])
@@ -417,4 +417,4 @@ def test_integrity_reads_run_stopped_only_at_the_stop(con, at, lines):
     ev(con, "run_stopped", T4)
     raw_trade(con, "X")                                                # a limit entered at T1
     ev(con, "cancelled", at, trade="X", payload={"reason": "x", "why": "run stopped"})
-    assert len([ln for ln in found(con)[1] if ln.startswith("reports: ")]) == lines
+    assert len([ln for ln in found(con)[1] if ln.startswith("record: ")]) == lines

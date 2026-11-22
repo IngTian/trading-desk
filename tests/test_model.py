@@ -220,7 +220,7 @@ def test_the_plan_1_fold_is_gone():
     assert all(hasattr(model, n) for n in ("Plan", "_signed", "canonical_ticker"))
 
 
-# --- model.report_problem, rule by rule --------------------------------------------------------
+# --- model.record_problem, rule by rule --------------------------------------------------------
 
 P = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
 
@@ -230,7 +230,8 @@ def t(n):
 
 
 def dec(type="limit", price=100.0, stop=98.0, target=104.0, moves=(), fill=None, cancel=None,
-        why="pulled", open=None, open_first=None, exited=None, kind=None, exit_price=None):
+        why="pulled", open=None, open_first=None, exited=None, kind=None, exit_price=None,
+        voided=False):
     """A long entered at t(1): fill=(n, price or None), cancel=n with its why, open=n the latest
     open report and open_first=n the earliest (default: open), exited=n with its kind and
     price."""
@@ -238,7 +239,7 @@ def dec(type="limit", price=100.0, stop=98.0, target=104.0, moves=(), fill=None,
     return model.Decisions(
         entry=model.Entry(type=type, price=price, stop=stop, target=target, size=10, at=t(1)),
         moves=tuple(model.Move(at=t(a), stop=s, target=g, reason="r") for a, s, g in moves),
-        voided=False, reasons="r", screenshots=(), point_value=1.0, currency="USD",
+        voided=voided, reasons="r", screenshots=(), point_value=1.0, currency="USD",
         filled=None if fill is None else model.Report(at=t(fill[0]), price=fill[1], reason="r"),
         cancelled=None if cancel is None else model.Report(at=t(cancel), price=None, reason="r",
                                                            why=why),
@@ -249,8 +250,25 @@ def dec(type="limit", price=100.0, stop=98.0, target=104.0, moves=(), fill=None,
 
 
 MARKET = dict(type="market")
-PROBLEMS = [  # (id, dec kwargs, report_problem kwargs, a substring of the problem, or None)
+PROBLEMS = [  # (id, dec kwargs, record_problem kwargs, a substring of the problem, or None)
     ("a consistent record has none", dict(fill=(2, 99.5), exited=3, kind="stop"), {}, None),
+    ("an entry before the run's start", {}, dict(started=t(2)), "before the run started"),
+    ("an entry at the run's start is accepted", {}, dict(started=t(1)), None),
+    ("an entry at or after the run's stop", {}, dict(stopped=t(1)), "at or after the run stopped"),
+    ("a voided trade may be entered at its run's stop", dict(voided=True), dict(stopped=t(1)),
+     None),
+    ("a move is not before the entry", dict(moves=((0.5, 99.0, None),)), {},
+     f"entered at {t(1).isoformat()}"),
+    ("a move at the entry's moment is accepted", dict(moves=((1, 99.0, None),)), {}, None),
+    ("a move is before the exit", dict(MARKET, moves=((3, 99.0, None),), exited=2, kind="stop"),
+     {}, "at or after its exit"),
+    ("a move is before its order's cancellation", dict(moves=((3, 99.0, None),), cancel=2), {},
+     "at or after its order's cancellation"),
+    ("a move is before the run stop that cancelled its unfilled limit",
+     dict(moves=((3, 99.0, None),)), dict(stopped=t(2)), "at or after the run's stop"),
+    ("a move after the stop of a filled limit is accepted",
+     dict(fill=(2, None), moves=((3, 99.0, None),)), dict(stopped=t(4)), None),
+    ("an exit is after the entry", dict(MARKET, exited=1), {}, "must come after that"),
     ("a market entry has no fill to report", dict(MARKET, fill=(2, None)), {}, "market entry"),
     ("nor a cancellation", dict(MARKET, cancel=2), {}, "market entry"),
     ("an order cannot both fill and be cancelled", dict(fill=(2, None), cancel=3), {},
@@ -329,6 +347,7 @@ PROBLEMS = [  # (id, dec kwargs, report_problem kwargs, a substring of the probl
 
 @pytest.mark.parametrize(("d", "kw", "says"), [c[1:] for c in PROBLEMS],
                          ids=[c[0] for c in PROBLEMS])
-def test_report_problems(d, kw, says):
-    p = model.report_problem("acme-1", dec(**d), **{"side": "long", "stopped": None, **kw})
+def test_record_problems(d, kw, says):
+    p = model.record_problem("acme-1", dec(**d),
+                           **{"side": "long", "started": None, "stopped": None, **kw})
     assert (p is None) if says is None else (p is not None and says in p), p

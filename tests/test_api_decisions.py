@@ -111,7 +111,7 @@ def test_a_move_at_or_after_the_hand_exit_is_refused(con, at):
     move."""
     t = enter(con, entry_type="market")
     out(con, t.id)
-    with pytest.raises(api.Refused, match=f"exited by hand at {re.escape(T3.isoformat())}"):
+    with pytest.raises(api.Refused, match=f"at or after its exit at {re.escape(T3.isoformat())}"):
         api.move_order(con, t.id, stop=99.0, reason="x", at=at, now=LATER)
     assert kinds(con, t.id) == ["entered", "exited"]
     api.move_order(con, t.id, stop=99.0, reason="x", at=T3 - timedelta(minutes=1), now=LATER)
@@ -123,7 +123,7 @@ def test_an_exit_at_or_before_a_recorded_move_is_refused(con, at):
     t = enter(con, entry_type="market")
     api.move_order(con, t.id, stop=99.0, reason="x", at=T2, now=LATER)
     api.move_order(con, t.id, stop=99.5, reason="y", at=T3, now=LATER)
-    with pytest.raises(api.Refused, match=f"move at {re.escape(T3.isoformat())}"):
+    with pytest.raises(api.Refused, match="at or after its exit at"):
         out(con, t.id, at=at)
     assert kinds(con, t.id) == ["entered", "order_moved", "order_moved"]
     out(con, t.id, at=T3 + timedelta(minutes=1))
@@ -334,6 +334,7 @@ def test_a_corrected_at_before_the_run_started_is_refused(con):
     t = enter(con)
     with pytest.raises(api.Refused, match="started"):
         correct(con, t.id, fields={"at": NOW - timedelta(minutes=1)})
+    assert kinds(con, t.id) == ["entered"]
     correct(con, t.id, fields={"at": NOW})
 
 
@@ -342,6 +343,7 @@ def test_a_corrected_at_at_or_after_the_run_stop_is_refused(con):
     api.stop_run(con, "dip-buyer-r2", at=T3, now=LATER)
     with pytest.raises(api.Refused, match="stopped"):
         correct(con, t.id, fields={"at": T3})
+    assert kinds(con, t.id) == ["entered"]
 
 
 @pytest.mark.parametrize("decide", [move])  # an exit at the entry's `at` is tested above
@@ -402,7 +404,7 @@ def test_a_corrected_move_at_at_or_after_the_hand_exit_is_refused(con, at):
     api.move_order(con, t.id, stop=99.0, reason="a", at=T1 + timedelta(minutes=30), now=LATER)
     api.move_order(con, t.id, stop=99.5, reason="b", at=T2, now=LATER)
     out(con, t.id)
-    with pytest.raises(api.Refused, match=f"exited by hand at {re.escape(T3.isoformat())}"):
+    with pytest.raises(api.Refused, match=f"at or after its exit at {re.escape(T3.isoformat())}"):
         correct(con, t.id, fields={"move": 0, "at": at})
     assert kinds(con, t.id) == ["entered", "order_moved", "order_moved", "exited"]
     # still before the exit, and past the other move: moves re-order among themselves

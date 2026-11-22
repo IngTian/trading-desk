@@ -4,8 +4,8 @@ Each invariant is a named check returning failure lines (empty when healthy). Th
 append-only, so a damaged row cannot be repaired in place; these checks find what the API
 refuses to write but a file written with foreign keys off, or by hand, can hold.
 
-Shape-of-the-log invariants read the raw rows; the date and report invariants read the fold,
-because they are about effective (corrected, withdrawn) decisions.
+Shape-of-the-log invariants read the raw rows; the record invariant reads the fold, because it
+is about effective (corrected, withdrawn) decisions.
 """
 from __future__ import annotations
 
@@ -90,65 +90,33 @@ def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime],
                  for kind in ("run_started", "run_stopped"))
 
 
-def _decision_dates(con: sqlite3.Connection) -> list[str]:
-    """By effective time: an entry is not before its run's start, nor (unless the trade is void)
-    at or after its run's stop; a move is not before the entry and is strictly before the
-    exit; an exit is strictly after the entry.
+def _record(con: sqlite3.Connection) -> list[str]:
+    """Every trade's record fits: by effective time, its entry, its moves and its reports agree
+    with each other and with its run, by `model.record_problem`, the api's own rules.
 
     A trade is skipped when it is `_unfoldable`. A fold that fails for any other reason, such as
-    a malformed correction payload, is reported here."""
+    a malformed correction payload, is reported here, and so is a rule that raises on a payload
+    that folds (a price that is not a number), so integrity still never raises."""
     failures = []
     for t in store.trades(con):
         if _unfoldable(store.events(con, trade_id=t["id"])):
             continue
         who = f"trade {t['id']}"
         try:
-            started, stopped = _run_times(con, t["run_id"])
             d = model.decisions_of(con, t["id"])
-            if started and d.entry.at < min(started):
-                failures.append(f"{who}: entered at {d.entry.at.isoformat()}, before its run "
-                                "started")
-            if stopped and not d.voided and d.entry.at >= min(stopped):
-                failures.append(f"{who}: entered at {d.entry.at.isoformat()}, at or after its "
-                                f"run stopped at {min(stopped).isoformat()}")
-            for m in d.moves:
-                if m.at < d.entry.at:
-                    failures.append(f"{who}: move at {m.at.isoformat()} is before the entry")
-                if d.exited is not None and m.at >= d.exited.at:
-                    failures.append(f"{who}: move at {m.at.isoformat()} is not before the exit")
-            if d.exited is not None and d.exited.at <= d.entry.at:
-                failures.append(f"{who}: exited at {d.exited.at.isoformat()}, not after the entry")
         except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
             failures.append(f"{who}: fold failed: {type(exc).__name__}: {exc}")
-    return failures
-
-
-def _reports(con: sqlite3.Connection) -> list[str]:
-    """Every non-void trade's reports fit its record, by `model.report_problem`, the api's own
-    rules. A trade decision_dates skips or fails to fold is its to report, so it is skipped here;
-    a report check that raises on a payload that folds (a price that is not a number) is
-    reported, so integrity still never raises."""
-    failures = []
-    for t in store.trades(con):
-        if _unfoldable(store.events(con, trade_id=t["id"])):
             continue
-        if store.run(con, t["run_id"]) is None:  # run_currency reports a trade with no run
-            continue
-        d = None
         try:
-            d = model.decisions_of(con, t["id"])
-            if d.voided:
-                continue
-            problem = model.report_problem(
-                t["id"], d, side=t["side"],
-                stopped=min(_run_times(con, t["run_id"])[1], default=None))
+            started, stopped = _run_times(con, t["run_id"])
+            problem = model.record_problem(t["id"], d, side=t["side"],
+                                           started=min(started, default=None),
+                                           stopped=min(stopped, default=None))
         except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
-            if d is not None:  # a fold that fails is decision_dates' to report
-                failures.append(f"trade {t['id']}: report check failed: "
-                                f"{type(exc).__name__}: {exc}")
+            failures.append(f"{who}: record check failed: {type(exc).__name__}: {exc}")
             continue
         if problem:
-            failures.append(f"trade {t['id']}: {problem}")
+            failures.append(f"{who}: {problem}")
     return failures
 
 
@@ -216,7 +184,7 @@ def _run_currency(con: sqlite3.Connection) -> list[str]:
             continue
         try:
             d = model.decisions_of(con, t["id"])
-        except Exception:  # noqa: BLE001 -- decision_dates reports a fold that fails
+        except Exception:  # noqa: BLE001 -- record reports a fold that fails
             continue
         run_row = store.run(con, t["run_id"])
         if run_row is None:
@@ -294,8 +262,7 @@ INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "event_times": _event_times,
     "trade_entered_once": _trade_entered_once,
     "run_started_stopped": _run_started_stopped,
-    "decision_dates": _decision_dates,
-    "reports": _reports,
+    "record": _record,
     "correction_target": _correction_target,
     "nothing_after_void": _nothing_after_void,
     "one_report": _one_report,

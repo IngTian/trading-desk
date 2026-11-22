@@ -7,7 +7,7 @@ or replay.
 
 A position reads open until its exit is reported (an open report changes nothing); a pending
 limit reads cancelled at its run's stop once the run has one, and pending before that. An exit
-always belongs to a position: the rules in `model.report_problem` refuse one without a fill.
+always belongs to a position: the rules in `model.record_problem` refuse one without a fill.
 """
 from __future__ import annotations
 
