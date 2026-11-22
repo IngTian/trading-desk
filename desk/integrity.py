@@ -140,7 +140,7 @@ def _reports(con: sqlite3.Connection) -> list[str]:
             if d.voided:
                 continue
             problem = model.report_problem(
-                t["id"], d, side=t["side"], mode=store.run(con, t["run_id"])["mode"],
+                t["id"], d, side=t["side"],
                 stopped=min(_run_times(con, t["run_id"])[1], default=None))
         except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
             if d is not None:  # a fold that fails is decision_dates' to report

@@ -10,23 +10,21 @@ import json
 import os
 import re
 import sqlite3
-from contextlib import closing
-from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime, timedelta
+from dataclasses import asdict, dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 
-from desk import bars, checks, config, judge, model, store, strategy, yahoo
+from desk import checks, config, judge, model, store, strategy
 from desk.errors import Refused, shown
 from desk.rules import Rules, _finite, market_keys
 from desk.stats import Row, Stats, summarise  # `stats` below shadows the module's name
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "CheckView", "trade",
-           "move_order", "close_trade", "report", "correct_trade", "void_trade", "get_trade",
+           "move_order", "report", "correct_trade", "void_trade", "get_trade",
            "list_trades", "Stats", "stats", "StoppedRun"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
-_JUDGED = 1   # the minutes every live run is judged on, Yahoo's "1m"
 
 
 def _aware(when, name: str = "now") -> datetime:
@@ -114,7 +112,7 @@ def _view(con, id: str, version: int | None, saved: str) -> StrategyView:
 def save_strategy(con: sqlite3.Connection, id: str, markdown: str, *,
                   if_current: str | None = None, now: datetime | None = None) -> StrategyView:
     """Save a strategy (new id: version 1; existing id: needs `if_current`, the `current_hash`
-    last read). Text that differs after whitespace is normalised makes a new version."""
+    last read). Text that changes after whitespace is normalised makes a new version."""
     if if_current is not None and not isinstance(if_current, str):
         raise Refused("if_current must be text: the current_hash get_strategy returned; got "
                       f"{shown(if_current)}.")
@@ -245,17 +243,10 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, currency=Non
 
 @dataclass(frozen=True)
 class StoppedRun(RunView):
-    """What stop_run returns: the run, and its non-void limit orders with no fill, in recording
-    order, sorted three ways. `cancelled`: the outcome reads cancelled, why "run stopped".
-    `awaiting_bars`: a live run whose outcome still reads pending; the bars could be read but have
-    not reached the stop yet. The stop cancels the order, unless those bars show it filled first,
-    and a later read settles it: there is nothing to report, read it again later. `needs_report`:
-    a live run whose outcome reads not judged, so its bars could not be read; trade id to the
-    outcome's notes, which say why. The agent reports its fill or cancellation. An order
-    cancelled for another why, and an order closed, are left out."""
+    """What stop_run returns: the run, and `cancelled`, its non-void limit orders with no fill
+    whose outcome reads cancelled, why "run stopped", in recording order. An order cancelled for
+    another why, and an order closed, are left out."""
     cancelled: tuple[str, ...] = ()
-    awaiting_bars: tuple[str, ...] = ()
-    needs_report: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
@@ -263,9 +254,8 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
     """Stop the run at `at`: not before its start, and after every non-void trade's entry
     (whichever was logged first), since trade() refuses an entry at or after the stop, and at or
     after every reported fill and cancellation, since a run stop cancels the orders still
-    pending. The reply is a StoppedRun: it sorts the run's unfilled limit orders into
-    `cancelled`, `awaiting_bars` (read again later) and `needs_report` (trade id to why its bars
-    could not be read), as its docstring says."""
+    pending. The reply is a StoppedRun: its `cancelled` holds the run's unfilled limit orders the
+    stop cancelled, in recording order."""
     row = store.run(con, _text("run", run))
     if row is None:
         raise Refused(f"There is no run {shown(run)}; list_runs to see the ones that exist.")
@@ -289,24 +279,12 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
                      recorded_at=_at(now))
         for t, _ in standing:
             _consistent(con, t)
-    sorted_: dict[str, list[str]] = {"cancelled": [], "awaiting_bars": []}
-    needs_report: dict[str, tuple[str, ...]] = {}
-    for t, d in standing:   # read after the transaction: a fetch never runs under the lock
-        if d.entry.type != "limit" or (d.close_at is not None and d.close_at < stop):
-            # pulled before the stop: not the stop's
-            continue
-        o = _trade_view(con, t, _aware(now)).outcome
-        if o.fill is not None:
-            continue
-        if o.status == "cancelled":
-            if o.cancelled_why == "run stopped":
-                sorted_["cancelled"].append(t["id"])
-        elif row["mode"] == "live" and o.status == "pending":
-            sorted_["awaiting_bars"].append(t["id"])
-        elif row["mode"] == "live" and o.status == "not judged" and d.close_at is None:
-            needs_report[t["id"]] = tuple(o.notes)
-    return StoppedRun(**asdict(_run_view(con, row)), needs_report=needs_report,
-                      **{k: tuple(v) for k, v in sorted_.items()})
+    cancelled = [t["id"] for t, d in standing   # read after the transaction
+                 if d.entry.type == "limit"
+                 and not (d.close_at is not None and d.close_at < stop)
+                 and (o := _outcome(con, t, d)).fill is None
+                 and o.status == "cancelled" and o.cancelled_why == "run stopped"]
+    return StoppedRun(**asdict(_run_view(con, row)), cancelled=tuple(cancelled))
 
 
 def list_runs(con: sqlite3.Connection, strategy: str | None = None) -> list[RunView]:
@@ -327,10 +305,8 @@ class TradeView:
     point_value: float
     currency: str
     decisions: model.Decisions
-    # The reports over the judge (live), or the reports alone (replay).
+    # What the trade's record reads as.
     outcome: judge.Outcome
-    judged: judge.Outcome | None   # live: the bars' answer to the decisions alone; replay: None
-    differs: tuple[str, ...]       # the fields where `outcome` and `judged` differ
     # The run's version's rules as shown at entry; None only for stored results that do not read
     # (integrity reports them).
     checks_shown: tuple[checks.Result, ...] | None = None
@@ -363,84 +339,16 @@ def _version(con, run_row: sqlite3.Row) -> tuple[Rules, tuple[str, ...]]:
             tuple(json.loads(v["checklist"])))
 
 
-def _not_judged(row: sqlite3.Row, d: model.Decisions, note: str, *, live: bool
-                ) -> tuple[judge.Outcome, judge.Outcome | None]:
-    """The reports over "not judged", and it (None when not live): the reports need no bars."""
-    market = d.entry.type == "market"
-    nj = judge.Outcome(**{**judge._BLANK, "status": "not judged",
-                          "fill": d.entry.price if market else None,
-                          "filled_at": d.entry.at if market else None,
-                          "judged_through": d.entry.at, "missing": (d.entry.at, None)},
-                       notes=(note,))
-    try:
-        base = nj
-        if d.fill is not None:
-            fill, filled_at = judge._position(d)
-            base = replace(nj, fill=fill, filled_at=filled_at)
-        o = judge._ends(d, base, side=row["side"])
-    except Exception:
-        o = nj
-    return (o, nj) if live else (o, None)
-
-
-def _outcomes(con, row: sqlite3.Row, d: model.Decisions, now: datetime, *, fetch: bool = True
-              ) -> tuple[judge.Outcome, judge.Outcome | None]:
-    """(outcome, judged). Replay: the reports alone, and no bars.db. Live: judged on Yahoo's
-    1-minute bars kept, whatever the version's timeframes. They are read from the entry in windows,
-    a day and then four times longer each time, until both outcomes end inside one or it reaches
-    now, so an old trade never loads months of minutes. Then more is fetched only while the trade
-    has not ended (an end in complete, insert-only bars moves only with a decision), and never past
-    the bar holding its end. Never raises."""
-    run = store.run(con, row["run_id"])
-    mode = run["mode"]
-    try:
-        stopped = _run_view(con, run).stopped
-        if mode == "replay":
-            return judge.replay(d, side=row["side"], stopped=stopped), None
-        m = _JUDGED
-        future = row["instrument"] == "future"
-        symbol = yahoo.ticker_symbol(row["ticker"], row["instrument"], d.currency)
-        start = d.entry.at - timedelta(minutes=m)
-        with closing(bars.open()) as bcon:
-            def judged(unavailable, end=None):
-                covered = bars.covered(bcon, yahoo.SOURCE, symbol, m)
-                if end is not None:   # the spans are cut at the window's end too, or its last bar
-                    # would read as the last one before a close (or run stop) past the window
-                    covered = [(f, min(to, end)) for f, to in covered if f < end]
-                return judge.live(d, side=row["side"], minutes=m,
-                                  bars=bars.read(bcon, yahoo.SOURCE, symbol, m, start, end),
-                                  covered=covered, now=now, stopped=stopped,
-                                  unavailable=unavailable)
-            window = timedelta(days=1)
-            while start + window < now:
-                o, j = judged(None, start + window)
-                if all(x.status in ("exited", "cancelled")
-                       and (x.exited_at or x.cancelled_at) < start + window for x in (o, j)):
-                    break
-                window *= 4
-            else:   # the window reaches now: read to the last bar kept
-                o, j = judged(None)
-            if fetch and not {o.status, j.status} <= {"exited", "cancelled"}:
-                ended = o.exited_at or o.cancelled_at   # the judged walk closes there too
-                o, j = judged(yahoo.ensure(bcon, symbol, m, start, now,
-                                           end=ended and ended + timedelta(minutes=m)))
-        if d.cancel or d.close_price is not None or d.close_kind in ("stop", "target"):
-            # a reported end reaches the judge as a hand close the author never decided
-            j = replace(j, notes=tuple(n for n in j.notes if not n.startswith("the close at ")))
-        notes = (f"judged on Yahoo's {symbol}, a rolling front-month series: at a roll its bars "
-                 "switch to the next contract",) if future else ()
-        return tuple(replace(x, timeframe=yahoo.INTERVALS[m], notes=x.notes + notes)
-                     for x in (o, j))
-    except Exception as e:  # a read never fails, and never drops a report (Q9)
-        return _not_judged(row, d, f"bars could not be read: {type(e).__name__}: {e}",
-                           live=mode == "live")
+def _outcome(con, row: sqlite3.Row, d: model.Decisions) -> judge.Outcome:
+    """The trade's outcome, read from its record alone, on a live run as on a replay one."""
+    return judge.replay(d, side=row["side"], stopped=_run_view(con, store.run(
+        con, row["run_id"])).stopped)
 
 
 def _trade_view(con, row: sqlite3.Row, now: datetime) -> TradeView:
-    """Built after any transaction, so a fetch never runs under desk.db's write lock."""
+    """Built after any transaction, so nothing is read under desk.db's write lock."""
     run = store.run(con, row["run_id"])
     d = model.decisions_of(con, row["id"])
-    o, j = _outcomes(con, row, d, now)
     try:
         kept = None if d.checks is None else tuple(checks.Result(**c) for c in d.checks)
     except (TypeError, KeyError):   # stored results that do not read: integrity reports them
@@ -448,8 +356,7 @@ def _trade_view(con, row: sqlite3.Row, now: datetime) -> TradeView:
     return TradeView(id=row["id"], run=row["run_id"], strategy=run["strategy_id"],
                      version=run["version"], ticker=row["ticker"], side=row["side"],
                      instrument=row["instrument"], point_value=d.point_value,
-                     currency=d.currency, decisions=d, outcome=o, judged=j,
-                     differs=judge.differs(o, j, _JUDGED),
+                     currency=d.currency, decisions=d, outcome=_outcome(con, row, d),
                      checks_shown=kept, checklist=_checklist_view(_version(con, run)[1],
                                                                    d.checklist))
 
@@ -515,65 +422,25 @@ def _screenshot(text: str) -> tuple[dict, bytes | None, str | None]:
 
 
 # ------------------------------------------------- the checks, as of a trade's `at` (§7) ---
-def _settles(o: judge.Outcome) -> str:
-    """The report that settles a trade whose state is unknown."""
-    if o.fill is None:
-        return ("report its fill or its cancellation (report(trade, state=\"filled\" | "
-                "\"cancelled\", at=…))")
-    return ("report its exit, or that it is still open (report(trade, state=\"exited\" | \"open\", "
-            "at=…))")
-
-
-def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int, *, live: bool,
-           minutes: int) -> checks.Other:
-    """Another trade of the run as the checks read it, from its effective outcome. An exit always
-    carries its cash (judge._money gives one), which the record rules add up. `live` and `minutes`
-    are its run's mode and the minutes it is judged on."""
-    unknown_from = closed_at = None
-    unknown_says = ""
-    settles = _settles(o)
-    if o.status == "not judged":   # a reported open position is known open up to its report
-        unknown_from = o.missing[0] if d.held is None else max(o.missing[0], d.held.at)
-        unknown_says = f"not judged from {unknown_from.isoformat()}"
-        closed_at = d.close_at
-    elif o.status == "closing":    # a hand close whose last bar is still forming
-        unknown_from = closed_at = d.close_at
-        unknown_says = f"closed by hand at {d.close_at.isoformat()}, in a bar still forming"
-        settles = ("give the broker's price with correct_trade, {\"report\": \"close\", "
-                   "\"price\": …}")
-    elif live and row["instrument"] == "future" and o.status in ("open", "pending"):
-        # Yahoo delays futures (Notes 5): an exit in a bar not yet delivered is dated that bar's
-        # close, so the trade is unknown from the close of the first bar that can hold it.
-        jt, bar = o.judged_through, timedelta(minutes=minutes)
-        grid = judge._EPOCH     # R12: the clock's minute, exact for 1-minute bars
-        # an open report restarts the walk at the bar holding it (design §5.4); an entry, a
-        # reported fill or a walked bar's close takes effect from the first bar opening at or
-        # after it (§3)
-        restart = d.held is not None and d.held.at == jt
-        first = jt - (jt - grid) % bar if restart else jt + (grid - jt) % bar
-        end = first + bar       # the close of the first bar that can end it
-        unknown_from = end - timedelta(microseconds=1)   # checks._unknown's `<` is strict
-        unknown_says = (f"judged only through {jt.isoformat()}; Yahoo delays futures 10 to "
-                        f"30 minutes and has not yet delivered the bar ending {end.isoformat()}")
+def _other(row: sqlite3.Row, d: model.Decisions, o: judge.Outcome, seq: int) -> checks.Other:
+    """Another trade of the run as the checks read it, from its outcome. An exit always carries
+    its cash (judge._money gives one), which the record rules add up."""
     return checks.Other(id=row["id"], ticker=row["ticker"], entered=d.entry.at, seq=seq,
                         ended=o.exited_at or o.cancelled_at, exited=o.status == "exited",
-                        r=o.r, cash=o.cash, unknown_from=unknown_from, closed_at=closed_at,
-                        settles=settles, unknown_says=unknown_says)
+                        r=o.r, cash=o.cash)
 
 
-def _others(con, run_row: sqlite3.Row, now: datetime, *, fetch: bool,
-            skip: str | None = None) -> tuple[checks.Other, ...]:
-    """The run's non-void trades but `skip`, each from its effective outcome now (the checks read
-    them as of `at` from those dates). `seq` is the index in the unfiltered store.trades, so
-    leaving voids out never renumbers one."""
+def _others(con, run_row: sqlite3.Row, skip: str | None = None) -> tuple[checks.Other, ...]:
+    """The run's non-void trades but `skip`, each from its outcome (the checks read them as of
+    `at` from those dates). `seq` is the index in the unfiltered store.trades, so leaving voids
+    out never renumbers one."""
     out = []
-    kw = dict(live=run_row["mode"] == "live", minutes=_JUDGED)
     for seq, t in enumerate(store.trades(con, run_row["id"])):
         if t["id"] == skip:
             continue
         d = model.decisions_of(con, t["id"])
         if not d.voided:
-            out.append(_other(t, d, _outcomes(con, t, d, now, fetch=fetch)[0], seq, **kw))
+            out.append(_other(t, d, _outcome(con, t, d), seq))
     return tuple(out)
 
 
@@ -677,7 +544,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     trade. `market` holds the agent's values for the keys the rules read, `checklist` its
     answers. With check_only, validate and check exactly as an entry, write nothing, and return
     a CheckView. Everything is validated, and every screenshot file read, before anything is
-    written; every fetch runs before the write lock."""
+    written."""
     now = _aware(now)
     row = store.run(con, _text("run", run))
     if row is None:
@@ -741,7 +608,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                       stop and float(stop), target and float(target), size)
     _within_run(_run_view(con, row), when)   # before any fetch; again under the lock
     record = bool(set(checks.RECORD) & set(rules.values))   # else no rule reads another trade
-    others = _others(con, row, now, fetch=True) if record else ()   # fetches, before the lock
+    others = _others(con, row) if record else ()
 
     def as_shown(others: tuple[checks.Other, ...], seq: int | None) -> tuple[checks.Result, ...]:
         return tuple(checks.run_checks(plan, rules, checks.Context(
@@ -754,7 +621,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
         raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
     with store.transaction(con):  # the run's state and the id's collisions are read under the lock
         _within_run(_run_view(con, row), when)
-        results = as_shown(_others(con, row, now, fetch=False) if record else (),
+        results = as_shown(_others(con, row) if record else (),
                            len(store.trades(con, run)))
         for _, data, stored in shots:  # after every refusal; content-addressed, so a repeat skips
             if data is None:  # a link: nothing to store
@@ -855,7 +722,7 @@ def _not_closed(trade: str, d: model.Decisions) -> None:
 
 
 def _close_order(trade: str, d: model.Decisions, when: datetime) -> None:
-    """A close, by close_trade or an exit report, is strictly after the entry and every move."""
+    """An exit report is strictly after the entry and every move."""
     _after_entry(trade, d, when)
     if when == d.entry.at:  # a close is strictly after the entry
         raise Refused(f"Trade {shown(trade)} was entered at {d.entry.at.isoformat()}; a close at "
@@ -866,39 +733,14 @@ def _close_order(trade: str, d: model.Decisions, when: datetime) -> None:
                       "later `at`.")
 
 
-def _not_ended(trade: str, o: judge.Outcome, minutes: int, when: datetime, what: str) -> None:
-    """Refuse a `what` ("move" or "close") at `when` that the judged end overtook: an exit in a bar
-    that opened before `when` (Q31), or a cancellation at or before it. A reported end is in the
-    record, where plan 2's checks and report_problem already order decisions against it."""
-    if {"close", "cancel"} & set(o.reported):
-        return
-    if o.status == "exited" and o.exited_at - timedelta(minutes=minutes) < when:
-        out = o.exited_at.isoformat()
-        if what == "move":
-            fix = (f"If it is in fact still open at the broker, report it open at or after {out}, "
-                   "the close of the bar that ended it (report(trade, state=\"open\", at=…, "
-                   "reason=…)); an open report inside that bar leaves its exit standing. The judge "
-                   "then goes on from that report, so this move meets only an end the bars find "
-                   "after it.")
-        elif when > o.exited_at:
-            fix = (f"If the trade was in fact still open then, report it open at or after {out} "
-                   "and before this close (report(trade, state=\"open\", at=…, reason=…)), then "
-                   "close again; or report the exit the broker made, with its price "
-                   "(report(trade, state=\"exited\", price=…, at=…, reason=…)): a report is not "
-                   "refused by the bars.")
-        else:  # rule 12 puts an open report before the close; the restart needs it at or after out
-            fix = (f"This close is not after the bar that exited the trade at {out}, so an open "
-                   "report cannot set that exit aside (it would have to come before the close and "
-                   "at or after the exit); report the exit the broker made, with its price "
-                   "(report(trade, state=\"exited\", price=…, at=…, reason=…)): a report is not "
-                   "refused by the bars.")
-        raise Refused(f"Trade {shown(trade)} already exited at {out}, at {o.exit} "
-                      f"({o.exit_reason}), in "
-                      f"a bar that opened before the {what} at {when.isoformat()}, so the {what} "
-                      f"has nothing to act on. {fix}")
-    if o.status == "cancelled" and o.cancelled_at <= when:
+def _not_ended(trade: str, o: judge.Outcome, when: datetime) -> None:
+    """Refuse a move at `when` on a limit its run's stop cancelled: there is no order left to
+    move. Every other end is in the record, where the checks below and `model.report_problem`
+    already order decisions against it."""
+    if o.status == "cancelled" and o.cancelled_why == "run stopped" and o.cancelled_at <= when:
         raise Refused(f"The limit order of trade {shown(trade)} was cancelled at "
-                      f"{o.cancelled_at.isoformat()}; there is no order to {what}.")
+                      f"{o.cancelled_at.isoformat()}, when its run stopped; there is no order to "
+                      "move.")
 
 
 def _consistent(con, row: sqlite3.Row) -> None:
@@ -906,8 +748,7 @@ def _consistent(con, row: sqlite3.Row) -> None:
     the append, inside the transaction, so a refusal rolls the append back."""
     run = store.run(con, row["run_id"])
     problem = model.report_problem(row["id"], model.decisions_of(con, row["id"]),
-                                   side=row["side"], mode=run["mode"],
-                                   stopped=_run_view(con, run).stopped)
+                                   side=row["side"], stopped=_run_view(con, run).stopped)
     if problem:
         raise Refused(problem)
 
@@ -923,45 +764,14 @@ def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float 
         raise Refused("A move names a new stop, a new target, or both; give at least one.")
     _price("stop", stop, required=False)
     _price("target", target, required=False)
-    _outcomes(con, row, model.decisions_of(con, trade), now)  # the fetch, before the write lock
     with store.transaction(con):
         d = _not_void(con, trade)[0]
         _after_entry(trade, d, when)
         _before_close(trade, d, when)
-        # judged without the move: it takes effect from the first bar opening at or after `at`
-        _not_ended(trade, _outcomes(con, row, d, now, fetch=False)[0], _JUDGED, when, "move")
-        moved ={k: float(v) for k, v in (("stop", stop), ("target", target)) if v is not None}
+        _not_ended(trade, _outcome(con, row, d), when)
+        moved = {k: float(v) for k, v in (("stop", stop), ("target", target)) if v is not None}
         store.append(con, kind="order_moved", run_id=row["run_id"], trade_id=trade, at=_at(when),
                      recorded_at=_at(now), payload={**moved, "reason": reason})
-        _consistent(con, row)
-    return _trade_view(con, row, now)
-
-
-def close_trade(con: sqlite3.Connection, trade: str, *, reason: str, at: datetime | None = None,
-                now: datetime | None = None) -> TradeView:
-    """Close the trade by hand at `at`: the author's decision to get out. A trade is closed once.
-    On a limit still pending it cancels the order. A live position is priced from the bars; a
-    replay one has none, so its exit is reported with its price instead
-    (report(state="exited", price=…))."""
-    now = _aware(now)
-    row = _decision(con, trade, reason)
-    when = _decision_time(store.run(con, row["run_id"])["mode"], at, now, "close a trade")
-
-    def closed(d: model.Decisions) -> model.Decisions:
-        return replace(d, close_at=when, close_reason=reason, close_kind="hand", close_price=None)
-    _outcomes(con, row, closed(model.decisions_of(con, trade)), now)  # the fetch, before the lock
-    with store.transaction(con):
-        d = _not_void(con, trade)[0]
-        _not_closed(trade, d)
-        _close_order(trade, d, when)
-        # Judged with the close, which changes what counts in the last bar opening before `at`
-        # (the author's ruling, Option A, 2026-11-20): a bar finished at `at` is judged in full,
-        # one still forming at it counts only the stop. The close's own result is not refused.
-        o = _outcomes(con, row, closed(d), now, fetch=False)[0]
-        if o.exit_reason != "hand" and not (o.status == "cancelled" and o.cancelled_at == when):
-            _not_ended(trade, o, _JUDGED, when, "close")
-        store.append(con, kind="closed", run_id=row["run_id"], trade_id=trade, at=_at(when),
-                     recorded_at=_at(now), payload={"reason": reason})
         _consistent(con, row)
     return _trade_view(con, row, now)
 
@@ -1024,8 +834,7 @@ def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, rea
     if state == "cancelled":
         _why(why)
     if state == "exited" and _kind("hand" if kind is None else kind) == "hand" and price is None:
-        raise Refused("A hand exit is reported with the price it filled at; give price=…. To "
-                      "have the bars price a live close instead, call close_trade.")
+        raise Refused("A hand exit is reported with the price it filled at; give price=….")
     _price("price", price, required=False)
     given = {"why": why, "kind": kind, "price": None if price is None else float(price)}
     payload = {"reason": reason, **{k: v for k, v in given.items() if v is not None}}
@@ -1050,8 +859,8 @@ def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, rea
 
 _ENTRY_FIELDS = ("entry", "stop", "target", "size", "at", "point_value")
 _MOVE_FIELDS = ("stop", "target", "at")
-# A report as correct_trade and void_trade name it (the record's words, since a `closed` event
-# holds an exit report and close_trade's decision alike), and the fields a correction changes.
+# A report as correct_trade and void_trade name it (the record's words), and the fields a
+# correction changes.
 _REPORT_FIELDS = {"fill": ("price", "at"), "cancel": ("at", "why"), "open": ("at",),
                   "close": ("price", "at", "kind")}
 _NOUNS = {"fill": "fill", "cancel": "cancellation", "open": "open report", "close": "close"}
@@ -1117,10 +926,8 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
     elif when is not None:
         _not_future(when, now, "a move" if index is not None else "an entry")
 
-    def unmoved(d: model.Decisions) -> model.Decisions:  # as move_order judges, before its move
+    def unmoved(d: model.Decisions) -> model.Decisions:  # as move_order checks, before its move
         return replace(d, moves=tuple(mv for i, mv in enumerate(d.moves) if i != index))
-    if index is not None and when is not None:  # a move's `at` (Q32): the fetch, before the lock
-        _outcomes(con, row, unmoved(model.decisions_of(con, trade)), now)
     with store.transaction(con):  # the decisions the correction is checked against, under the lock
         d, entered, move_ids, reports = _not_void(con, trade)
         if which is not None:
@@ -1157,8 +964,7 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
             if when is not None:
                 _after_entry(trade, d, when)
                 _before_close(trade, d, when)
-                _not_ended(trade, _outcomes(con, row, unmoved(d), now, fetch=False)[0],
-                           _JUDGED, when, "move")
+                _not_ended(trade, _outcome(con, row, unmoved(d)), when)
             corrects = move_ids[index]
         stored = {**fields, **{k: float(fields[k]) for k in ("entry", "stop", "target",
                                                              "point_value", "price")
@@ -1206,18 +1012,15 @@ def get_trade(con: sqlite3.Connection, trade: str, *, now: datetime | None = Non
     if d.voided:
         return view
     run = store.run(con, row["run_id"])
-    others = (_others(con, run, now, fetch=True, skip=row["id"])
+    others = (_others(con, run, skip=row["id"])
               if set(checks.RECORD) & set(_version(con, run)[0].values) else ())
     here = _results_now(con, row, d, others)
     return replace(view, checks_now=here, checks_differ=_differ(view.checks_shown, here))
 
 
 def _open(v: TradeView) -> bool:
-    """Not void, and still in the market or waiting to be: a trade not judged is, until the
-    record ends it."""
-    o, d = v.outcome, v.decisions
-    return not d.voided and (o.status in ("pending", "open", "closing") or (
-        o.status == "not judged" and d.close_at is None and d.cancel is None))
+    """Not void, and still in the market or waiting to be."""
+    return not v.decisions.voided and v.outcome.status in ("pending", "open")
 
 
 def list_trades(con: sqlite3.Connection, run: str | None = None, strategy: str | None = None,
@@ -1230,7 +1033,7 @@ def list_trades(con: sqlite3.Connection, run: str | None = None, strategy: str |
             _text(name, value)
     if open is not None and not isinstance(open, bool):
         raise Refused(f"open must be true, false or left out; got {shown(open)}.")
-    rows = [r for r in store.trades(con, run)  # narrowed first: a view may fetch bars
+    rows = [r for r in store.trades(con, run)
             if strategy in (None, store.run(con, r["run_id"])["strategy_id"])]
     return [v for v in (_trade_view(con, r, now) for r in rows) if open in (None, _open(v))]
 
@@ -1242,10 +1045,10 @@ _NO_SCOPE = ("stats needs one scope: a run, a strategy, or a strategy with a ver
 def stats(con: sqlite3.Connection, *, strategy: str | None = None, version: int | None = None,
           run: str | None = None, mode: str | None = None, tags=None, conforming_only=None,
           now: datetime | None = None) -> Stats:
-    """Counts, rates and averages over one scope's non-void trades, from their effective outcomes
-    (design §8): a run, a strategy's version, or a strategy. Narrowed by mode, by tags (every one
-    given held by the run, exactly) and, with conforming_only, to the trades whose results now are
-    all kept. Never a verdict or a ranking; a trade that cannot be judged reads "not judged"."""
+    """Counts, rates and averages over one scope's non-void trades, from their outcomes: a run, a
+    strategy's version, or a strategy. Narrowed by mode, by tags (every one given held by the run,
+    exactly) and, with conforming_only, to the trades whose results now are all kept. Never a
+    verdict or a ranking."""
     now = _aware(now)
     for name, value in (("strategy", strategy), ("run", run)):
         if value is not None:
@@ -1274,16 +1077,15 @@ def stats(con: sqlite3.Connection, *, strategy: str | None = None, version: int 
         runs = [r for r in store.runs(con, strategy) if version in (None, r["version"])]
     scope = [(r, held) for r in runs if mode in (None, r["mode"])
              and set(tags) <= set(held := tuple(json.loads(r["tags"])))]
-    # Narrowed before any trade is read; a void is left out before its bars are fetched.
+    # Narrowed before any trade is read; a void is left out.
     read = [(r, held, t, _trade_view(con, t, now), seq) for r, held in scope
             for seq, t in enumerate(store.trades(con, r["id"]))
             if not model.decisions_of(con, t["id"]).voided]
     left_out: dict = {}
     if conforming_only:
-        others: dict[str, list[checks.Other]] = {}   # each run's, built once (B6)
+        others: dict[str, list[checks.Other]] = {}   # each run's, built once
         for r, _, t, v, seq in read:
-            others.setdefault(r["id"], []).append(_other(
-                t, v.decisions, v.outcome, seq, live=r["mode"] == "live", minutes=_JUDGED))
+            others.setdefault(r["id"], []).append(_other(t, v.decisions, v.outcome, seq))
         breached, unknown, kept = [], {}, []
         for r, held, t, v, seq in read:
             results = _results_now(con, t, v.decisions,
@@ -1301,8 +1103,7 @@ def stats(con: sqlite3.Connection, *, strategy: str | None = None, version: int 
                     "unknown": {name: tuple(ids) for name, ids in unknown.items()}}
     rows = [Row(id=v.id, run=v.run, version=v.version, mode=r["mode"], tags=held,
                 entry_type=v.decisions.entry.type, currency=v.currency, outcome=v.outcome,
-                planned_rr=checks.reward_risk(_plan(t, v.decisions))[0],
-                settles=_settles(v.outcome))
+                planned_rr=checks.reward_risk(_plan(t, v.decisions))[0])
             for r, held, t, v, _ in read]
     return summarise(rows, strategy=strategy, version=version, run=run, mode=mode, tags=tags,
                      conforming_only=bool(conforming_only), left_out=left_out)

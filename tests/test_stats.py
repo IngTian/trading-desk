@@ -1,27 +1,20 @@
 """stats.summarise: the buckets, figures and fill rate over rows the api built. Counts and
 averages only. Every figure is invented."""
-from dataclasses import replace
-from datetime import UTC, datetime, timedelta
-
 import pytest
 
 from desk import judge
 from desk.stats import Row, summarise
 
-T0 = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
-T1 = T0 + timedelta(hours=3)
 
-
-def o(status, r=None, cash=None, fill=100.0, why=None, missing=None, reported=()):
+def o(status, r=None, cash=None, fill=100.0, why=None):
     return judge.Outcome(**{**judge._BLANK, "status": status, "r": r, "cash": cash, "fill": fill,
-                            "cancelled_why": why, "missing": missing},
-                         notes=(), reported=reported)
+                            "cancelled_why": why},
+                         notes=())
 
 
 def row(id, outcome, entry_type="market", planned=None, currency="USD", mode="replay", tags=(),
         version=1):
-    return Row(id, "s-r1", version, mode, tags, entry_type, currency, outcome, planned,
-               "report its exit")
+    return Row(id, "s-r1", version, mode, tags, entry_type, currency, outcome, planned)
 
 
 def summ(rows, **kw):
@@ -64,7 +57,7 @@ def test_q3_planned_reward_to_risk_over_the_closed_trades():
     assert s.average_planned_rr == 2.0 and s.no_planned_rr == ("t4",)
 
 
-def test_q4_the_fill_rate_leaves_out_run_stopped_pending_and_not_judged():
+def test_q4_the_fill_rate_leaves_out_run_stopped_and_pending():
     def lim(i, out):
         return row(f"l{i}", out, "limit")
     rows = ([lim(i, o("exited", r=1.0, cash=20.0)) for i in range(5)]
@@ -74,12 +67,11 @@ def test_q4_the_fill_rate_leaves_out_run_stopped_pending_and_not_judged():
                lim(8, o("cancelled", fill=None, why="pulled")),
                lim(9, o("cancelled", fill=None, why="run stopped")),
                lim(10, o("pending", fill=None)),
-               lim(11, o("not judged", fill=None, missing=(T0, None))),
                row("m", o("exited", r=1.0, cash=20.0))])    # a market entry is no limit order
     s = summ(rows)
-    assert s.limits["rate"] == pytest.approx(5 / 9) and len(s.limits["placed"]) == 12
+    assert s.limits["rate"] == pytest.approx(5 / 9) and len(s.limits["placed"]) == 11
     assert s.limits["filled"] == ("l0", "l1", "l2", "l3", "l4")
-    assert (s.limits["pending"], s.limits["not_judged"]) == (("l10",), ("l11",))
+    assert s.limits["pending"] == ("l10",)
     assert {k: len(v) for k, v in s.limits["cancelled"].items()} == {
         "not filled": 2, "pulled": 2, "run stopped": 1}
     assert s.cancelled == s.limits["cancelled"] and s.pending == ("l10",)
@@ -104,12 +96,10 @@ def test_nothing_under_a_figure_is_none_never_nan():
 
 def test_pnl_is_per_currency_and_rests_on_says_what_was_pooled():
     rows = [row("u1", o("exited", r=2.0, cash=40.0), mode="live", tags=("a",)),
-            row("u2", o("exited", r=-1.0, cash=-20.0, reported=("close",)), mode="live",
-                tags=("a",)),
+            row("u2", o("exited", r=-1.0, cash=-20.0), mode="live", tags=("a",)),
             row("c1", o("exited", cash=15.5), currency="CAD", tags=("a", "b"), version=2),
-            row("c2", o("closing"), currency="CAD", version=2),
-            row("c3", o("exited", r=1.0, cash=10.0, reported=("close",)), currency="CAD",
-                version=2)]
+            row("c2", o("open"), currency="CAD", version=2),
+            row("c3", o("exited", r=1.0, cash=10.0), currency="CAD", version=2)]
     s = summ(rows)
     assert s.pnl == {"USD": 20.0, "CAD": 25.5}
     assert s.trades == ("u1", "u2", "c1", "c2", "c3") and s.open == ("c2",)
@@ -117,23 +107,7 @@ def test_pnl_is_per_currency_and_rests_on_says_what_was_pooled():
         "mode": {"live": ("u1", "u2"), "replay": ("c1", "c2", "c3")},
         "tags": [{"tags": ["a"], "trades": ("u1", "u2")}, {"tags": ["a", "b"], "trades": ("c1",)},
                  {"tags": [], "trades": ("c2", "c3")}],
-        "version": {1: ("u1", "u2"), 2: ("c1", "c2", "c3")},
-        "live_exits": {"reported": ("u2",), "judged": ("u1",)}}   # c3's reported exit: replay
-
-
-def test_not_judged_carries_its_missing_range_and_the_report_that_settles_it():
-    fill = "report its fill or its cancellation"
-    rows = [replace(row("nj", o("not judged", fill=None, missing=(T0, None)), "limit"),
-                    settles=fill),
-            row("mk", o("not judged", missing=(T0, T1))),
-            row("lf", o("not judged", missing=(T0, None)), "limit")]
-    s = summ(rows)
-    assert s.not_judged == {"nj": {"missing": (T0, None), "settles": fill},
-                            "mk": {"missing": (T0, T1), "settles": "report its exit"},
-                            "lf": {"missing": (T0, None), "settles": "report its exit"}}
-    assert (s.limits["not_judged"], s.limits["filled"], s.limits["rate"]) == (
-        ("nj",), ("lf",), 1.0)
-    assert (s.closed, s.open, s.pnl) == ((), (), {})
+        "version": {1: ("u1", "u2"), 2: ("c1", "c2", "c3")}}
 
 
 def test_the_scope_and_left_out_are_stated_as_given():

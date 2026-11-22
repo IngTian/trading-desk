@@ -22,16 +22,16 @@ RUN = "dip-buyer-r1"
 @pytest.fixture
 def con(tmp_path):
     """A healthy log built through the API: one replay run, a trade with a move, a correction
-    and a hand close, and a second trade that is voided."""
+    and a hand exit, and a second trade that is voided."""
     db = tmp_path / "desk.db"
     store.create(db)
     with store.open(db) as conn:
         api.save_strategy(conn, "dip-buyer", TEXT, now=NOW)
         api.start_run(conn, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
-        t = api.trade(conn, RUN, **BASE, at=T1, now=LATER)
+        t = api.trade(conn, RUN, **{**BASE, "entry_type": "market"}, at=T1, now=LATER)
         api.move_order(conn, t.id, stop=99.0, reason="Trail.", at=T2, now=LATER)
         api.correct_trade(conn, t.id, fields={"stop": 98.0}, reason="Typo.", now=LATER)
-        api.close_trade(conn, t.id, reason="Out.", at=T3, now=LATER)
+        api.report(conn, t.id, state="exited", price=101.0, reason="Out.", at=T3, now=LATER)
         v = api.trade(conn, RUN, **{**BASE, "ticker": "WXYZ"}, at=T1, now=LATER)
         api.void_trade(conn, v.id, reason="Wrong run.", now=LATER)
         conn.execute("PRAGMA foreign_keys = OFF")
@@ -56,12 +56,12 @@ def tid(con, ticker):
     return con.execute("SELECT id FROM trades WHERE ticker = ?", (ticker,)).fetchone()[0]
 
 
-def raw_trade(con, id, *, at=T1, run=RUN, entered=True):
+def raw_trade(con, id, *, at=T1, run=RUN, entered=True, entry_type="limit"):
     con.execute("INSERT INTO trades (id, run_id, ticker, side, instrument, point_value, currency)"
                 " VALUES (?, ?, 'ACME', 'long', 'stock', 1.0, 'USD')", (id, run))
     if entered:
         ev(con, "entered", at, trade=id, run=run, payload={
-            "entry_type": "limit", "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
+            "entry_type": entry_type, "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
             "reasons": "x", "screenshots": []})
 
 
@@ -149,23 +149,25 @@ def test_a_move_at_the_entry_is_healthy(con):
 
 
 def test_a_close_before_the_entry_is_reported(con):
-    raw_trade(con, "CLOS-1", at=T2)
-    ev(con, "closed", T2 - timedelta(seconds=1), trade="CLOS-1", payload={"reason": "x"})
+    raw_trade(con, "CLOS-1", at=T2, entry_type="market")
+    ev(con, "closed", T2 - timedelta(seconds=1), trade="CLOS-1",
+       payload={"reason": "x", "price": 101.0})
     assert only(con, "decision_dates") == 1
 
 
 def test_a_close_at_the_entry_is_reported_and_one_second_later_is_not(con):
-    raw_trade(con, "CLOS-1", at=T2)
-    ev(con, "closed", T2 + timedelta(seconds=1), trade="CLOS-1", payload={"reason": "x"})
+    raw_trade(con, "CLOS-1", at=T2, entry_type="market")
+    ev(con, "closed", T2 + timedelta(seconds=1), trade="CLOS-1",
+       payload={"reason": "x", "price": 101.0})
     assert found(con)[0] == 0
-    raw_trade(con, "CLOS-2", at=T2)
-    ev(con, "closed", T2, trade="CLOS-2", payload={"reason": "x"})
+    raw_trade(con, "CLOS-2", at=T2, entry_type="market")
+    ev(con, "closed", T2, trade="CLOS-2", payload={"reason": "x", "price": 101.0})
     assert only(con, "decision_dates") == 1
 
 
 def test_a_move_at_the_hand_close_is_reported_and_one_second_before_is_not(con):
-    raw_trade(con, "MOVE-1", at=T1)
-    ev(con, "closed", T3, trade="MOVE-1", payload={"reason": "x"})
+    raw_trade(con, "MOVE-1", at=T1, entry_type="market")
+    ev(con, "closed", T3, trade="MOVE-1", payload={"reason": "x", "price": 101.0})
     ev(con, "order_moved", T3 - timedelta(seconds=1), trade="MOVE-1",
        payload={"stop": 99.0, "reason": "x"})
     assert found(con)[0] == 0
@@ -190,7 +192,7 @@ def test_an_entry_before_the_run_started_is_reported(con):
 
 
 def test_a_decision_is_dated_by_its_corrected_time(con):
-    """A correction moves the entry earlier than the run's start: judged by effective times."""
+    """A correction moves the entry earlier than the run's start: read by effective times."""
     entered = store.events(con, trade_id=tid(con, "ACME"))[0]["id"]
     ev(con, "corrected", LATER, trade=tid(con, "ACME"), corrects=entered,
        payload={"fields": {"at": (NOW - timedelta(hours=1)).isoformat()}, "reason": "x"})

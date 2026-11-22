@@ -41,11 +41,9 @@ def create(path: Path | None = None) -> None:
         con.close()
 
 
-def _probe(db: Path, *, version: int = SCHEMA_VERSION, table: str = "events",
-           columns: frozenset[str] = frozenset({"recorded_at", "kind", "payload"}),
-           name: str = "desk.db") -> None:
-    """Refuse a file that is not a `name` at schema `version` with `table` holding `columns`,
-    without writing to it.
+def _probe(db: Path) -> None:
+    """Refuse a file that is not a desk.db at schema SCHEMA_VERSION, with an `events` table
+    holding `recorded_at`, `kind` and `payload`, without writing to it.
 
     Opened `immutable=1` as well as read-only: a plain read-only open of a WAL-mode file needs
     its -shm, and SQLite may create one. Immutable takes no locks and writes nothing, which is
@@ -56,18 +54,17 @@ def _probe(db: Path, *, version: int = SCHEMA_VERSION, table: str = "events",
         con = sqlite3.connect(f"{db.as_uri()}?mode=ro&immutable=1", uri=True)
         try:
             found = con.execute("PRAGMA user_version").fetchone()[0]
-            present = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+            present = {row[1] for row in con.execute("PRAGMA table_info(events)")}
         finally:
             con.close()
     except sqlite3.DatabaseError as e:
-        raise NotADeskDatabase(f"{db} is not a {name}: SQLite cannot read it ({e})") from None
-    if found != version or not columns <= present:
-        book = (" This version does not read the 0.4 book (hub.db): point TRADING_DESK_DB "
-                "at a desk.db instead." if name == "desk.db" else "")
+        raise NotADeskDatabase(f"{db} is not a desk.db: SQLite cannot read it ({e})") from None
+    if found != SCHEMA_VERSION or not {"recorded_at", "kind", "payload"} <= present:
         raise NotADeskDatabase(
-            f"{db} is not a {name} this version reads (schema version {found}, expected "
-            f"{version}); it was left untouched. There is no migration between schema versions: "
-            f"move the file aside and create a new {name}.{book}")
+            f"{db} is not a desk.db this version reads (schema version {found}, expected "
+            f"{SCHEMA_VERSION}); it was left untouched. There is no migration between schema "
+            "versions: move the file aside and create a new desk.db. This version does not read "
+            "the 0.4 book (hub.db): point TRADING_DESK_DB at a desk.db instead.")
 
 
 def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connection:

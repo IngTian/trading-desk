@@ -1,4 +1,4 @@
-"""Tests for the decisions after entry: moves, hand closes, corrections and voids, and reading
+"""Tests for the decisions after entry: moves, hand exits, corrections and voids, and reading
 trades back. Every figure is invented."""
 import json
 import re
@@ -49,6 +49,11 @@ def kinds(con, trade_id):
     return [e[0] for e in events(con, trade_id)]
 
 
+def out(con, id, **kw):
+    return api.report(con, id, **{"state": "exited", "price": 101.0, "reason": "x", "at": T3,
+                                  "now": LATER, **kw})
+
+
 # --- move_order -----------------------------------------------------------------------------
 
 def test_a_move_is_one_order_moved_event_naming_only_what_moved(con):
@@ -92,37 +97,20 @@ def test_a_move_must_name_a_finite_positive_stop_or_target(con, kw):
     assert kinds(con, t.id) == ["entered"]
 
 
-# --- close_trade ----------------------------------------------------------------------------
+# --- the hand exit, reported ----------------------------------------------------------------
 
-def test_a_hand_close_is_read_with_its_reason(con):
-    t = enter(con)
-    v = api.close_trade(con, t.id, reason="Out before the report.", at=T2, now=LATER)
-    assert (v.decisions.close_at, v.decisions.close_reason) == (T2, "Out before the report.")
-    assert events(con, t.id)[-1] == ("closed", T2.isoformat(), None,
-                                     {"reason": "Out before the report."})
-
-
-def test_a_second_close_is_refused_naming_the_first(con):
-    t = enter(con)
-    api.close_trade(con, t.id, reason="Out before the report.", at=T2, now=LATER)
-    first = f"(?s){re.escape(T2.isoformat())}.*Out before the report"
-    with pytest.raises(api.Refused, match=first):
-        api.close_trade(con, t.id, reason="Again.", at=T3, now=LATER)
-    assert kinds(con, t.id) == ["entered", "closed"]
-
-
-def test_a_move_logged_after_a_close_but_dated_before_it_is_accepted(con):
-    t = enter(con)
-    api.close_trade(con, t.id, reason="Out.", at=T3, now=LATER)
+def test_a_move_logged_after_an_exit_but_dated_before_it_is_accepted(con):
+    t = enter(con, entry_type="market")
+    out(con, t.id)
     assert api.move_order(con, t.id, stop=99.0, reason="x", at=T2, now=LATER).decisions.moves
 
 
 @pytest.mark.parametrize("at", [T3, T3 + timedelta(minutes=1)])
-def test_a_move_at_or_after_the_hand_close_is_refused(con, at):
-    """Ruling R11: a hand close is a recorded decision, so a move dated from it on has no
-    order left to move."""
-    t = enter(con)
-    api.close_trade(con, t.id, reason="Out.", at=T3, now=LATER)
+def test_a_move_at_or_after_the_hand_exit_is_refused(con, at):
+    """A hand exit is a recorded decision, so a move dated from it on has no order left to
+    move."""
+    t = enter(con, entry_type="market")
+    out(con, t.id)
     with pytest.raises(api.Refused, match=f"closed by hand at {re.escape(T3.isoformat())}"):
         api.move_order(con, t.id, stop=99.0, reason="x", at=at, now=LATER)
     assert kinds(con, t.id) == ["entered", "closed"]
@@ -130,25 +118,21 @@ def test_a_move_at_or_after_the_hand_close_is_refused(con, at):
 
 
 @pytest.mark.parametrize("at", [T2, T3 - timedelta(minutes=1), T3])
-def test_a_close_at_or_before_a_recorded_move_is_refused(con, at):
-    """Ruling R11 from the other side: the close may not leave a move dated at or after it."""
-    t = enter(con)
+def test_an_exit_at_or_before_a_recorded_move_is_refused(con, at):
+    """The same rule from the other side: the exit may not leave a move dated at or after it."""
+    t = enter(con, entry_type="market")
     api.move_order(con, t.id, stop=99.0, reason="x", at=T2, now=LATER)
     api.move_order(con, t.id, stop=99.5, reason="y", at=T3, now=LATER)
     with pytest.raises(api.Refused, match=f"move at {re.escape(T3.isoformat())}"):
-        api.close_trade(con, t.id, reason="Out.", at=at, now=LATER)
+        out(con, t.id, at=at)
     assert kinds(con, t.id) == ["entered", "order_moved", "order_moved"]
-    api.close_trade(con, t.id, reason="Out.", at=T3 + timedelta(minutes=1), now=LATER)
+    out(con, t.id, at=T3 + timedelta(minutes=1))
 
 
 # --- rules every decision after entry follows -----------------------------------------------
 
 def move(con, id, **kw):
     return api.move_order(con, id, stop=99.0, **{"reason": "x", "at": T2, "now": LATER, **kw})
-
-
-def close(con, id, **kw):
-    return api.close_trade(con, id, **{"reason": "x", "at": T2, "now": LATER, **kw})
 
 
 def correct(con, id, **kw):
@@ -169,8 +153,8 @@ def cancel(con, id, **kw):
                                   "now": LATER, **kw})
 
 
-DECISIONS = [move, close, correct, void, fill, cancel]
-DATED = [move, close, fill, cancel]
+DECISIONS = [move, correct, void, fill, cancel]
+DATED = [move, fill, cancel]
 
 
 @pytest.mark.parametrize("decide", DECISIONS)
@@ -219,7 +203,7 @@ def test_a_decision_before_the_entry_is_refused(con, decide):
     with pytest.raises(api.Refused, match=re.escape(f"entered at {T1.isoformat()}")):
         decide(con, t.id, at=T1 - timedelta(minutes=1))
     decide(con, t.id, at=T1 + timedelta(minutes=1))
-    assert kinds(con, t.id) == ["entered", {move: "order_moved", close: "closed", fill: "filled",
+    assert kinds(con, t.id) == ["entered", {move: "order_moved", fill: "filled",
                                             cancel: "cancelled"}[decide]]
 
 
@@ -228,23 +212,23 @@ def test_a_move_at_the_entrys_own_moment_is_accepted(con):
     assert move(con, t.id, at=T1).decisions.moves
 
 
-def test_a_hand_close_at_the_entrys_moment_is_refused(con):
-    """Ruling R12: a close needs the entry to have taken effect, so it is strictly after it."""
-    t = enter(con)
+def test_an_exit_at_the_entrys_moment_is_refused(con):
+    """An exit needs the entry to have taken effect, so it is strictly after it."""
+    t = enter(con, entry_type="market")
     with pytest.raises(api.Refused, match=re.escape(f"entered at {T1.isoformat()}")):
-        close(con, t.id, at=T1)
+        out(con, t.id, at=T1)
     assert kinds(con, t.id) == ["entered"]
-    close(con, t.id, at=T1 + timedelta(seconds=1))
+    out(con, t.id, at=T1 + timedelta(seconds=1))
 
 
-def test_a_correction_moving_the_entry_onto_the_hand_close_is_refused(con):
-    """Ruling R12 from the other side."""
-    t = enter(con)
-    close(con, t.id, at=T2)
-    with pytest.raises(api.Refused, match=re.escape(T2.isoformat())):
-        correct(con, t.id, fields={"at": T2})
+def test_a_correction_moving_the_entry_onto_the_hand_exit_is_refused(con):
+    """The same rule from the other side: a correction may not move the entry onto the exit."""
+    t = enter(con, entry_type="market")
+    out(con, t.id)
+    with pytest.raises(api.Refused, match=re.escape(T3.isoformat())):
+        correct(con, t.id, fields={"at": T3})
     assert kinds(con, t.id) == ["entered", "closed"]
-    assert correct(con, t.id, fields={"at": T2 - timedelta(seconds=1)}).decisions.entry.at < T2
+    assert correct(con, t.id, fields={"at": T3 - timedelta(seconds=1)}).decisions.entry.at < T3
 
 
 @pytest.mark.parametrize("decide", DATED)
@@ -360,7 +344,7 @@ def test_a_corrected_at_at_or_after_the_run_stop_is_refused(con):
         correct(con, t.id, fields={"at": T3})
 
 
-@pytest.mark.parametrize("decide", [move])  # a close at the entry's `at` is R12's, tested above
+@pytest.mark.parametrize("decide", [move])  # an exit at the entry's `at` is tested above
 def test_a_corrected_at_after_a_recorded_decision_is_refused(con, decide):
     t = enter(con)
     decide(con, t.id, at=T2)
@@ -413,11 +397,11 @@ def test_a_move_correction_on_a_trade_with_no_moves_is_refused(con):
 
 
 @pytest.mark.parametrize("at", [T3, T3 + timedelta(minutes=1)])
-def test_a_corrected_move_at_at_or_after_the_hand_close_is_refused(con, at):
-    t = enter(con)
+def test_a_corrected_move_at_at_or_after_the_hand_exit_is_refused(con, at):
+    t = enter(con, entry_type="market")
     api.move_order(con, t.id, stop=99.0, reason="a", at=T1 + timedelta(minutes=30), now=LATER)
     api.move_order(con, t.id, stop=99.5, reason="b", at=T2, now=LATER)
-    api.close_trade(con, t.id, reason="Out.", at=T3, now=LATER)
+    out(con, t.id)
     with pytest.raises(api.Refused, match=f"closed by hand at {re.escape(T3.isoformat())}"):
         correct(con, t.id, fields={"move": 0, "at": at})
     assert kinds(con, t.id) == ["entered", "order_moved", "order_moved", "closed"]
@@ -436,9 +420,9 @@ def test_a_void_is_dated_now_and_keeps_the_trade(con):
 
 
 def test_corrections_and_voids_end_to_end(con):
-    """Review Focus 4: a correction of a correction resolves to the last; a corrected `at` is
-    never before the run's start or after a decision on the trade; a void ends the trade; it is
-    entered again with its original `at`."""
+    """A correction of a correction resolves to the last; a corrected `at` is never before the
+    run's start or after a decision on the trade; a void ends the trade; it is entered again
+    with its original `at`."""
     t = enter(con)
     correct(con, t.id, fields={"stop": 97.5})
     assert correct(con, t.id, fields={"stop": 97.0}).decisions.entry.stop == 97.0
@@ -478,7 +462,6 @@ def test_list_trades_by_run_and_by_strategy(con):
 
 @pytest.mark.parametrize("call", [
     lambda con, t, at: api.move_order(con, t, stop=99.0, reason="x", at=at, now=LATER),
-    lambda con, t, at: api.close_trade(con, t, reason="x", at=at, now=LATER),
     lambda con, t, at: api.correct_trade(con, t, fields={"at": at}, reason="x", now=LATER),
 ])
 def test_a_decision_dated_after_now_is_refused(con, call):

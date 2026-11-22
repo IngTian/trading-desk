@@ -1,4 +1,4 @@
-"""`trading-desk mcp`: the 15 tools on the MCP SDK's low-level server. Every figure is invented.
+"""`trading-desk mcp`: the 14 tools on the MCP SDK's low-level server. Every figure is invented.
 
 In process through `mcp.Client`, through `server.call` directly, and as a subprocess driven one
 message at a time, as a client drives it."""
@@ -25,7 +25,7 @@ from mcp.shared.exceptions import MCPError
 from desk import api, config, server, store
 
 NAMES = ["save_strategy", "get_strategy", "list_strategies", "start_run", "stop_run", "list_runs",
-         "trade", "move_order", "close_trade", "report", "correct_trade", "void_trade",
+         "trade", "move_order", "report", "correct_trade", "void_trade",
          "get_trade", "list_trades", "stats"]
 TEXT = ('---\nname: Tester\n---\n\n# Tester\n\nAll figures here are invented.\n\n```rules\n'
         'timeframes = ["15m"]\n\n[facts]\nrvol = { at_least = 2.0 }\n```\n\n## Checklist\n\n'
@@ -67,7 +67,7 @@ async def test_the_server_names_itself_and_carries_the_instructions():
 
 
 @pytest.mark.anyio
-async def test_the_tools_are_the_15_api_functions_one_to_one():
+async def test_the_tools_are_the_14_api_functions_one_to_one():
     async with mcp.Client(server.server) as c:
         listed = (await c.list_tools()).tools
     assert [t.name for t in listed] == NAMES
@@ -149,8 +149,8 @@ async def test_calls_run_one_at_a_time(desk, monkeypatch):
 
 # ------------------------------------------------------------------------ call directly ---
 def test_unknown_and_missing_arguments_are_refused(desk):
-    assert "close_trade takes trade, reason, at; it has no price" in error(
-        "close_trade", trade="acme-20260302", reason="Invented.", price=101.0)
+    assert "stop_run takes run, at; it has no price" in error(
+        "stop_run", run="dip-buyer-r1", price=101.0)
     assert "get_trade takes trade; it has no now" in error(
         "get_trade", trade="acme-20260302", now="2026-03-02T14:30:00Z")
     assert "list_strategies takes no arguments; it has no x" in error("list_strategies", x=1)
@@ -162,15 +162,12 @@ WRONG = [True, False, 0, -1, 1.5, float("nan"), float("inf"), 10**400, "", "x", 
 
 
 def _seed(tmp_path) -> dict[str, dict]:
-    """One strategy, a replay run with trade A, a live run with trade C; each tool's valid call."""
+    """One strategy, a replay run with trade A; each tool's valid call."""
     store.create()
     current = ok("save_strategy", id="s", markdown=TEXT)["current_hash"]
     replay = ok("start_run", strategy="s", mode="replay", currency="USD", tags=["a"],
                 at="2026-03-02T14:00:00Z")["id"]
-    live = ok("start_run", strategy="s", mode="live", currency="USD",
-              at="2026-03-02T14:00:00Z")["id"]
     a = ok("trade", run=replay, **ENTRY, at="2026-03-02T14:30:00Z")["id"]
-    c = ok("trade", run=live, **ENTRY, at="2026-03-02T14:30:00Z")["id"]
     shot = tmp_path / "shot.png"
     shot.write_bytes(b"\x89PNG invented")
     return {
@@ -188,7 +185,6 @@ def _seed(tmp_path) -> dict[str, dict]:
                                  "reason": "Invented."}]},
         "move_order": {"trade": a, "reason": "Invented.", "stop": 99.0, "target": 105.0,
                        "at": "2026-03-02T15:00:00Z"},
-        "close_trade": {"trade": c, "reason": "Invented.", "at": "2026-03-02T15:00:00Z"},
         "report": {"trade": a, "state": "exited", "at": "2026-03-02T16:00:00Z",
                    "reason": "Invented.", "price": 103.0, "kind": "hand"},
         "correct_trade": {"trade": a, "fields": {"stop": 97.5}, "reason": "Invented."},
@@ -246,12 +242,11 @@ def test_the_stats_reply_counts_beside_every_id_list(desk):
     assert got["closed"] == {"count": 1, "ids": [a]}
     assert got["wins"] == {"count": 1, "ids": [a]} and got["total_r"] == 2.0
     assert got["pending"] == {"count": 1, "ids": [b]}
-    assert got["cancelled"] == {} and got["not_judged"] == {"count": 0, "trades": {}}
+    assert got["cancelled"] == {}
     assert got["limits"]["placed"] == {"count": 2, "ids": [a, b]}
     assert got["limits"]["rate"] == 1.0
     assert got["rests_on"]["mode"] == {"replay": {"count": 2, "ids": [a, b]}}
     assert got["rests_on"]["tags"] == [{"tags": [], "trades": {"count": 2, "ids": [a, b]}}]
-    assert got["rests_on"]["live_exits"]["reported"] == {"count": 0, "ids": []}
     assert got["tags"] == []
 
 
@@ -303,7 +298,7 @@ def test_no_desk_db_names_the_restart():
 # ------------------------------------------------------- a subprocess, one message at a time ---
 class Wire:
     """`trading-desk mcp` in a subprocess, driven as a client drives it: send a line, read its
-    reply, then send the next. Piping every line and closing stdin gets "Connection closed" for
+    reply, then send the next. Piping every line and shutting stdin gets "Connection closed" for
     the requests still in flight. stderr goes to a file, so a long log never blocks the server."""
 
     def __init__(self, tmp_path, command=MCP):
@@ -452,7 +447,7 @@ def test_the_instruction_file_fits_and_says_what_design_9_asks():
                    "ask the user first", "`market`", "every declared fact (the desk computes none)",
                    "checklist item", "nothing but your reports", "not filled",
                    "stop-out at its real time", "broker's fill price",
-                   "dated at or after the judged exit", "confirms the broker still holds",
+                   "confirms the broker still holds",
                    "at least weekly", "full file paths or https://"):
         assert phrase in text, phrase
 

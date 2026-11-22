@@ -18,9 +18,8 @@ keywords = ["trading", "strategy", "trade-journal", "mcp", "claude-code", "repla
 # `mcp` is required: MCP is the desk's only interface (`trading-desk mcp`), served on the SDK's
 # low-level server, which passes the agent's arguments through unchanged for the API to check.
 # The upper bound is deliberate: 2.x renamed and rewrote its own API within two months, so a
-# 3.0 is not taken unseen. yfinance is required too, so every install can judge live runs; it
-# is imported only inside `desk/yahoo.py`'s call, so the MCP server starts without pandas.
-dependencies = ["mcp>=2.3,<3", "yfinance>=1.8,<2"]
+# 3.0 is not taken unseen.
+dependencies = ["mcp>=2.3,<3"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
@@ -63,7 +62,7 @@ include = ["desk*"]
 # a real built wheel, because an editable install reads the source tree and so cannot
 # catch a missing declaration.
 [tool.setuptools.package-data]
-"desk" = ["schema.sql", "bars.sql", "strategy.example.md", "instructions.md"]
+"desk" = ["schema.sql", "strategy.example.md", "instructions.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

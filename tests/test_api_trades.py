@@ -109,7 +109,7 @@ def test_a_run_cannot_stop_at_or_before_a_trade_on_it(con):
     assert api.stop_run(con, "dip-buyer-r2", at=after, now=now).stopped == after
 
 
-def test_a_run_stop_is_judged_against_the_corrected_entry_and_ignores_a_void_trade(con):
+def test_a_run_stop_is_read_against_the_corrected_entry_and_ignores_a_void_trade(con):
     now = NOW + timedelta(days=6)
     t = enter(con, "dip-buyer-r2", at=NOW + timedelta(days=1), now=now)
     api.correct_trade(con, t.id, fields={"at": NOW + timedelta(days=5)}, reason="x", now=now)

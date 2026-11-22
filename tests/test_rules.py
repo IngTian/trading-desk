@@ -28,7 +28,7 @@ def test_a_toml_error_names_the_file_line():
         rules.read_block(block('timeframes = ["1h"]\nmin_reward_risk = \n'), "strategy")
 
 
-def test_an_error_at_the_end_of_the_document_names_the_closing_fence():
+def test_an_error_at_the_end_of_the_document_names_the_unended_fence():
     with pytest.raises(Refused, match=r"strategy:8: the rules block is not valid TOML"):
         rules.read_block(block('timeframes = ["1h"\n'), "strategy")
 

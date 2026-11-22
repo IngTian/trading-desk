@@ -10,7 +10,6 @@ lives under one data root:
     ~/Documents/trading-desk/
         desk.db       the store: the owner's decisions, an append-only log
         attachments/  screenshots attached to trades, named by content hash
-        bars.db       price bars for live runs, insert-only, and the spans each fetch covered
 
 The ROOT is $TRADING_DESK_HOME, else ~/Documents/trading-desk. The desk reads no settings
 file: where the data is belongs with the data, never in the repo.
@@ -23,10 +22,9 @@ desk.db resolves most explicit first:
 
 (2) lets a one-off `TRADING_DESK_DB=/tmp/scratch.db trading-desk integrity` read there.
 
-ISOLATING A RUN: set $TRADING_DESK_HOME (which moves attachments/ and bars.db too).
-$TRADING_DESK_DB moves desk.db alone, so screenshots and bars.db still go to the real root.
-The test suite clears the override and points the root at a temp dir before every test
-(conftest.py).
+ISOLATING A RUN: set $TRADING_DESK_HOME (which moves attachments/ too). $TRADING_DESK_DB
+moves desk.db alone, so screenshots still go to the real root. The test suite clears the
+override and points the root at a temp dir before every test (conftest.py).
 
 NOTE ON SYNCED FOLDERS. The default root is under ~/Documents, which iCloud syncs on many
 Macs. store.open() sets journal_mode=DELETE precisely so there is no -wal sidecar for a
@@ -83,11 +81,6 @@ def refuse_legacy_db() -> None:
                       "then remove the db line from config.toml.")
 
 
-def bars_path() -> Path:
-    """bars.db, the price bars. Always under the root: no environment override."""
-    return (home() / "bars.db").resolve()
-
-
 def attachments_dir() -> Path:
     """Where screenshots attached to trades are stored, named by content hash."""
     return (home() / "attachments").resolve()
@@ -123,11 +116,6 @@ def schema_sql() -> Path:
     `desk/schema.sql` is a real file on disk either way -- no importlib.resources needed.
     """
     return Path(__file__).resolve().parent / "schema.sql"
-
-
-def bars_sql() -> Path:
-    """bars.db's schema. Package-relative, as schema_sql() is and for the same reason."""
-    return Path(__file__).resolve().parent / "bars.sql"
 
 
 def example_strategy() -> Path:

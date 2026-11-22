@@ -8,7 +8,6 @@ from desk.errors import Refused
 def test_the_data_folder_layout_is_one_place(tmp_path, monkeypatch):
     monkeypatch.setenv("TRADING_DESK_HOME", str(tmp_path))
     assert config.db_path() == (tmp_path / "desk.db").resolve()
-    assert config.bars_path() == (tmp_path / "bars.db").resolve()
 
 
 def test_an_env_var_moves_the_db(tmp_path, monkeypatch):
@@ -26,7 +25,7 @@ def test_a_config_toml_is_not_read(monkeypatch, tmp_path):
 
 
 def test_icloud_leaves_a_dot_icloud_placeholder_beside_an_evicted_file(tmp_path):
-    assert config.icloud_placeholder(tmp_path / "bars.db") == tmp_path / ".bars.db.icloud"
+    assert config.icloud_placeholder(tmp_path / "desk.db") == tmp_path / ".desk.db.icloud"
 
 
 def _legacy(tmp_path, monkeypatch, text='db = "elsewhere.db"\n'):

@@ -27,7 +27,7 @@ def cmd_integrity(args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(args: argparse.Namespace) -> int:
-    """Serve the desk's 15 tools over stdio until the client closes stdin."""
+    """Serve the desk's 14 tools over stdio until the client closes stdin."""
     from desk import server  # the MCP SDK is imported only by the command that serves it
     try:
         return server.serve()

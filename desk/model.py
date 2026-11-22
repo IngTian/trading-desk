@@ -2,9 +2,7 @@
 
 `decisions_of` reads a trade's `entered` event, its moves, its reports, its close and its void,
 with every correction read in place of the event it names. What the decisions led to -- fills,
-exits, R and cash -- is derived on read, from `Decisions`: a replay trade's from its reports
-alone (`judge.replay`), a live trade's by the judge in `desk/judge.py`, from the decisions and
-the bars, with the reports laid over it (`judge.live`).
+exits, R and cash -- is derived on read, from `Decisions` and its reports alone (`judge.replay`).
 
 ## Payload-key contract (what each trade event carries)
 
@@ -20,7 +18,8 @@ the bars, with the reports laid over it (`judge.live`).
   it, dated at the stop)
 - **held**: `reason`: the position was still open at `at` (a report of state `open`)
 - **closed**: `reason`, and `kind` when given (`hand`, `stop` or `target`; absent: `hand`) and
-  `price` when given. With neither, it is `close_trade`'s decision; with either, an exit report
+  `price` when given. A hand exit gives its price; a stop or target exit given none is at the
+  level in force
 - **corrected**: `fields` (the named event's fields that change, `at` among them), `reason`;
   `corrects` names an `entered`, `order_moved`, `filled`, `cancelled`, `held` or `closed` event.
   Its own `at` is when it was written, which the fold never reads.
@@ -40,10 +39,10 @@ from dataclasses import dataclass, field
 from desk import store
 from desk.errors import shown
 
-# A continuous futures contract as TradingView writes it ("GC1!", "MNQ2!") and as Yahoo does
-# ("GC=F"), optionally behind an exchange prefix ("COMEX:GC1!"). A root may start with a digit
-# (6E is a currency future), so the root is any run of letters and digits, matched lazily so the
-# contract number is left for the suffix.
+# A continuous futures contract as TradingView writes it ("GC1!", "MNQ2!"), optionally behind an
+# exchange prefix ("COMEX:GC1!"). A root may start with a digit (6E is a currency future), so the
+# root is any run of letters and digits, matched lazily so the contract number is left for the
+# suffix.
 _CONTINUOUS = re.compile(r"^(?:[A-Z0-9_]+:)?([A-Z0-9]+?)(?:\d+!|=F)$")
 
 
@@ -240,20 +239,19 @@ def in_force(d: Decisions, at: dt.datetime) -> tuple[float | None, float | None]
     return stop, target
 
 
-def report_problem(trade: str, d: Decisions, *, side: str, mode: str,
+def report_problem(trade: str, d: Decisions, *, side: str,
                    stopped: dt.datetime | None) -> str | None:
     """The first way d's reports do not fit the record, as a refusal naming the fix; None when
     they fit. The api's `_consistent` and integrity's `reports` both read it, so every report
     rule lives here. A trade's entry against its run, a move against the entry and the close,
     and a close against the entry stay the api's inline checks and integrity's decision_dates.
 
-    `stopped` is the run's stop, when it has one. Rules in order, the numbers the design's."""
+    `stopped` is the run's stop, when it has one."""
     e, f, c, h, h1 = d.entry, d.fill, d.cancel, d.held, d.held_first
     fp = e.price if f is None or f.price is None else f.price
     position = e.type == "market" or f is not None
     closed = d.close_at is not None
     close_at = d.close_at.isoformat() if closed else None
-    an_exit = closed and (d.close_price is not None or d.close_kind in ("stop", "target"))
     # 1-5: the fill
     if e.type == "market" and (f or c):
         return (f"Trade {shown(trade)} was a market entry, filled when it was entered; only a "
@@ -322,7 +320,7 @@ def report_problem(trade: str, d: Decisions, *, side: str, mode: str,
                 "mistake, withdraw the close (void_trade with report \"close\"), then report "
                 "the cancellation.")
     # 9-11: the close
-    if an_exit and not position:
+    if closed and not position:
         return (f"The exit of trade {shown(trade)} at {close_at} needs a position, and its limit "
                 f"order has "
                 "no fill reported: report the fill (report(trade, state=\"filled\", …)) before the "
@@ -331,15 +329,10 @@ def report_problem(trade: str, d: Decisions, *, side: str, mode: str,
         return (f"Trade {shown(trade)} was closed at {close_at}, before its fill at "
                 f"{f.at.isoformat()}; a fill comes at or before the close, so give one of them "
                 "its real `at`.")
-    if (mode == "replay" and closed and d.close_kind == "hand" and d.close_price is None
-            and position):  # close_trade's decision, which replay has no bars to price
-        pending = (f" If the close at {close_at} was recorded while the order seemed pending and "
-                   "it had in fact filled first, withdraw that close (void_trade with "
-                   "report \"close\"), report the fill, then report the exit with its price."
-                   if e.type != "market" else "")
-        return (f"Trade {shown(trade)} is on a replay run, which has no bars to price a hand close "
-                "from; report the exit with the price you closed at instead (report(trade, "
-                "state=\"exited\", kind=\"hand\", price=…, at=…, reason=…))." + pending)
+    if closed and d.close_kind == "hand" and d.close_price is None:
+        return (f"The hand exit of trade {shown(trade)} at {close_at} gives no price; report it "
+                "with the price it filled at (report(trade, state=\"exited\", kind=\"hand\", "
+                "price=…, at=…, reason=…)).")
     if d.close_kind in ("stop", "target"):
         kind = d.close_kind
         level = in_force(d, d.close_at)[0 if kind == "stop" else 1]
@@ -362,13 +355,13 @@ def report_problem(trade: str, d: Decisions, *, side: str, mode: str,
             return (f"The target exit of trade {shown(trade)} at {price} is worse than its target "
                     f"{level}: a target fills at its price or better, so give the price it "
                     "filled at, or kind=\"hand\".")
-    # 12: an open report; the mode is not read
+    # 12: an open report
     if h and c:
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, so it "
                 f"has no "
                 "position to report open; if it had in fact filled, withdraw the cancellation "
                 "(void_trade with report \"cancel\") and report the fill first.")
-    if h and not position:  # pending by the record, as in rule 9: the bars are not read
+    if h and not position:  # pending by the record, as in rule 9
         return (f"The limit order of trade {shown(trade)} has no fill reported, so there is no "
                 f"position to "
                 "report open: report the fill first (report(trade, state=\"filled\", at=…, "

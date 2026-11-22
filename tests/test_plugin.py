@@ -28,16 +28,10 @@ def test_the_plugin_and_its_marketplace_agree():
         "mcpServers": {"desk": {"command": "trading-desk", "args": ["mcp"]}}
     }
     assert "version" not in plugin
-    assert len(TOOLS) == 15
+    assert len(TOOLS) == 14
     assert all(len(PREFIX + name) <= 128 for name in TOOLS)
     scripts = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["scripts"]
     assert "trading-desk" in scripts
-
-
-def test_yfinance_is_a_dependency_not_an_extra():
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    assert any(d.startswith("yfinance") for d in project["dependencies"])
-    assert "optional-dependencies" not in project
 
 
 def test_the_readme_gives_the_commands_that_work():

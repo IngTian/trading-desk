@@ -77,7 +77,7 @@ def read_block(text: str, origin: str) -> dict:
     never closed, text that is not TOML (a key or table set twice included).
     ~~~rules and ````rules are read, as Markdown reads them.
     """
-    bodies: list[tuple[int, list[str], int]] = []   # (fence line, body lines, closing line)
+    bodies: list[tuple[int, list[str], int]] = []   # (fence line, body lines, end line)
     fence: tuple[str, int, bool] | None = None      # (char, length, is a rules fence)
     number = 0
     for number, line in enumerate(text.split("\n"), 1):

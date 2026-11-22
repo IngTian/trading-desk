@@ -287,13 +287,9 @@ PROBLEMS = [  # (id, dec kwargs, report_problem kwargs, a substring of the probl
      "no fill reported"),
     ("a priced hand close is an exit too", dict(close=3, close_price=101.0), {},
      "no fill reported"),
-    ("a live hand close of a pending limit is the judge's", dict(close=3), dict(mode="live"), None),
     ("a fill comes at or before the close", dict(fill=(3, None), close=2, close_price=101.0), {},
      "before its fill"),
-    ("a replay hand close of a position needs a price", dict(MARKET, close=3), {}, "replay run"),
-    ("a fill under a replay hand close names the way out", dict(fill=(2, None), close=3), {},
-     "withdraw that close"),
-    ("a replay hand close of a pending limit cancels it", dict(close=3), {}, None),
+    ("a hand close of a position needs a price", dict(MARKET, close=3), {}, "gives no price"),
     ("a stop exit is not better than the stop",
      dict(MARKET, close=3, kind="stop", close_price=98.5), {}, "better than its stop 98.0"),
     ("a stop exit beyond the stop is accepted",
@@ -333,14 +329,11 @@ PROBLEMS = [  # (id, dec kwargs, report_problem kwargs, a substring of the probl
      None),
     ("an open report at the close", dict(MARKET, held=3, close=3, kind="stop"), {},
      "and reported open at"),
-    ("an open report after a live close by hand", dict(MARKET, held=4, close=3), dict(mode="live"),
-     "and reported open at"),
 ]
 
 
 @pytest.mark.parametrize(("d", "kw", "says"), [c[1:] for c in PROBLEMS],
                          ids=[c[0] for c in PROBLEMS])
 def test_report_problems(d, kw, says):
-    p = model.report_problem("acme-1", dec(**d),
-                             **{"side": "long", "mode": "replay", "stopped": None, **kw})
+    p = model.report_problem("acme-1", dec(**d), **{"side": "long", "stopped": None, **kw})
     assert (p is None) if says is None else (p is not None and says in p), p

@@ -61,7 +61,7 @@ You tell the agent what you did and why, and it calls the desk's tools. A sessio
    - Over MCP, `reasons` is still required: pass an empty string with `check_only`.
    - Screenshots are local files, copied into the desk under a hash of their bytes, or https
      links.
-4. **After entry**: `move_order`, `close_trade` and `report`.
+4. **After entry**: `move_order` and `report`.
 5. **Fix a mistake**: `correct_trade` and `void_trade`. A trade's currency cannot be corrected.
 6. **Read back**: `get_trade`, with `checks_now` and `checks_differ`; and `list_trades`.
 7. **Stop the run.** `stop_run` sorts its unfilled limits into `cancelled` (by the stop),
@@ -105,8 +105,8 @@ stats  wins 1 of 1 closed · win_rate 1.0 · average_r 2.0 · pnl USD 30.0
 Every figure above is the desk's actual reply to that session, run end to end while writing this
 README.
 
-The 15 tools, grouped as they are in the reference: `save_strategy`, `get_strategy`,
-`list_strategies` · `start_run`, `stop_run`, `list_runs` · `trade`, `move_order`, `close_trade`,
+The 14 tools, grouped as they are in the reference: `save_strategy`, `get_strategy`,
+`list_strategies` · `start_run`, `stop_run`, `list_runs` · `trade`, `move_order`,
 `report`, `correct_trade`, `void_trade` · `get_trade`, `list_trades`, `stats`.
 Every one, argument by argument, with the standing instructions the agent gets, is in
 [The tools](https://github.com/IngTian/trading-desk/blob/main/docs/tools.md).

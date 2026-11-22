@@ -15,6 +15,7 @@ LATER = NOW + timedelta(days=1)
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
             size=10, currency="USD", instrument="stock", reasons="Dip into support.")
 TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes = [\"1h\"]\n```\n"
+LIVE = "dip-buyer-r1"   # the live run; the fixture's replay run is dip-buyer-r2
 
 
 @pytest.fixture
@@ -50,10 +51,6 @@ def held(con, id, **kw):
 def out(con, id, **kw):
     return api.report(con, id, **{"state": "exited", "reason": "Out.", "at": T3, "now": LATER,
                                   **kw})
-
-
-def close(con, id, **kw):
-    return api.close_trade(con, id, **{"reason": "Out.", "at": T3, "now": LATER, **kw})
 
 
 def last(con, id):
@@ -108,15 +105,6 @@ def test_a_report_needs_its_at_live_and_replay(con, run):
     assert [e["kind"] for e in store.events(con, trade_id=t.id)] == ["entered"]
 
 
-def test_a_live_close_still_defaults_its_at_to_now(con):
-    t = enter(con, "dip-buyer-r1", entry_type="market", at=None, now=T1)
-    assert close(con, t.id, at=None, now=T2).decisions.close_at == T2
-
-
-def test_a_replay_hand_close_of_a_pending_limit_needs_no_price(con):
-    assert close(con, enter(con).id).decisions.close_kind == "hand"   # it cancels the order
-
-
 SETUPS = {  # what a case does before the call it expects refused
     "fill": lambda con, t: fill(con, t),
     "fill 99.75": lambda con, t: fill(con, t, price=99.75),
@@ -125,8 +113,6 @@ SETUPS = {  # what a case does before the call it expects refused
     "cancel at T3": lambda con, t: cancel(con, t, at=T3),
     "open": lambda con, t: held(con, t),
     "open at T3": lambda con, t: held(con, t, at=T3),
-    "close": lambda con, t: close(con, t),
-    "close at T2": lambda con, t: close(con, t, at=T2),
     "hand exit": lambda con, t: out(con, t, price=101.0),
     "stop exit": lambda con, t: out(con, t, kind="stop"),
     "move at T3": lambda con, t: api.move_order(con, t, stop=99.0, reason="x", at=T3, now=LATER),
@@ -159,8 +145,6 @@ REFUSED = [  # (id, entry kwargs, setups, the call refused, a substring of the r
     ("a cancellation's cause that is not known", {}, [],
      lambda con, t: cancel(con, t, why="expired"), "why"),
     ("a cancellation with no cause", {}, [], lambda con, t: cancel(con, t, why=None), "why"),
-    ("a fill under a priceless close", {}, ["close"], lambda con, t: fill(con, t, at=T2),
-     "withdraw that close"),
     ("a move after a stop exit, naming its price", MARKET, ["stop exit"],
      lambda con, t: api.move_order(con, t, stop=99.0, reason="x", at=T4, now=LATER), "at 98.5"),
     ("an exit on a limit with no fill", {}, [], lambda con, t: out(con, t, kind="stop"),
@@ -168,16 +152,18 @@ REFUSED = [  # (id, entry kwargs, setups, the call refused, a substring of the r
     ("a hand exit on a limit with no fill", {}, [], lambda con, t: out(con, t, price=101.0),
      "no fill reported"),
     ("a hand exit with no price", MARKET, [], lambda con, t: out(con, t), "with the price"),
-    ("an exit after a close", {}, ["close"], lambda con, t: out(con, t, price=101.0, at=T4),
-     "already closed"),
+    ("a live hand exit with no price", dict(MARKET, run=LIVE), [], lambda con, t: out(con, t),
+     "with the price"),
+    ("a live exit on a limit with no fill", dict(run=LIVE), [],
+     lambda con, t: out(con, t, kind="stop"), "no fill reported"),
+    ("an exit after a close", MARKET, ["stop exit"],
+     lambda con, t: out(con, t, price=101.0, at=T4), "already closed"),
     ("a stop exit better than the stop", MARKET, [],
      lambda con, t: out(con, t, kind="stop", price=99.0), "better than its stop 98.5"),
     ("a target exit worse than the target", MARKET, [],
      lambda con, t: out(con, t, kind="target", price=102.0), "worse than its target 103.0"),
     ("a stop exit with no stop", dict(MARKET, stop=None), [],
      lambda con, t: out(con, t, kind="stop"), "no stop in force"),
-    ("a replay hand close of a position: its exit is reported", MARKET, [],
-     lambda con, t: close(con, t), 'state="exited"'),
     ("a cancellation at the entry's moment", {}, [], lambda con, t: cancel(con, t, at=T1),
      f"entered at {T1.isoformat()}"),
     ("a cancellation before a move", {}, ["move at T3"], lambda con, t: cancel(con, t),
@@ -185,10 +171,8 @@ REFUSED = [  # (id, entry kwargs, setups, the call refused, a substring of the r
     ("a move after a cancellation", {}, ["cancel"],
      lambda con, t: api.move_order(con, t, stop=99.0, reason="x", at=T3, now=LATER),
      "has a move at"),
-    ("a close of a cancelled order", {}, ["cancel"], lambda con, t: close(con, t),
+    ("an exit on a cancelled order", {}, ["cancel"], lambda con, t: out(con, t, price=101.0),
      "no position to close"),
-    ("a fill after the close", {}, ["close at T2"], lambda con, t: fill(con, t, at=T3),
-     "before its fill"),
     ("an open report on a limit with no fill", {}, [], lambda con, t: held(con, t),
      "report the fill first"),
     ("an open report on a cancelled order", {}, ["cancel"], lambda con, t: held(con, t, at=T3),
@@ -314,15 +298,6 @@ def test_a_withdrawn_close_lets_the_trade_close_again(con):
     api.void_trade(con, t.id, reason="Not stopped.", report="close", now=LATER)
     d = out(con, t.id, price=101.0, at=T4).decisions
     assert (d.close_kind, d.close_price, d.close_at) == ("hand", 101.0, T4)
-
-
-def test_a_fill_found_under_a_priceless_close_is_reported_by_withdrawing_that_close(con):
-    t = enter(con)
-    close(con, t.id)                                   # at T3, while the order seemed pending
-    api.void_trade(con, t.id, reason="It had filled.", report="close", now=LATER)
-    fill(con, t.id, at=T2)
-    d = out(con, t.id, price=101.0).decisions
-    assert (d.fill.at, d.close_at, d.close_kind, d.close_price) == (T2, T3, "hand", 101.0)
 
 
 def test_withdrawing_the_latest_open_report_leaves_the_one_before_it(con):
