@@ -268,3 +268,7 @@ def test_a_start_or_stop_dated_after_now_is_refused(con):
     with pytest.raises(api.Refused, match="is after now"):
         api.stop_run(con, "dip-buyer-r1", at=LATER, now=NOW)
     assert api.list_runs(con)[0].stopped is None
+
+
+def test_stop_runs_reply_type_is_exported():
+    assert "StoppedRun" in api.__all__

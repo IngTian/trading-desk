@@ -13,15 +13,9 @@ def cmd_integrity(args: argparse.Namespace) -> int:
     """Run the integrity checks: exit 1 on any violation, never the raw count (exit codes
     wrap at 256, so 256 violations would read as success)."""
     try:
-        config.refuse_legacy_db()
         con = store.open(read_only=True)
     except FileNotFoundError:   # store.open's text names store.create(), which a user cannot call
         path = config.db_path()
-        try:
-            config.refuse_if_in_icloud(path)
-        except Refused as e:
-            print(e, file=sys.stderr)
-            return 1
         print(f"There is no desk.db at {path}; the desk creates it when its MCP server first "
               "starts (trading-desk mcp).", file=sys.stderr)
         return 1

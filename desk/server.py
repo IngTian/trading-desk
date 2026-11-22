@@ -394,13 +394,10 @@ def _counted(s: dict) -> dict:
 
 
 def _open() -> sqlite3.Connection:
-    config.refuse_legacy_db()
     try:
         return store.open()
     except FileNotFoundError:   # its text names store.create(), which an agent cannot call
         path = config.db_path()
-        # Refused: replied as it stands and logged nowhere, as a refusal is
-        config.refuse_if_in_icloud(path)
         raise Refused(f"There is no desk.db at {path}; restart the MCP server, which creates one, "
                       "or check TRADING_DESK_HOME and TRADING_DESK_DB.") from None
 

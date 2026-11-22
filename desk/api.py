@@ -26,7 +26,7 @@ from desk.strategy import minutes  # start_run's `strategy` parameter shadows th
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
            "RunView", "start_run", "stop_run", "list_runs", "TradeView", "CheckView", "trade",
            "move_order", "close_trade", "report", "correct_trade", "void_trade", "get_trade",
-           "list_trades", "TradeBars", "trade_bars", "Stats", "stats"]
+           "list_trades", "TradeBars", "trade_bars", "Stats", "stats", "StoppedRun"]
 
 _SLUG = re.compile(r"[a-z0-9-]{1,64}")  # with fullmatch; the schema's CHECK on strategies.id
 _YAHOO_HAS = "1m, 2m, 5m, 15m, 30m, 1h, 90m, 1d or 1w"   # yahoo.INTERVALS, as a refusal names them
