@@ -338,11 +338,11 @@ def test_the_checker_never_raises_on_a_damaged_log(con):
     entered = store.events(con, trade_id="RAW-1")[0]["id"]
     ev(con, "corrected", LATER, trade="RAW-1", corrects=entered,
        payload={"fields": "not a dict", "reason": "x"})
-    raw_trade(con, "RAW-2")  # its report folds, but its price breaks the report check
+    raw_trade(con, "RAW-2")  # its report folds, but its price breaks the record check
     ev(con, "filled", T2, trade="RAW-2", payload={"reason": "x", "price": "abc"})
     lines: list[str] = []
     assert integrity.run(con, emit=lines.append) >= 4
-    assert any("trade RAW-2: record check failed: TypeError" in ln for ln in lines)
+    assert any("trade RAW-2: fold failed: TypeError" in ln for ln in lines)
 
 
 ENTERED = {"entry_type": "limit", "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,

@@ -393,7 +393,6 @@ def first_start() -> None:
     """Create desk.db when neither it nor its iCloud placeholder exists, so a desk.db iCloud has
     evicted is never covered over. A failure goes to stderr, and every call then names it."""
     try:
-        config.refuse_legacy_db()
         path = config.db_path()
         if not path.exists() and not config.icloud_placeholder(path).exists():
             store.create(path)

@@ -90,34 +90,35 @@ def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime],
                  for kind in ("run_started", "run_stopped"))
 
 
+def _folded(con: sqlite3.Connection, t: sqlite3.Row, check: Callable | None = None
+            ) -> str | model.Decisions | None:
+    """Fold one trade once, and run `check(t, fold)` on it, so every invariant that reads a fold
+    shares the one result. Returns None for a trade another invariant already reports as
+    `_unfoldable` (and for a `check` that finds nothing), a ready failure line for a fold or check
+    that raises or that `check` returns, else the fold itself when `check` is None."""
+    if _unfoldable(store.events(con, trade_id=t["id"])):
+        return None
+    try:
+        d = model.decisions_of(con, t["id"])
+        return d if check is None else check(t, d)
+    except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
+        return f"trade {t['id']}: fold failed: {type(exc).__name__}: {exc}"
+
+
 def _record(con: sqlite3.Connection) -> list[str]:
     """Every trade's record fits: by effective time, its entry, its moves and its reports agree
-    with each other and with its run, by `model.record_problem`, the api's own rules.
+    with each other and with its run, by `model.record_problem`, the api's own rules. A fold that
+    fails (a malformed correction payload) and a rule that raises on a payload that folds (a price
+    that is not a number) are both reported here, so integrity still never raises."""
+    def record_problem(t: sqlite3.Row, d: model.Decisions) -> str | None:
+        started, stopped = _run_times(con, t["run_id"])
+        problem = model.record_problem(t["id"], d, side=t["side"],
+                                       started=min(started, default=None),
+                                       stopped=min(stopped, default=None))
+        return f"trade {t['id']}: {problem}" if problem else None
 
-    A trade is skipped when it is `_unfoldable`. A fold that fails for any other reason, such as
-    a malformed correction payload, is reported here, and so is a rule that raises on a payload
-    that folds (a price that is not a number), so integrity still never raises."""
-    failures = []
-    for t in store.trades(con):
-        if _unfoldable(store.events(con, trade_id=t["id"])):
-            continue
-        who = f"trade {t['id']}"
-        try:
-            d = model.decisions_of(con, t["id"])
-        except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
-            failures.append(f"{who}: fold failed: {type(exc).__name__}: {exc}")
-            continue
-        try:
-            started, stopped = _run_times(con, t["run_id"])
-            problem = model.record_problem(t["id"], d, side=t["side"],
-                                           started=min(started, default=None),
-                                           stopped=min(stopped, default=None))
-        except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
-            failures.append(f"{who}: record check failed: {type(exc).__name__}: {exc}")
-            continue
-        if problem:
-            failures.append(f"{who}: {problem}")
-    return failures
+    return [line for t in store.trades(con)
+            if (line := _folded(con, t, record_problem)) is not None]
 
 
 def _correction_target(con: sqlite3.Connection) -> list[str]:
@@ -177,14 +178,11 @@ def _version_text_hash(con: sqlite3.Connection) -> list[str]:
 
 def _run_currency(con: sqlite3.Connection) -> list[str]:
     """Every non-void trade is in its run's currency, as corrected (a hand-written correction
-    can change it). An unfoldable trade is skipped."""
+    can change it). An unfoldable trade is skipped, and a fold that fails is left for `record`."""
     failures = []
     for t in store.trades(con):
-        if _unfoldable(store.events(con, trade_id=t["id"])):
-            continue
-        try:
-            d = model.decisions_of(con, t["id"])
-        except Exception:  # noqa: BLE001 -- record reports a fold that fails
+        d = _folded(con, t)
+        if d is None or isinstance(d, str):
             continue
         run_row = store.run(con, t["run_id"])
         if run_row is None:

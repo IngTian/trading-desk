@@ -35,10 +35,9 @@ time.
 from __future__ import annotations
 
 import os
-import tomllib
 from pathlib import Path
 
-from desk.errors import Refused, shown
+from desk.errors import Refused
 
 ENV_HOME = "TRADING_DESK_HOME"
 ENV_DB = "TRADING_DESK_DB"
@@ -64,21 +63,6 @@ def db_path(explicit: str | os.PathLike | None = None) -> Path:
     if from_env:
         return Path(from_env).expanduser().resolve()
     return (home() / "desk.db").resolve()
-
-
-def refuse_legacy_db() -> None:
-    """0.8 read `db` from <root>/config.toml; 0.9 does not. Refuse, rather than quietly open a
-    new empty desk.db, when the default location is in use and that file still sets `db`."""
-    if os.environ.get(ENV_DB):
-        return
-    try:
-        db = tomllib.loads((home() / "config.toml").read_text(encoding="utf-8")).get("db")
-    except (OSError, ValueError):   # no file, or one that is not TOML: ignored as before
-        return
-    if db is not None:
-        raise Refused(f"config.toml in {home()} sets db = {shown(db)}, which the desk no longer "
-                      f"reads; set TRADING_DESK_DB to that file (or move it to {home()}/desk.db), "
-                      "then remove the db line from config.toml.")
 
 
 def attachments_dir() -> Path:

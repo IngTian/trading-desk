@@ -176,25 +176,31 @@ def _run_view(con, row: sqlite3.Row) -> RunView:
                    currency=row["currency"])
 
 
-def _not_future(when: datetime, now: datetime, noun: str) -> None:
+# The two tails of the after-now refusal: a decision is dated when it happened, a report states
+# a state the trade was already in.
+_WHEN_IT_HAPPENED = "is dated when it happened, so give that moment, in UTC."
+_REPORT_STATE = ("a report states a state the trade was already in, so give the moment it was in "
+                 "it, in UTC.")
+
+
+def _not_future(when: datetime, now: datetime, says: str) -> None:
+    """Refuse an `at` after `now`; `says` completes the reason in words."""
     if when > now:
-        raise Refused(f"`at` {when.isoformat()} is after now ({now.isoformat()}); {noun} is "
-                      "dated when it happened, so give that moment, in UTC.")
+        raise Refused(f"`at` {when.isoformat()} is after now ({now.isoformat()}); {says}")
 
 
-def _decision_time(mode: str, at: datetime | None, now: datetime | None, what: str) -> datetime:
-    """A live decision defaults to `now`; a replay one never defaults, or it would be dated
-    after every bar in the history being replayed."""
-    now = _aware(now)
+def _decision_time(mode: str, at: datetime | None, now: datetime, what: str) -> datetime:
+    """A live decision defaults to `now` (already an aware time); a replay one never defaults, or
+    it would be dated after every bar in the history being replayed."""
     if at is not None:
         when = _aware(at, "at")
         noun = {"enter a trade": "an entry", "move an order": "a move"}.get(what, f"a {what}")
-        _not_future(when, now, noun)
+        _not_future(when, now, f"{noun} {_WHEN_IT_HAPPENED}")
         return when
     if mode == "replay":
         raise Refused(f"A replay run needs `at` to {what}: give the moment in the replayed "
                       "history, not the wall clock.")
-    return _aware(now)
+    return now
 
 
 def _right_side(side: str, entry, stop, target) -> None:
@@ -222,6 +228,7 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, currency=Non
     if mode not in ("live", "replay"):
         raise Refused(f"mode {shown(mode)} is not known; use \"live\" (real time) or \"replay\" "
                       "(re-running past history).")
+    now = _aware(now)
     start = _decision_time(mode, at, now, "start")
     with store.transaction(con):  # the run number and version are read under the write lock
         rows = store.versions(con, strategy)
@@ -258,6 +265,7 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
     row = store.run(con, _text("run", run))
     if row is None:
         raise Refused(f"There is no run {shown(run)}; list_runs to see the ones that exist.")
+    now = _aware(now)
     stop = _decision_time(row["mode"], at, now, "stop")
     with store.transaction(con):  # the run's state is checked under the write lock
         view = _run_view(con, row)
@@ -596,14 +604,14 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     shots = [_screenshot(s) for s in _strings("screenshots", screenshots)]
     plan = model.Plan(symbol, side, kind, float(point_value), currency, float(entry),
                       stop and float(stop), target and float(target), size)
-    _within_run(_run_view(con, row), when)   # before any fetch; again under the lock
     record = bool(set(checks.RECORD) & set(rules.values))   # else no rule reads another trade
-    others = _others(con, row) if record else ()
 
     def as_shown(others: tuple[checks.Other, ...], seq: int | None) -> tuple[checks.Result, ...]:
         return tuple(checks.run_checks(plan, rules, checks.Context(
             at=when, seq=seq, currency=row["currency"], others=others, market=market)))
-    if check_only:   # a preview needs no reasons yet
+    if check_only:   # a preview writes nothing, so it checks without the write lock
+        _within_run(_run_view(con, row), when)
+        others = _others(con, row) if record else ()
         return CheckView(run=run, at=when, ticker=symbol, side=side, instrument=kind,
                          point_value=float(point_value), currency=currency,
                          checks=as_shown(others, None), checklist=_checklist_view(items, answers))
@@ -611,8 +619,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
         raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
     with store.transaction(con):  # the run's state and the id's collisions are read under the lock
         _within_run(_run_view(con, row), when)
-        results = as_shown(_others(con, row) if record else (),
-                           len(store.trades(con, run)))
+        results = as_shown(_others(con, row) if record else (), len(store.trades(con, run)))
         for _, data, stored in shots:  # after every refusal; content-addressed, so a repeat skips
             if data is None:  # a link: nothing to store
                 continue
@@ -734,14 +741,6 @@ def _why(why) -> str:
     return why
 
 
-def _not_after_now(when: datetime, now: datetime) -> None:
-    """A report states a state the trade was already in, live or replay."""
-    if when > now:
-        raise Refused(f"`at` {when.isoformat()} is after now ({now.isoformat()}); a report states "
-                      "a state the trade was already in, so give the moment it was in it, in "
-                      "UTC.")
-
-
 def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, reason: str,
            price: float | None = None, kind: str | None = None, why: str | None = None,
            now: datetime | None = None) -> TradeView:
@@ -763,7 +762,7 @@ def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, rea
                       "in replay: give the moment the order or the position was in that state, "
                       "not the moment you report it.")
     when = _aware(at, "at")
-    _not_after_now(when, now)
+    _not_future(when, now, _REPORT_STATE)
     for name, value in (("price", price), ("kind", kind), ("why", why)):
         if value is not None and name not in _TAKES[state]:
             raise Refused(f"{name} does not go with state={shown(state)}: price goes with "
@@ -854,10 +853,12 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                       f"only a "
                       "future's point value can be corrected.")
     when = _aware(fields["at"], "at") if "at" in fields else None
-    if which is not None and when is not None:
-        _not_after_now(when, now)
-    elif when is not None:
-        _not_future(when, now, "a move" if index is not None else "an entry")
+    if when is not None:
+        if which is not None:
+            _not_future(when, now, _REPORT_STATE)
+        else:
+            noun = "a move" if index is not None else "an entry"
+            _not_future(when, now, f"{noun} {_WHEN_IT_HAPPENED}")
 
     with store.transaction(con):  # the decisions the correction is checked against, under the lock
         d, entered, move_ids, reports = _not_void(con, trade)
@@ -874,11 +875,10 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
                         fields.get("stop", d.entry.stop), fields.get("target", d.entry.target))
             corrects = entered
         else:
-            if (isinstance(index, bool) or not isinstance(index, int)
-                    or not 0 <= index < len(d.moves)):
+            if index >= len(d.moves):   # `move`'s type and `>= 0` are checked where it is read
                 raise Refused(f"Trade {shown(trade)} has no move {shown(index)}; `move` is a "
-                              f"move's place "
-                              f"in get_trade's moves, from 0, and it has {len(d.moves)}.")
+                              f"move's place in get_trade's moves, from 0, and it has "
+                              f"{len(d.moves)}.")
             corrects = move_ids[index]
         stored = {**fields, **{k: float(fields[k]) for k in ("entry", "stop", "target",
                                                              "point_value", "price")

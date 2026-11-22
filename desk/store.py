@@ -24,8 +24,6 @@ class NotADeskDatabase(ValueError):
 
 def create(path: Path | None = None) -> None:
     """Execute schema.sql into a new file. Refuses to overwrite an existing one."""
-    if path is None:
-        config.refuse_legacy_db()
     db = path or config.db_path()
     if db.exists():
         raise FileExistsError(f"{db} already exists")
@@ -80,11 +78,8 @@ def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connec
     silently discards the mode and opens a new writable file.
 
     Raises FileNotFoundError when the database does not exist, and NotADeskDatabase when it
-    is not one. Without a path, raises Refused when config.toml still sets `db`; a missing file
-    that iCloud has evicted raises Refused too.
+    is not one. A missing file that iCloud has evicted raises Refused.
     """
-    if path is None:
-        config.refuse_legacy_db()
     db = path or config.db_path()
     if not db.exists():
         config.refuse_if_in_icloud(db)
