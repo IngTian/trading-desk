@@ -146,3 +146,14 @@ def test_an_ended_trades_bars_are_fetched_only_through_its_window(con, fake_yaho
     tb = api.trade_bars(con, t.id, now=h(400))                            # long after the exit
     assert [b.open_time for b in tb.bars] == [h(1), h(2), h(3)]
     assert max(c[3] for c in y.calls) <= EXIT + timedelta(hours=1, days=4)
+
+
+def test_a_live_trade_serves_the_1m_bars_it_is_judged_on(con, fake_yahoo):
+    api.save_strategy(con, "slow", GOLD.replace('["1h", "4h"]', '["4h"]'), now=h(0))
+    run = api.start_run(con, "slow", mode="live", currency="USD", at=h(0), now=h(0)).id
+    fake_yahoo(SIX)                                    # a list is served at every interval
+    t = enter(con, run, at=h(1), now=h(1))
+    with pytest.raises(api.Refused, match="ask for 1m, the bars run"):
+        api.trade_bars(con, t.id, now=h(6))            # the default, 4h: Yahoo has no 4h bars
+    tb = api.trade_bars(con, t.id, timeframe="1m", now=h(6))
+    assert tb.timeframe == "1m" and [b.open_time for b in tb.bars] == [h(1), h(2), h(3)]

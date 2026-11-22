@@ -296,13 +296,14 @@ TOOLS: dict[str, Tool] = {
     }),
     "trade_bars": Tool(api.trade_bars, (
         "A live trade's price bars, each with its open time in UTC and its open, high, low, "
-        "close and volume, on one of its run's timeframes (default: the finest). They run from "
+        "close and volume, on one of its run's timeframes (default: the finest), or on 1m, the "
+        "bars it is judged on. They run from "
         "`before` bars ahead of the bar holding its entry to `after` bars past its exit or "
         "cancellation, or to the latest bar while it has not ended. `missing` gives the ranges "
         "no fetch covered, and `notes` why. Replay trades have no bars."), {
         "trade": _p("string", "A live trade's id."),
-        "timeframe": _p("string", "One of its run's timeframes, e.g. 15m; left out: the "
-                        "finest."),
+        "timeframe": _p("string", "One of its run's timeframes, e.g. 15m, or 1m, the bars it is "
+                        "judged on; left out: the finest."),
         "before": _p("integer", "Bars to include ahead of the bar holding the entry; left out: "
                      "0.", minimum=0, maximum=10000),
         "after": _p("integer", "Bars to include past the exit or cancellation; left out: 0.",
