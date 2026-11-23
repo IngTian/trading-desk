@@ -196,7 +196,7 @@ def _run_currency(con: sqlite3.Connection) -> list[str]:
 
 
 def _finite_number(v) -> bool:
-    return isinstance(v, int | float) and not isinstance(v, bool) and rules._finite(v)
+    return isinstance(v, int | float) and not isinstance(v, bool) and rules.finite(v)
 
 
 # What each of checks.Result's fields holds, as trade() writes it.

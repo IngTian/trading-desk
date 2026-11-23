@@ -134,7 +134,7 @@ def test_fold_names_the_events_a_correction_can_name(con):
     filled = log(con, "filled", T0 + timedelta(hours=1), {"reason": "a"})
     opened = log(con, "open", T0 + timedelta(hours=2), {"reason": "c"})
     exited = log(con, "exited", T0 + timedelta(hours=3), {"reason": "b", "kind": "stop"})
-    d, entered_id, move_ids, reports = model._fold(con, "gc-1")
+    d, entered_id, move_ids, reports = model.fold(con, "gc-1")
     assert d == model.decisions_of(con, "gc-1")
     assert (entered_id, move_ids, reports) == (
         entered, (early, late), {"filled": filled, "open": opened, "exited": exited})
@@ -217,7 +217,7 @@ def test_the_plan_1_fold_is_gone():
     for name in ("Fill", "TradeState", "state_of", "open_trades", "stopped_closes",
                  "realised_r_on", "_states", "_moment", "_per_unit_r"):
         assert not hasattr(model, name), name
-    assert all(hasattr(model, n) for n in ("Plan", "_signed", "canonical_ticker"))
+    assert all(hasattr(model, n) for n in ("Plan", "signed", "canonical_ticker"))
 
 
 # --- model.record_problem, rule by rule --------------------------------------------------------

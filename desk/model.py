@@ -65,7 +65,7 @@ def canonical_ticker(typed: str) -> tuple[str, str | None]:
     return upper, None
 
 
-def _signed(side: str, a: float, b: float) -> float:
+def signed(side: str, a: float, b: float) -> float:
     """b - a for a long, a - b for a short. The only place the side flips a figure."""
     return (b - a) if side == "long" else (a - b)
 
@@ -152,7 +152,7 @@ def decisions_of(con: sqlite3.Connection, trade_id: str) -> Decisions:
     """What was decided on a trade. Each correction is read in place of the event it names,
     only its named fields changing; a correction of a correction is read at the original's
     place, and of two naming one event the later wins. A withdrawn report is read as absent."""
-    return _fold(con, trade_id)[0]
+    return fold(con, trade_id)[0]
 
 
 # The four reports, in one vocabulary: the `report` states, the stored event kinds, the fields
@@ -160,7 +160,7 @@ def decisions_of(con: sqlite3.Connection, trade_id: str) -> Decisions:
 REPORTS = ("filled", "cancelled", "open", "exited")
 
 
-def _fold(con: sqlite3.Connection, trade_id: str
+def fold(con: sqlite3.Connection, trade_id: str
           ) -> tuple[Decisions, int, tuple[int, ...], dict[str, int]]:
     """`decisions_of`, plus the ids a correction names: the `entered` event's, each move's in
     `moves` order, and the standing reports' keyed by `REPORTS`, each when present ("open": the
@@ -311,7 +311,7 @@ def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime 
                 "cannot be moved: stop_run, if that is the call refused, takes an `at` at or "
                 "after the fill; if the order really filled after the stop, the desk reads it "
                 "as cancelled at the stop.")
-    if _signed(side, e.price, fp) > 0:  # a fill at or beyond the stop is the broker's fact
+    if signed(side, e.price, fp) > 0:  # a fill at or beyond the stop is the broker's fact
         return (f"The fill of trade {shown(trade)} at {fp} is worse than its limit {e.price}: a "
                 f"limit "
                 "order fills at its price or better, so give the price it filled at.")
@@ -373,18 +373,18 @@ def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime 
             return (f"Trade {shown(trade)} has no {kind} in force at {exit_at}, so it cannot "
                     f"exit at "
                     "one; report the exit with kind=\"hand\" and its price.")
-        if kind == "stop" and x.price is None and _signed(side, fp, level) >= 0:
+        if kind == "stop" and x.price is None and signed(side, fp, level) >= 0:
             return (f"The position of trade {shown(trade)} opened at {fp}, at or beyond its stop "
                     f"{level}, "
                     "so the stop fired at once, at that price or worse; give the price it "
                     "filled at (price=…).")  # the level would read as a win
         price = level if x.price is None else x.price
-        if kind == "stop" and _signed(side, level, price) > 0:
+        if kind == "stop" and signed(side, level, price) > 0:
             return (f"The stop exit of trade {shown(trade)} at {price} is better than its stop "
                     f"{level}: a "
                     "stop fills at its price or worse, so give the price it filled at, or "
                     "kind=\"hand\" if it was exited by hand.")
-        if kind == "target" and _signed(side, level, price) < 0:
+        if kind == "target" and signed(side, level, price) < 0:
             return (f"The target exit of trade {shown(trade)} at {price} is worse than its target "
                     f"{level}: a target fills at its price or better, so give the price it "
                     "filled at, or kind=\"hand\".")

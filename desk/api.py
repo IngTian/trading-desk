@@ -16,7 +16,7 @@ from pathlib import Path
 
 from desk import checks, config, model, outcome, store, strategy
 from desk.errors import Refused, shown
-from desk.rules import Rules, _finite, market_keys
+from desk.rules import Rules, finite, market_keys
 from desk.stats import Row, Stats, summarise  # `stats` below shadows the module's name
 
 __all__ = ["Refused", "StrategyView", "save_strategy", "get_strategy", "list_strategies",
@@ -384,13 +384,13 @@ def _generate_trade_id(ticker: str, local_date: str, existing_ids) -> str:
 def _price(name: str, v, *, required: bool = True) -> None:
     if v is None and not required:
         return
-    if isinstance(v, bool) or not isinstance(v, int | float) or not _finite(v) or v <= 0:
+    if isinstance(v, bool) or not isinstance(v, int | float) or not finite(v) or v <= 0:
         raise Refused(f"{name} must be a number above zero, e.g. 101.5; got {shown(v)}.")
 
 
 def _size(v) -> None:
     # a size past a float's range would overflow the checks' arithmetic
-    if isinstance(v, bool) or not isinstance(v, int) or v <= 0 or not _finite(v):
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0 or not finite(v):
         raise Refused(f"size must be a whole number above zero, e.g. 10; got {shown(v)}.")
 
 
@@ -458,7 +458,7 @@ def _results_now(con, row: sqlite3.Row, d: model.Decisions, others: tuple[checks
     seq = next(i for i, t in enumerate(store.trades(con, run["id"])) if t["id"] == row["id"])
     # a damaged stored value reads not supplied (integrity reports it), as a checklist does
     market = {k: v for k, v in (d.market.items() if isinstance(d.market, dict) else ())
-              if isinstance(v, int | float) and not isinstance(v, bool) and _finite(v)}
+              if isinstance(v, int | float) and not isinstance(v, bool) and finite(v)}
     return tuple(checks.run_checks(_plan(row, d), rules, checks.Context(
         at=d.entry.at, seq=seq, currency=run["currency"], others=others, market=market)))
 
@@ -489,7 +489,7 @@ def _market(rules: Rules, market) -> dict[str, float]:
             raise Refused(f"market key {shown(k)} is not one this version's rules read; " + (
                 f"they read {', '.join(keys)}." if keys
                 else "this version's rules read no market values, so leave market out."))
-        if isinstance(v, bool) or not isinstance(v, int | float) or not _finite(v):
+        if isinstance(v, bool) or not isinstance(v, int | float) or not finite(v):
             raise Refused(f"market[{shown(k)}] must be a finite number, e.g. 28.5; got {shown(v)}.")
     return {k: float(v) for k, v in market.items()}
 
@@ -672,7 +672,7 @@ def _decision(con, trade: str, reason) -> sqlite3.Row:
 
 def _not_void(con, trade: str) -> tuple[model.Decisions, int, tuple[int, ...], dict[str, int]]:
     """The trade's fold; call it under the write lock, since what it reads decides the write."""
-    folded = model._fold(con, trade)
+    folded = model.fold(con, trade)
     if folded[0].voided:
         raise Refused(f"Trade {shown(trade)} is void, so it takes no further decision; if it "
                       f"should "
