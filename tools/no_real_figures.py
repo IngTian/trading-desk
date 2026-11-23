@@ -20,9 +20,8 @@ claim: a money figure within two lines of a phrase like "on the live book", "thi
 because a comment only bothers to cite the live book when it is reporting from it.
 
 WHAT IT DELIBERATELY DOES NOT FLAG:
-  * bet names and trade ids. The author, 2026-09-08: "i think they are fine tbh. not very
-    sensitive. trading history is actually fine." Amounts reconstruct a balance sheet; a bet
-    called `semis-and-big-techs` does not.
+  * bet names and trade ids: amounts reconstruct a balance sheet; a bet called
+    `semis-and-big-techs` does not.
   * figures in a worked example ("a $60 loss on a $1,000 position"), which is what the real
     ones were replaced BY and the reason the comments still teach anything.
 
@@ -57,9 +56,8 @@ CLAIMS_REAL = re.compile(
     r"|\b(?:real|actual)\s+(?:numbers?|figures?|amounts?)\b"
     # A TRADE ID NAMING A REAL HOLDING IS A CLAIM. Every real figure that has leaked into
     # this repo sat beside one -- a comment only names a specific leg when it is reporting
-    # from the record. Found because the identity half of this file flagged a sentence the
-    # figure half passed: "His INTC leg had realised about -US$4,654" matches no phrase above,
-    # because it names the leg rather than the book.
+    # from the record. A sentence such as "the ACME leg had realised about -US$1,000" (figures
+    # invented here) matches no phrase above, because it names the leg rather than the book.
     #
     # THE FIXTURE'S TICKERS ARE EXCLUDED BY NAME, and that exclusion is the whole difficulty:
     # the 0.4 fixture was full of trade ids like 2026-05-04-usdco sitting next to prices, all of
@@ -76,20 +74,15 @@ SKIP_FILES = {"tools/no_real_figures.py"}
 
 # ---------------------------------------------------------------------------- #
 # The owner's identity, which is a different leak from a figure and needs a
-# different rule: an exact match, not a heuristic.
-#
-# ADDED BECAUSE I REGRESSED IT. A sweep on 2026-09-28 replaced 236 occurrences of the
-# owner's name with "the author" and 103 gendered pronouns with they/them. Two days later
-# three new names were written into comments during unrelated work, and the only reason
-# they were caught is that someone looked again by hand before publishing. That is the
-# argument for every check in this file: a cleanup is a memory, a check is a property.
+# different rule: an exact match, not a heuristic. A cleanup is a memory; a check is a
+# property, so names written back in during unrelated work are caught.
 # ---------------------------------------------------------------------------- #
 IDENTITY = {
     "the owner's name": re.compile(r"\bZeying\b|\bIng\b(?!Tian)|\bING\b"),
     # A local path gives away a username and the layout of someone's disk.
     "a personal path": re.compile(r"/Users/[a-z]|/home/[a-z]|\bdevpro\b"),
     # "the author" is anonymous, so a pronoun for them asserts something unknown. They/them
-    # is the house style; see the sweep's commit message.
+    # is the house style.
     "a gendered pronoun": re.compile(r"\b(?:he|his|him|He|His|Him)\b"),
     # Naming the broker identifies where the account is, and no argument here needs it.
     "the broker's name": re.compile(r"[Ww]ealthsimple"),

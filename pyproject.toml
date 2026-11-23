@@ -3,10 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-# `trading-desk`, matching the repository and the daylogs pattern: repo `daylogs`,
-# package `daylogs`, command `day`. It was `trades`, which matched neither the repo
-# nor the command, so one tool had three names. Checked free on PyPI 2026-09-30,
-# along with `tradingdesk` and `trade-desk`.
+# One name for the repository, the package and the command.
 name = "trading-desk"
 version = "0.11.0"
 description = "An MCP server that keeps your trading record: trades under versioned strategies, checked against their rules, with outcomes and stats"
@@ -43,12 +40,8 @@ Issues = "https://github.com/IngTian/trading-desk/issues"
 [project.scripts]
 trading-desk = "desk.cli:main"
 
-# [dependency-groups] AND NOT [project.optional-dependencies], which is where this
-# diverges from daylogs deliberately. `uv sync` installs dependency groups BY DEFAULT
-# and extras only with --extra, so declaring the dev tools as an extra meant a plain
-# `uv sync` produced a venv with no pytest in it -- which is exactly what happened the
-# first time this project was made installable. CI therefore uses `uv sync` rather than
-# daylogs' `pip install -e '.[dev]'`; one declaration that cannot drift from a second.
+# A dependency group, not an extra: `uv sync` installs groups by default and extras only with
+# --extra, so a plain `uv sync`, as CI runs it, has pytest.
 [dependency-groups]
 dev = ["pytest>=8.0", "ruff>=0.6"]
 
@@ -56,12 +49,8 @@ dev = ["pytest>=8.0", "ruff>=0.6"]
 [tool.setuptools.packages.find]
 include = ["desk*"]
 
-# `schema.sql`: the schema IS the tool, and it used to live in book/ which was not a
-# package. An installed copy resolved it to `site-packages/book/schema.sql`, which does
-# not exist -- so `pip install trading-desk` produced something that could not create a
-# book. Proven by installing the wheel in a clean venv. Asserted by CI against
-# a real built wheel, because an editable install reads the source tree and so cannot
-# catch a missing declaration.
+# The files the desk reads at run time. CI checks them in a real built wheel: an editable
+# install reads the source tree, so it cannot catch a missing entry here.
 [tool.setuptools.package-data]
 "desk" = ["schema.sql", "strategy.example.md", "instructions.md"]
 

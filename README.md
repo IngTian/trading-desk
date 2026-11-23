@@ -86,7 +86,7 @@ sides               kept  the plan's side long is listed: long
 max_open_trades     kept  0 trades open; this would make 1 against a limit of 2
 daily_loss_limit    kept  the realised R of 2026-03-02 is +0.00 against a floor of -2 R
 cooldown_after_loss kept  no loss on ACME before this trade
-ema_50_1h           kept  close_1h 100.1 (supplied) is above ema_50_1h 99.4 (supplied)
+ema_50_1h           kept  close_1h 100.1 is above ema_50_1h 99.4
 ```
 
 A breach never refuses a trade: these results are kept with it, and `get_trade` works them out

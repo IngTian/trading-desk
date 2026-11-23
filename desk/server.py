@@ -27,7 +27,7 @@ from mcp.server.lowlevel import Server
 from mcp.server.stdio import stdio_server
 from mcp.shared.exceptions import MCPError
 
-from desk import api, config, store
+from desk import api, config, model, store
 from desk.errors import Refused, shown
 
 
@@ -95,7 +95,7 @@ TOOLS: dict[str, Tool] = {
         "mode": _p("string", "live: real time; replay: re-running past history.",
                    enum=["live", "replay"]),
         "currency": _p("string", "The one currency every trade on the run is in.",
-                       enum=["CAD", "USD"]),
+                       enum=list(config.CURRENCIES)),
         "tags": _p("array", "Free labels for the run, kept verbatim and never interpreted, e.g. "
                    "[\"breakout\"].", items={"type": "string"}),
         "version": _VERSION,
@@ -198,7 +198,7 @@ TOOLS: dict[str, Tool] = {
         "trade": _TRADE,
         "state": _p("string", "filled: the limit order filled; cancelled: it never will; open: "
                     "the position is still open; exited: the position is out.",
-                    enum=["filled", "cancelled", "open", "exited"]),
+                    enum=list(model.REPORTS)),
         "at": _p("string", "The moment the trade was in that state: a UTC ISO-8601 time with "
                  "its offset, e.g. 2026-03-02T14:30:00Z."),
         "reason": _p("string", "What the report rests on: the user's words when they gave them; "
@@ -207,12 +207,12 @@ TOOLS: dict[str, Tool] = {
         "price": _p("number", "filled: the fill price (left out: the limit); exited: the exit "
                     "price, required for a hand exit."),
         "kind": _p("string", "exited only: stop (the stop filled), target (the target filled) "
-                   "or hand (exited by hand; left out: hand).", enum=["hand", "stop", "target"]),
+                   "or hand (exited by hand; left out: hand).", enum=list(model.EXIT_KINDS)),
         "why": _p("string", "cancelled only, and required there: not filled (the market never "
                   "reached the limit, or the order expired), pulled (withdrawn) or run "
                   "stopped (the run's stop cancelled it; only on a stopped run, dated at its "
                   "stop).",
-                  enum=["not filled", "pulled", "run stopped"]),
+                  enum=list(model.WHYS)),
     }, ("trade", "state", "at", "reason")),
     "correct_trade": Tool(api.correct_trade, (
         "Correct a recorded decision: the correction is read in place of the original, which "
@@ -239,7 +239,7 @@ TOOLS: dict[str, Tool] = {
         "reason": _p("string", "Why it is withdrawn, exactly as the user wrote it."),
         "report": _p("string", "The one standing report to withdraw instead of the trade; "
                      "open: the latest open report.",
-                     enum=["filled", "cancelled", "open", "exited"]),
+                     enum=list(model.REPORTS)),
     }, ("trade", "reason")),
     "get_trade": Tool(api.get_trade, (
         "One trade, read now. `decisions`: the entry, its moves and its reports, as "

@@ -48,12 +48,10 @@ _CONTINUOUS = re.compile(r"^(?:[A-Z0-9_]+:)?([A-Z0-9]+?)(?:\d+!|=F)$")
 def canonical_ticker(typed: str) -> tuple[str, str | None]:
     """(ticker, instrument it implies): "GC1!" -> ("GC", "future"), "acme" -> ("ACME", None).
 
-    One trade, one ticker. Typing GC once and GC1! the next time made them two tickers, so a
-    stop-out on one never cooled the other down, and an id built from "GC1!" carried a "!"
-    that zsh expands. And the form itself says it is a future, which is the fact that a
-    forgotten --instrument flag used to lose: GC1! checked as a stock worth 1 per point
-    reported 100x too little risk and passed a futures ban. A bare root ("GC") says nothing,
-    so it is taken as typed.
+    One contract, one ticker: GC and GC1! compare equal, or a stop-out on one would never cool
+    the other down, and an id built from "GC1!" would carry a "!" that zsh expands. The
+    continuous form also says the trade is a future, so it is never checked as a stock worth 1
+    per point, 100x too little risk. A bare root ("GC") says nothing, so it is taken as typed.
 
     Here rather than in the api because every comparison of tickers needs it: the api on what
     was typed, and cooldown_after_loss's same-ticker scope on the tickers it compares.
@@ -156,6 +154,9 @@ def decisions_of(con: sqlite3.Connection, trade_id: str) -> Decisions:
 # The four reports, in one vocabulary: the `report` states, the stored event kinds, the fields
 # of `Decisions`, and what `correct_trade` and `void_trade` take.
 REPORTS = ("filled", "cancelled", "open", "exited")
+# An exit's kinds and a cancellation's whys, read by the validator, the api and the server alike.
+EXIT_KINDS = ("hand", "stop", "target")
+WHYS = ("not filled", "pulled", "run stopped")
 
 
 def fold(con: sqlite3.Connection, trade_id: str
@@ -290,13 +291,11 @@ def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime 
     # 6-10: the fill
     if e.type == "market" and (f or c):
         return (f"Trade {shown(trade)} was a market entry, filled when it was entered; only a "
-                f"limit "
-                "order has a fill or a cancellation to report. To fix a market entry's price, "
-                "correct the entry (correct_trade with fields {\"entry\": …}).")
+                "limit order has a fill or a cancellation to report. To fix a market entry's "
+                "price, correct the entry (correct_trade with fields {\"entry\": …}).")
     if f and c:
         return (f"The order of trade {shown(trade)} cannot both fill (at {f.at.isoformat()}) and "
-                f"be "
-                f"cancelled (at {c.at.isoformat()}); withdraw the wrong report with "
+                f"be cancelled (at {c.at.isoformat()}); withdraw the wrong report with "
                 "void_trade with report \"filled\" or \"cancelled\".")
     if f and f.at < e.at:
         return (f"Trade {shown(trade)} was entered at {e.at.isoformat()}; its fill at "
@@ -310,13 +309,12 @@ def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime 
                 "as cancelled at the stop.")
     if signed(side, e.price, fp) > 0:  # a fill at or beyond the stop is the broker's fact
         return (f"The fill of trade {shown(trade)} at {fp} is worse than its limit {e.price}: a "
-                f"limit "
-                "order fills at its price or better, so give the price it filled at.")
+                "limit order fills at its price or better, so give the price it filled at.")
     # 11-14: the vocabulary, before any rule below reads a kind
-    if x is not None and x.kind not in ("hand", "stop", "target"):
+    if x is not None and x.kind not in EXIT_KINDS:
         return (f"The exit of trade {shown(trade)} has kind {shown(x.kind)}; use "
                 "\"hand\", \"stop\" or \"target\".")
-    if c and c.why not in ("not filled", "pulled", "run stopped"):
+    if c and c.why not in WHYS:
         return (f"The cancellation of trade {shown(trade)} has why {shown(c.why)}; use \"not "
                 f"filled\", "
                 "\"pulled\" or \"run stopped\".")
@@ -336,25 +334,22 @@ def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime 
                 f"{c.at.isoformat()} must come after that, so give one of them its real `at`.")
     if c and stopped is not None and c.at > stopped:
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, after "
-                f"its run "
-                f"stopped at {stopped.isoformat()}, which had already cancelled it: give the "
-                "cancellation its real `at` (at or before the stop), or withdraw it "
+                f"its run stopped at {stopped.isoformat()}, which had already cancelled it: give "
+                "the cancellation its real `at` (at or before the stop), or withdraw it "
                 "(void_trade with report \"cancelled\") and the run stop's cancellation "
                 "stands. A run stop, once recorded, cannot be moved: stop_run, if that is the "
                 "call refused, takes an `at` at or after the cancellation.")
     if c and x is not None:
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, so it "
-                f"has no "
-                f"position to exit (exited at {exit_at}); withdraw the wrong one with "
+                f"has no position to exit (exited at {exit_at}); withdraw the wrong one with "
                 "void_trade with report \"cancelled\" or \"exited\"; to pull a limit you exited "
                 "by mistake, withdraw the exit (void_trade with report \"exited\"), then report "
                 "the cancellation.")
     # 18-23: the exit
     if x is not None and not position:
         return (f"The exit of trade {shown(trade)} at {exit_at} needs a position, and its limit "
-                f"order has "
-                "no fill reported: report the fill (report(trade, state=\"filled\", …)) before the "
-                "exit, and withdraw the exit before the fill.")
+                "order has no fill reported: report the fill (report(trade, state=\"filled\", "
+                "…)) before the exit, and withdraw the exit before the fill.")
     if x is not None and f and x.at < f.at:
         return (f"Trade {shown(trade)} exited at {exit_at}, before its fill at "
                 f"{f.at.isoformat()}; a fill comes at or before the exit, so give one of them "
@@ -368,8 +363,7 @@ def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime 
         level = in_force(d, x.at)[0 if kind == "stop" else 1]
         if level is None:
             return (f"Trade {shown(trade)} has no {kind} in force at {exit_at}, so it cannot "
-                    f"exit at "
-                    "one; report the exit with kind=\"hand\" and its price.")
+                    "exit at one; report the exit with kind=\"hand\" and its price.")
         if kind == "stop" and x.price is None and signed(side, fp, level) >= 0:
             return (f"The position of trade {shown(trade)} opened at {fp}, at or beyond its stop "
                     f"{level}, "
@@ -388,20 +382,17 @@ def record_problem(trade: str, d: Decisions, *, side: str, started: dt.datetime 
     # 24-27: an open report
     if h and c:
         return (f"The order of trade {shown(trade)} was cancelled at {c.at.isoformat()}, so it "
-                f"has no "
-                "position to report open; if it had in fact filled, withdraw the cancellation "
-                "(void_trade with report \"cancelled\") and report the fill first.")
+                "has no position to report open; if it had in fact filled, withdraw the "
+                "cancellation (void_trade with report \"cancelled\") and report the fill first.")
     if h and not position:  # pending by the record, as in rule 9
         return (f"The limit order of trade {shown(trade)} has no fill reported, so there is no "
-                f"position to "
-                "report open: report the fill first (report(trade, state=\"filled\", at=…, "
-                "reason=…)).")
+                "position to report open: report the fill first (report(trade, "
+                "state=\"filled\", at=…, reason=…)).")
     opened = e.at if f is None else f.at
     if h and h1.at < opened:  # the earliest, so an older open report is bound to it too
         return (f"The position of trade {shown(trade)} opened at {opened.isoformat()}, so it "
-                f"cannot be "
-                f"reported open at {h1.at.isoformat()}, before that; give one of them its real "
-                "`at`.")
+                f"cannot be reported open at {h1.at.isoformat()}, before that; give one of "
+                "them its real `at`.")
     if h and x is not None and h.at >= x.at:  # a priceless exit too: the author wanted out
         return (f"Trade {shown(trade)} exited at {exit_at} and was reported open at "
                 f"{h.at.isoformat()}; every open report comes before the exit, so give one of "

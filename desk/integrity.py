@@ -1,4 +1,4 @@
-"""Integrity checker for the v5 log.
+"""Integrity checker for desk.db's log.
 
 Each invariant is a named check returning failure lines (empty when healthy). The log is
 append-only, so a damaged row cannot be repaired in place; these checks find what the API
@@ -58,7 +58,7 @@ def _run_started_stopped(con: sqlite3.Connection) -> list[str]:
     """Every run has exactly one `run_started` and at most one `run_stopped`, not before it."""
     failures = []
     for r in store.runs(con):
-        evs = store.events(con, run_id=r["id"])
+        evs = store.run_events(con, r["id"])
         at = {k: [e["at"] for e in evs if e["kind"] == k] for k in ("run_started", "run_stopped")}
         if len(at["run_started"]) != 1:
             failures.append(f"run {r['id']}: has {len(at['run_started'])} run_started events, "
@@ -85,7 +85,7 @@ def _unfoldable(own: list[sqlite3.Row]) -> bool:
 
 def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime], ...]:
     """The aware `at`s of the run's run_started events, and of its run_stopped events."""
-    run = store.events(con, run_id=run_id)
+    run = store.run_events(con, run_id)
     return tuple([s for e in run if e["kind"] == kind and (s := _aware(e["at"]))]
                  for kind in ("run_started", "run_stopped"))
 

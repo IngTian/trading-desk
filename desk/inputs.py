@@ -10,7 +10,7 @@ import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 
-from desk import config
+from desk import config, model
 from desk.errors import Refused, shown
 from desk.rules import Rules, finite, market_keys
 
@@ -119,6 +119,22 @@ def currency(v) -> None:
     if v not in config.CURRENCIES:
         raise Refused(f"currency {shown(v)} is not known; use one of "
                       f"{', '.join(config.CURRENCIES)}.")
+
+
+def kind(v) -> str:
+    if v not in model.EXIT_KINDS:
+        raise Refused(f"kind {shown(v)} is not known; use \"hand\" (exited by hand), \"stop\" (the "
+                      "stop filled) or \"target\" (the target filled), or leave it out for "
+                      "\"hand\".")
+    return v
+
+
+def why(v) -> str:
+    if v not in model.WHYS:
+        raise Refused(f"why {shown(v)} is not known; use \"not filled\" (the market never reached "
+                      "the limit, or the order expired unfilled), \"pulled\" (the author withdrew "
+                      "it) or \"run stopped\" (the run's stop cancelled it; dated at the stop).")
+    return v
 
 
 def screenshot(text: str) -> tuple[dict, bytes | None, str | None]:

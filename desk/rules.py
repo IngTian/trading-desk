@@ -42,9 +42,7 @@ class Rules:
 class Indicator:
     rule: str
     label: str                  # the result's name
-    keys: tuple[str, ...]       # the market keys it reads
-    timeframe: str
-    settings: dict              # defaults filled
+    keys: tuple[str, ...]       # the market keys it reads, defaults filled in their names
     compare: dict               # as written; for ema/sma {"long": "above", ...}
 
 
@@ -205,8 +203,7 @@ def _indicator(rule: str, path: str, table, timeframes: tuple[str, ...]) -> None
                 _whole(f"{path}.{key}", table[key], _DEFAULTS[rule][key], MAX_SETTING)
     if "output" in table and table["output"] not in _OUTPUTS:
         raise _no(f"{path}.output", f"{shown(table['output'])} is not an output; use histogram, "
-                                    f"line "
-                  "or signal", 'output = "histogram"')
+                  "line or signal", 'output = "histogram"')
     if table.get("timeframe", timeframes[0]) not in timeframes:
         raise _no(f"{path}.timeframe", f"{table['timeframe']} is not one of this strategy's "
                   f"timeframes ({', '.join(timeframes)})", f'timeframe = "{timeframes[0]}"')
@@ -353,7 +350,7 @@ def indicators(values: dict, timeframes: tuple[str, ...]) -> tuple[Indicator, ..
             else:
                 keys = (f"{'atr' if rule == 'stop_atr' else rule}_{n}_{tf}",)
             label = f"stop_atr_{n}_{tf}" if rule == "stop_atr" else keys[0]
-            found.append(Indicator(rule, label, keys, tf, settings, compare))
+            found.append(Indicator(rule, label, keys, compare))
     return tuple(found)
 
 

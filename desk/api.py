@@ -42,9 +42,8 @@ def save_strategy(con: sqlite3.Connection, id: str, markdown: str, *,
         if rows:
             if if_current is None:
                 raise Refused(f"Strategy {shown(id)} already exists; pass if_current (the "
-                              f"current_hash "
-                              "from get_strategy) so a save cannot overwrite someone else's "
-                              "change.")
+                              "current_hash from get_strategy) so a save cannot overwrite "
+                              "someone else's change.")
             if if_current != rows[-1]["text_hash"]:
                 raise Refused(f"Strategy {shown(id)} was changed since you read it; get it again, "
                               "redo your edit on that, and save.")
@@ -90,8 +89,7 @@ def start_run(con: sqlite3.Connection, strategy: str, *, mode: str, currency=Non
         rows = store.versions(con, strategy)
         if not rows:
             raise Refused(f"There is no strategy {shown(strategy)}; save it first, or "
-                          f"list_strategies "
-                          "to see the ones that exist.")
+                          "list_strategies to see the ones that exist.")
         v = rows[-1]["version"] if version is None else version
         if v not in {r["version"] for r in rows}:
             raise Refused(f"Strategy {shown(strategy)} has no version {v}; it has versions 1 to "
@@ -121,8 +119,7 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
             raise Refused(f"Run {shown(run)} is already stopped; start a new run instead.")
         if stop < view.started:
             raise Refused(f"Run {shown(run)} started at {view.started.isoformat()}; its stop "
-                          f"cannot "
-                          "be before that, so give a later `at`.")
+                          "cannot be before that, so give a later `at`.")
         standing = [(t, d) for t in store.trades(con, run)
                     if not (d := model.decisions_of(con, t["id"])).voided]
         store.append(con, kind="run_stopped", run_id=run, at=inputs.at(stop), payload={},
@@ -130,10 +127,8 @@ def stop_run(con: sqlite3.Connection, run: str, *, at: datetime | None = None,
         for t, _ in standing:
             _consistent(con, t)
     cancelled = [t["id"] for t, d in standing   # read after the transaction
-                 if d.entry.type == "limit"
-                 and not (d.exited is not None and d.exited.at < stop)
-                 and (o := views.outcome_of(con, t, d)).fill is None
-                 and o.status == "cancelled" and o.cancelled_why == "run stopped"]
+                 if (o := views.outcome_of(con, t, d)).status == "cancelled"
+                 and o.cancelled_why == "run stopped"]
     return StoppedRun(**asdict(views.run_view(con, row)), cancelled=tuple(cancelled))
 
 
@@ -161,9 +156,6 @@ def _generate_trade_id(ticker: str, local_date: str, existing_ids) -> str:
     return id
 
 
-# ------------------------------------------------- the checks, as of a trade's `at` ---
-
-
 def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_type: str,
           entry: float, size: int, reasons: str, stop: float | None = None,
           target: float | None = None, screenshots=(), at: datetime | None = None,
@@ -182,12 +174,10 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     when = inputs.decision_time(row["mode"], at, now, "enter a trade")
     if side not in ("long", "short"):
         raise Refused(f"side {shown(side)} is not known; use \"long\" (profit if the price rises) "
-                      f"or "
-                      "\"short\" (profit if it falls).")
+                      "or \"short\" (profit if it falls).")
     if entry_type not in ("market", "limit"):
         raise Refused(f"entry_type {shown(entry_type)} is not known; use \"market\" (fill at once "
-                      f"at the "
-                      "going price) or \"limit\" (fill only at your price or better).")
+                      "at the going price) or \"limit\" (fill only at your price or better).")
     symbol, implied = model.canonical_ticker(inputs.text("ticker", ticker))
     if not symbol:
         raise Refused("ticker is empty; give the symbol, e.g. \"ACME\" or \"GC1!\".")
@@ -302,8 +292,7 @@ def _not_void(con, trade: str) -> tuple[model.Decisions, int, tuple[int, ...], d
     folded = model.fold(con, trade)
     if folded[0].voided:
         raise Refused(f"Trade {shown(trade)} is void, so it takes no further decision; if it "
-                      f"should "
-                      "count, enter it again with its original `at`.")
+                      "should count, enter it again with its original `at`.")
     return folded
 
 
@@ -352,23 +341,6 @@ def move_order(con: sqlite3.Connection, trade: str, *, reason: str, stop: float 
 _TAKES = {"filled": ("price",), "cancelled": ("why",), "open": (), "exited": ("price", "kind")}
 
 
-def _kind(kind) -> str:
-    if kind not in ("hand", "stop", "target"):
-        raise Refused(f"kind {shown(kind)} is not known; use \"hand\" (exited by hand), \"stop\" "
-                      f"(the stop "
-                      "filled) or \"target\" (the target filled), or leave it out for \"hand\".")
-    return kind
-
-
-def _why(why) -> str:
-    if why not in ("not filled", "pulled", "run stopped"):
-        raise Refused(f"why {shown(why)} is not known; use \"not filled\" (the market never "
-                      f"reached the "
-                      "limit, or the order expired unfilled), \"pulled\" (the author withdrew "
-                      "it) or \"run stopped\" (the run's stop cancelled it; dated at the stop).")
-    return why
-
-
 def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, reason: str,
            price: float | None = None, kind: str | None = None, why: str | None = None,
            now: datetime | None = None) -> TradeView:
@@ -382,9 +354,9 @@ def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, rea
     now = inputs.aware(now)
     if state not in model.REPORTS:  # a tuple: a JSON list or dict compares, never hashes
         raise Refused(f"state {shown(state)} is not known; use \"filled\" (the limit order "
-                      f"filled), "
-                      "\"cancelled\" (it never will), \"open\" (the position is still open) or "
-                      "\"exited\" (the position is out, at its stop, at its target or by hand).")
+                      "filled), \"cancelled\" (it never will), \"open\" (the position is still "
+                      "open) or \"exited\" (the position is out, at its stop, at its target or "
+                      "by hand).")
     if at is None:
         raise Refused("A report states the trade's state as of `at`, so it needs `at`, in live as "
                       "in replay: give the moment the order or the position was in that state, "
@@ -397,9 +369,9 @@ def report(con: sqlite3.Connection, trade: str, *, state: str, at: datetime, rea
                           f"\"filled\" and "
                           "\"exited\", kind with \"exited\", why with \"cancelled\".")
     if state == "cancelled":
-        _why(why)
+        inputs.why(why)
     if state == "exited":
-        kind = _kind("hand" if kind is None else kind)
+        kind = inputs.kind("hand" if kind is None else kind)
         if kind == "hand" and price is None:
             raise Refused("A hand exit is reported with the price it filled at; give price=….")
     inputs.price("price", price, required=False)
@@ -471,15 +443,14 @@ def correct_trade(con: sqlite3.Connection, trade: str, *, fields: dict, reason: 
     for name in ("stop", "target", "price"):
         inputs.price(name, fields.get(name), required=False)
     if "kind" in fields:
-        _kind(fields["kind"])
+        inputs.kind(fields["kind"])
     if "why" in fields:
-        _why(fields["why"])
+        inputs.why(fields["why"])
     if "size" in fields:
         inputs.size(fields["size"])
     if "point_value" in fields and row["instrument"] != "future":
         raise Refused(f"Trade {shown(trade)} is a {row['instrument']}, whose point value is 1; "
-                      f"only a "
-                      "future's point value can be corrected.")
+                      "only a future's point value can be corrected.")
     when = inputs.aware(fields["at"], "at") if "at" in fields else None
     if when is not None:
         if which is not None:
@@ -535,8 +506,7 @@ def void_trade(con: sqlite3.Connection, trade: str, *, reason: str, report: str 
         reports = _not_void(con, trade)[3]
         if report is not None and report not in reports:
             raise Refused(f"Trade {shown(trade)} has no {_NOUNS[report]} to withdraw; get_trade "
-                          f"shows "
-                          "its reports.")
+                          "shows its reports.")
         corrects = None if report is None else reports[report]
         store.append(con, kind="voided", run_id=row["run_id"], trade_id=trade, at=inputs.at(now),
                      recorded_at=inputs.at(now), corrects=corrects,

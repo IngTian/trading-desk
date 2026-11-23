@@ -164,11 +164,9 @@ def test_two_ema_checks_are_written_as_an_array():
     assert rules.market_keys(same, TF) == ("ema_20_15m", "close_15m", "ema_50_15m")
 
 
-def test_defaults_are_filled_in_the_indicator_settings():
+def test_defaults_are_filled_in_the_indicator_keys():
     (m,) = rules.indicators({"macd": {"at_least": 0}}, TF)
-    assert (m.settings, m.timeframe) == (
-        {"fast": 12, "slow": 26, "signal": 9, "output": "histogram"}, "15m")
-    assert m.compare == {"at_least": 0}
+    assert (m.keys, m.compare) == (("macd_hist_12_26_9_15m",), {"at_least": 0})
 
 
 def test_a_huge_whole_number_is_not_a_raw_error():

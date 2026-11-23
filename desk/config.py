@@ -1,9 +1,5 @@
 """Where the desk's data lives. The repo is the tool; the record is not in it.
 
-The author, 2026-09-07: "data is data and code is code. ideally i think it's better to have
-the data and code separated. so this repo is pure tool instead of tool combined with
-data."
-
 THE DEFAULT IS A REAL PLACE, so a fresh install needs no configuration at all. Everything
 lives under one data root:
 
@@ -82,23 +78,14 @@ def refuse_if_in_icloud(path: Path) -> None:
                       f"{path.parent} in Finder to download it, then call again.")
 
 
-# The currencies a trade may be in.
+# The currencies a run may trade in.
 CURRENCIES = ("CAD", "USD")
 
 
 def schema_sql() -> Path:
-    """The store's schema. Package-relative.
-
-    PACKAGE-RELATIVE, NOT REPO-RELATIVE, and that was a real defect rather than a tidy-up.
-    It returned `REPO / "book" / "schema.sql"` where REPO is this file's grandparent -- which
-    is the checkout in development and `site-packages/` in an installed wheel. `book/` was
-    not a package, so an installed copy resolved to `site-packages/book/schema.sql`, which
-    does not exist: `pip install` produced a tool that could not create a book. Proven by
-    installing the wheel in a clean venv before the move.
-
-    A plain path works for both cases because a wheel is unpacked into site-packages, so
-    `desk/schema.sql` is a real file on disk either way -- no importlib.resources needed.
-    """
+    """The store's schema, beside this file: a wheel unpacks desk/ into site-packages, so it is a
+    real file in a checkout and an installed copy alike (only a built wheel's smoke test catches
+    a path that resolves outside the package)."""
     return Path(__file__).resolve().parent / "schema.sql"
 
 

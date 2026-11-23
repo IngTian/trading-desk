@@ -44,9 +44,8 @@ def _probe(db: Path) -> None:
     holding `recorded_at`, `kind` and `payload`, without writing to it.
 
     Opened `immutable=1` as well as read-only: a plain read-only open of a WAL-mode file needs
-    its -shm, and SQLite may create one. Immutable takes no locks and writes nothing, which is
-    the point -- the likeliest wrong file is the frozen legacy book, and opening it for
-    writing used to flip it to WAL before the first query failed.
+    its -shm, and SQLite may create one. Immutable takes no locks and writes nothing, so a wrong
+    file (the 0.4 book above all) is never changed by being probed.
     """
     try:
         con = sqlite3.connect(f"{db.as_uri()}?mode=ro&immutable=1", uri=True)
@@ -188,6 +187,13 @@ def trade(con, id: str) -> sqlite3.Row | None:
 def trades(con, run_id: str | None = None) -> list[sqlite3.Row]:
     where, args = ("WHERE run_id = ?", (run_id,)) if run_id is not None else ("", ())
     return con.execute(f"SELECT * FROM trades {where} ORDER BY rowid", args).fetchall()
+
+
+def run_events(con, run_id: str) -> list[sqlite3.Row]:
+    """The run's own events, its run_started and run_stopped, by id: not its trades' events,
+    which a run's start and stop are read past once per trade read."""
+    return con.execute("SELECT * FROM events WHERE run_id = ? AND kind IN ('run_started',"
+                       " 'run_stopped') ORDER BY id", (run_id,)).fetchall()
 
 
 def events(con, *, run_id: str | None = None, trade_id: str | None = None) -> list[sqlite3.Row]:
