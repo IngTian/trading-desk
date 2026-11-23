@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, config, model, server, store
+from desk import api, config, model, server, store, views
 
 NOW = datetime(2026, 3, 2, 15, 5, tzinfo=UTC)    # a Monday
 START = NOW - timedelta(days=30)
@@ -236,8 +236,8 @@ def test_an_entry_on_a_version_with_no_record_rule_reads_no_other_trade(con, mon
     enter(con, replay)
 
     def no(*a, **k):
-        raise AssertionError("_others was called")
-    monkeypatch.setattr(api, "_others", no)
+        raise AssertionError("views.others was called")
+    monkeypatch.setattr(views, "others", no)
     b = enter(con, replay)
     assert [r.name for r in api.get_trade(con, b.id, now=NOW).checks_now] == ["min_reward_risk"]
 

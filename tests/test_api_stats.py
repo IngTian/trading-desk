@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, store
+from desk import api, store, views
 
 NOW = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
 START = NOW - timedelta(days=30)
@@ -132,8 +132,8 @@ def test_mode_and_tags_narrow_exactly(con, monkeypatch):
                                   {"tags": ["paper"], "trades": (ids[live],)}]
 
     read = []    # narrowing comes before any trade is read
-    real = api._trade_view
-    monkeypatch.setattr(api, "_trade_view", lambda c, row, now: read.append(row["id"]) or real(
+    real = views.trade_view
+    monkeypatch.setattr(views, "trade_view", lambda c, row, now: read.append(row["id"]) or real(
         c, row, now))
     api.stats(con, strategy="s", mode="replay", tags=["Paper"], now=NOW)
     assert read == [ids[cap]]
@@ -166,8 +166,8 @@ def test_conforming_only_reads_the_results_now_and_names_what_it_left_out(con, m
     y = enter(con, r, at=h(3), target=None)       # unknown reward to risk, and a second open
 
     built = []
-    real = api._other
-    monkeypatch.setattr(api, "_other",
+    real = views.other_of
+    monkeypatch.setattr(views, "other_of",
                         lambda *a, **kw: built.append(a[0]["id"]) or real(*a, **kw))
     s = api.stats(con, run=r, conforming_only=True, now=NOW)
     assert len(built) == 5     # each run's Others once, never once per pair of trades
