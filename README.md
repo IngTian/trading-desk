@@ -187,7 +187,6 @@ listed under [Versions](https://github.com/IngTian/trading-desk/blob/main/docs/v
 
 - It reads a desk.db at schema version 6. One an earlier version wrote is refused untouched: move
   it aside and restart the MCP server, which creates a new one, since there is no migration.
-- A config.toml that sets `db` is refused, naming the step to take.
 
 ## Development
 
