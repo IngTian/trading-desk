@@ -160,7 +160,8 @@ def test_trading_hours_in_the_system_timezone(monkeypatch):
 
     for when, ok in ((at(15, 0), True), (at(16, 30), False), (at(14, 44, 59), False),
                      (at(15, 0, d=7), False), (at(14, 45), True)):          # at start: inside
-        assert checks.run_checks(P, rules.Rules(hours, ("15m",)), Context(at=when))[0].ok is ok
+        ctx = Context(at=when, currency="USD")
+        assert checks.run_checks(P, rules.Rules(hours, ("15m",)), ctx)[0].ok is ok
 
 
 def test_indicators_use_the_agents_value():

@@ -47,8 +47,8 @@ class Other:
 @dataclass(frozen=True)
 class Context:
     at: dt.datetime                 # the decision's time, never the clock
+    currency: str                   # the run's
     seq: int | None = None          # this trade's place; None: not recorded yet (after every other)
-    currency: str | None = None     # the run's
     others: tuple[Other, ...] = ()
     market: Mapping[str, float] = field(default_factory=dict)      # the agent's
 
@@ -154,9 +154,6 @@ def _max_risk_per_trade(plan: Plan, table: dict, ctx: Context) -> Result:
     amount = table.get(cur)
     limit = (f"{amount} {cur}" if amount is not None
              else ", ".join(f"{a} {c}" for c, a in table.items()))
-    if cur is None:
-        return Result("max_risk_per_trade", None, None, limit,
-                      "the run's currency is not given, so its limit cannot be chosen", None)
     if amount is None:
         return Result("max_risk_per_trade", None, None, limit,
                       f"max_risk_per_trade names no {cur} limit, and the run is in {cur}", cur)
@@ -317,14 +314,11 @@ def _cooldown_after_loss(plan: Plan, v: dict, ctx: Context) -> Result:
 
 # --------------------------------------------------- indicators and facts ---
 def _read(key: str, ctx: Context) -> tuple[float | None, str]:
-    """The value a check uses: the agent's, else (None, what is missing)."""
+    """The agent's value for `key` (finite: the api keeps no other), else (None, what is
+    missing)."""
     if key in ctx.market:
-        value, src = ctx.market[key], "supplied"
-    else:
-        return None, f"supply {key}, read off the chart at the bar acted on"
-    if not math.isfinite(value):
-        return None, f"{key} is {value}, not a finite number: supply {key}"
-    return value, src
+        return ctx.market[key], ""
+    return None, f"supply {key}, read off the chart at the bar acted on"
 
 
 def _limit(cmp: dict) -> str:
@@ -352,36 +346,35 @@ def _indicator(plan: Plan, rule: str, label: str, keys: tuple[str, ...], compare
         return Result(label, True, None, "none", f"{rule} sets no comparison for a {plan.side}",
                       None)
     if rule in ("ema", "sma"):
-        (line, line_src), (close, close_src) = _read(keys[0], ctx), _read(keys[1], ctx)
+        (line, line_missing), (close, close_missing) = _read(keys[0], ctx), _read(keys[1], ctx)
         if line is None or close is None:
-            why = "; ".join(src for v, src in ((line, line_src), (close, close_src)) if v is None)
+            why = "; ".join(m for v, m in ((line, line_missing), (close, close_missing))
+                            if v is None)
             return Result(label, None, None, cmp, why, None)
         return Result(label, close > line if cmp == "above" else close < line, close - line, cmp,
-                      f"{keys[1]} {close} ({close_src}) is {_side_word(close, line)} {keys[0]} "
-                      f"{line} ({line_src})", None)
+                      f"{keys[1]} {close} is {_side_word(close, line)} {keys[0]} {line}", None)
     limit, unit = _limit(cmp), "ATR" if rule == "stop_atr" else None
 
     def unknown(why: str) -> Result:
         return Result(label, None, None, limit, why, unit)
 
-    value, src = _read(keys[0], ctx)
+    value, missing = _read(keys[0], ctx)
     if rule != "stop_atr":
         if value is None:
-            return unknown(src)
+            return unknown(missing)
         ok, shown = _compared(value, cmp)
-        return Result(label, ok, value, limit, f"{keys[0]} is {shown} ({src}), against {limit}",
-                      unit)
+        return Result(label, ok, value, limit, f"{keys[0]} is {shown}, against {limit}", unit)
     distance, why = _stop_distance(plan, "the stop in ATR")
     if distance is None:   # the plan's half first: it is the half the owner can fix
         return unknown(why)
     if value is None:
-        return unknown(src)
+        return unknown(missing)
     if value <= 0:
         return unknown(f"{keys[0]} is {value:g}, so the stop cannot be measured in ATR")
     ok, shown = _compared(distance / value, cmp)
     return Result(label, ok, distance / value, limit,
-                  f"the stop is {shown} ATR from the entry, on {keys[0]} {value} ({src}), "
-                  f"against {limit}", unit)
+                  f"the stop is {shown} ATR from the entry, on {keys[0]} {value}, against "
+                  f"{limit}", unit)
 
 
 _RULES = {

@@ -1,6 +1,7 @@
-"""What each reply is built from: rows into views, after any transaction, so nothing is
-read under desk.db's write lock. A view is a reply the desk hands back; desk/api.py's
-public functions build them.
+"""The views desk/api.py's public functions return, and the reads they are built from: a run's
+start and stop, its version's rules, each trade's outcome, and the run's other trades as the
+checks read them. A reply is built after its transaction; a write reads the same things inside
+its own, since what they say decides the write.
 """
 from __future__ import annotations
 
@@ -61,8 +62,7 @@ class RunView:
 
 
 def run_view(con, row: sqlite3.Row) -> RunView:
-    when = {e["kind"]: datetime.fromisoformat(e["at"])
-            for e in store.events(con, run_id=row["id"]) if e["kind"].startswith("run_")}
+    when = {e["kind"]: datetime.fromisoformat(e["at"]) for e in store.run_events(con, row["id"])}
     return RunView(id=row["id"], strategy=row["strategy_id"], version=row["version"],
                    mode=row["mode"], tags=tuple(json.loads(row["tags"])),
                    started=when["run_started"], stopped=when.get("run_stopped"),
