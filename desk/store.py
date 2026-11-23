@@ -1,4 +1,4 @@
-"""The v5 store: strategies, versions, runs, trades and an append-only log of decisions.
+"""The v6 store: strategies, versions, runs, trades and an append-only log of decisions.
 
 This module is the only one that writes desk.db. Current state is derived by folding events.
 No updates, no deletes. A correction is a new event naming the one it corrects.
@@ -13,9 +13,9 @@ from pathlib import Path
 
 from desk import config
 
-# PRAGMA user_version of a v5 desk.db. Stamped at create and required at open, so a file that
+# PRAGMA user_version of a v6 desk.db. Stamped at create and required at open, so a file that
 # is not one -- the frozen legacy book above all -- is recognised before anything touches it.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class NotADeskDatabase(ValueError):
@@ -68,7 +68,7 @@ def _probe(db: Path) -> None:
 def open(path: Path | None = None, *, read_only: bool = False) -> sqlite3.Connection:
     """Open the store. Sets row_factory, PRAGMA foreign_keys = ON, and journal_mode = DELETE.
 
-    The file is probed first (see _probe), so a file that is not a v5 desk.db is refused
+    The file is probed first (see _probe), so a file that is not a v6 desk.db is refused
     unchanged, read-only or not.
 
     DELETE, not WAL: the default folder is under ~/Documents, which iCloud syncs, and a
@@ -150,11 +150,11 @@ def add_run(con, id: str, strategy_id: str, version: int, mode: str, tags: list,
 
 
 def add_trade(con, id: str, run_id: str, ticker: str, side: str, instrument: str,
-              point_value: float, currency: str) -> None:
+              point_value: float) -> None:
     """Add a trade. Only what never changes: the mutable state derives from events."""
-    _insert(con, "INSERT INTO trades (id, run_id, ticker, side, instrument, point_value,"
-            " currency) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (id, run_id, ticker, side, instrument, point_value, currency))
+    _insert(con, "INSERT INTO trades (id, run_id, ticker, side, instrument, point_value)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (id, run_id, ticker, side, instrument, point_value))
 
 
 def append(con, *, kind: str, run_id: str, at: str, payload: dict,

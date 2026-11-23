@@ -16,8 +16,7 @@ _MINUTES = {"m": 1, "h": 60, "d": 1440, "w": 10080}
 class ParsedStrategy:
     name: str                       # front matter `name`, required
     text: str                       # as given
-    normalised: str                 # whitespace runs collapsed, trailing space stripped, \n only
-    text_hash: str                  # sha256 of `normalised`
+    text_hash: str                  # sha256 of the whitespace-normalised text
     rules: dict                     # the TOML table without timeframes
     timeframes: tuple[str, ...]     # finest first, e.g. ("15m", "1h")
     checklist: tuple[str, ...]      # the items under `## Checklist`, in order
@@ -122,8 +121,7 @@ def parse(text: str) -> ParsedStrategy:
     chosen = tuple(named[n] for n in sorted(named))
     rules.validate(found, chosen)
     checklist = _checklist(text)
-    norm = normalise(text)
     return ParsedStrategy(
-        name=name, text=text, normalised=norm,
-        text_hash=hashlib.sha256(norm.encode()).hexdigest(),
+        name=name, text=text,
+        text_hash=hashlib.sha256(normalise(text).encode()).hexdigest(),
         rules=found, timeframes=chosen, checklist=checklist)

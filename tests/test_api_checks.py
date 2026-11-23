@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, config, model, server, store
+from desk import api, config, model, server, store, views
 
 NOW = datetime(2026, 3, 2, 15, 5, tzinfo=UTC)    # a Monday
 START = NOW - timedelta(days=30)
@@ -15,7 +15,7 @@ RULES = ('timeframes = ["15m", "1h"]\nmin_reward_risk = 2\nmax_risk_per_trade = 
          'max_open_trades = 1\n')
 RSI = RULES + "rsi = { at_most = 30 }\n"
 BASE = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, stop=98.0,
-            target=104.0, size=10, currency="USD", instrument="stock",
+            target=104.0, size=10, instrument="stock",
             reasons="Invented reasons.")
 GOLD = dict(ticker="GC1!", instrument=None, point_value=100.0, size=1, at=None)
 LIVE, REPLAY = "tester-r1", "tester-r2"
@@ -97,8 +97,6 @@ def test_check_only_validates_as_an_entry_and_writes_nothing(con, tmp_path):
         enter(con, check_only=True, at=None)
     with pytest.raises(api.Refused, match="reasons must be text"):
         enter(con, check_only=True, reasons=5)
-    with pytest.raises(api.Refused, match="is in USD"):
-        enter(con, check_only=True, currency="CAD")
     assert store.trades(con) == [] and len(store.events(con)) == 2
 
     t = enter(con, screenshots=[str(shot)])    # the results trade shows are the same
@@ -129,7 +127,7 @@ def test_a_size_or_price_past_a_floats_range_is_refused_or_reads_unknown(con):
      {"item": ["No news within the hour."], "verdict": "pass", "reason": "x"}],
     "not a list"])
 def test_a_damaged_stored_checklist_reads_not_answered(con, stored):
-    store.add_trade(con, "raw-1", REPLAY, "ACME", "long", "stock", 1.0, "USD")
+    store.add_trade(con, "raw-1", REPLAY, "ACME", "long", "stock", 1.0)
     store.append(con, kind="entered", run_id=REPLAY, trade_id="raw-1", at=NOW.isoformat(),
                  recorded_at=NOW.isoformat(),
                  payload={"entry_type": "market", "entry": 100.0, "stop": 98.0, "target": 104.0,
@@ -144,7 +142,7 @@ def test_a_damaged_stored_checklist_reads_not_answered(con, stored):
                                     "rvol", ["rvol"]])
 def test_a_damaged_stored_market_value_reads_not_supplied(con, stored):
     _, replay = version(con, RULES + "[facts]\nrvol = { at_least = 2 }\n")
-    store.add_trade(con, "raw-1", replay, "ACME", "long", "stock", 1.0, "USD")
+    store.add_trade(con, "raw-1", replay, "ACME", "long", "stock", 1.0)
     store.append(con, kind="entered", run_id=replay, trade_id="raw-1", at=NOW.isoformat(),
                  recorded_at=NOW.isoformat(),
                  payload={"entry_type": "market", "entry": 100.0, "stop": 98.0, "target": 104.0,
@@ -238,8 +236,8 @@ def test_an_entry_on_a_version_with_no_record_rule_reads_no_other_trade(con, mon
     enter(con, replay)
 
     def no(*a, **k):
-        raise AssertionError("_others was called")
-    monkeypatch.setattr(api, "_others", no)
+        raise AssertionError("views.others was called")
+    monkeypatch.setattr(views, "others", no)
     b = enter(con, replay)
     assert [r.name for r in api.get_trade(con, b.id, now=NOW).checks_now] == ["min_reward_risk"]
 
@@ -332,7 +330,7 @@ def test_correcting_an_entrys_at_moves_the_recomputes_at(con):
 
 
 def test_an_entered_event_without_results_reads_none_shown(con):
-    store.add_trade(con, "raw-1", REPLAY, "ACME", "long", "stock", 1.0, "USD")
+    store.add_trade(con, "raw-1", REPLAY, "ACME", "long", "stock", 1.0)
     store.append(con, kind="entered", run_id=REPLAY, trade_id="raw-1", at=NOW.isoformat(),
                  recorded_at=NOW.isoformat(),
                  payload={"entry_type": "market", "entry": 100.0, "stop": 98.0, "target": 104.0,

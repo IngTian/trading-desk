@@ -7,7 +7,7 @@
 | **Strategy** | A Markdown file you write: the idea, how you enter, where the target and the stop go, one `rules` block that each trade is checked against, and a checklist you answer at each entry, recorded apart from the rules. |
 | **Version** | A strategy's text at one moment. Any change to the text makes a new version, except for spacing within a line, trailing spaces, line endings and extra blank lines. A saved version never changes. |
 | **Run** | One version deployed over a period, in one currency. Its mode is `live` (trading now) or `replay` (re-running past history). The desk reads no market data in either mode. Its tags, such as `paper` or `GC 15m`, are stored and never interpreted. |
-| **Trade** | One entry in one run: ticker, side, `instrument` and `point_value` (1 unless a future), a market or limit entry, stop, target, size, currency, your reasons, and screenshots. |
+| **Trade** | One entry in one run: ticker, side, `instrument` and `point_value` (1 unless a future), a market or limit entry, stop, target, size, your reasons, and screenshots. |
 | **Decision** | Anything done to a trade after entry: a move of its stop or target, a report, a correction, or a void. Each carries a reason. |
 
 1. **Only decisions are stored.** Your reports are decisions too. Fills, exits, statistics and

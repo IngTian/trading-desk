@@ -22,7 +22,7 @@ desk makes no network call.
   not turn your test red, the test is not testing your change.
 - **A refusal says what was wrong and how to fix it.** Every refusal from the API and the
   strategy parser raises `desk.errors.Refused` (re-exported as `api.Refused`), and a refused
-  call writes nothing. Known gaps: a screenshot file that cannot be read (`api.py`'s
+  call writes nothing. Known gaps: a screenshot file that cannot be read (`inputs.py`'s
   `path.read_bytes()`), and, from Python only, a field name in `correct_trade` that is not text,
   still raise Python's own error (still writing nothing). Over MCP the first comes back as "The
   desk's data could not be used", and the second cannot occur, since a JSON key is always text.
@@ -48,9 +48,9 @@ desk makes no network call.
 
 | File | Holds |
 |---|---|
-| `desk/schema.sql` | desk.db's SQLite schema, version 5. There is no migration: `store.open` refuses a desk.db stamped with any version but `store.SCHEMA_VERSION`, so a schema change is a design change. |
+| `desk/schema.sql` | desk.db's SQLite schema, version 6. There is no migration: `store.open` refuses a desk.db stamped with any version but `store.SCHEMA_VERSION`, so a schema change is a design change. |
 | `desk/store.py` | The only module that writes desk.db. |
-| `desk/config.py` | Where the data lives, and the order `TRADING_DESK_DB` and `TRADING_DESK_HOME` are read in; and the guards the opener runs: `refuse_legacy_db`, for a config.toml that still sets `db`, and the iCloud placeholder check, for a desk.db evicted from the Mac. |
+| `desk/config.py` | Where the data lives, and the order `TRADING_DESK_DB` and `TRADING_DESK_HOME` are read in; and the guard the opener runs, `refuse_if_in_icloud`, for a desk.db evicted from the Mac. |
 | `desk/strategy.py`, `desk/rules.py` | Reading a strategy's Markdown and its rules block. |
 | `desk/checks.py` | Each rule's value reader and its check. |
 | `desk/model.py` | Folding a trade's decisions into one current view, and `record_problem`, the one validator: every rule about what a trade's record may hold. |
@@ -58,6 +58,8 @@ desk makes no network call.
 | `desk/stats.py` | Pure: the stats over one scope's trades, which `api.stats` builds the rows for. |
 | `desk/errors.py` | `Refused`, which every layer raises, and `shown`, which writes a value as JSON for a message. |
 | `desk/api.py` | The public API: one function per MCP tool. |
+| `desk/inputs.py` | The checks each argument passes before `api` reads it, and the words of each refusal. |
+| `desk/views.py` | The views `api` returns, built from the rows after any transaction. |
 | `desk/server.py` | The MCP server and its 14 tools, each one `api` function (`trading-desk mcp`). |
 | `desk/instructions.md` | The agent's standing instructions, which the server sends at the start of every session. |
 | `desk/integrity.py` | The checks `trading-desk integrity` runs. |

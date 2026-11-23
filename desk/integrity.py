@@ -90,35 +90,27 @@ def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime],
                  for kind in ("run_started", "run_stopped"))
 
 
-def _folded(con: sqlite3.Connection, t: sqlite3.Row, check: Callable | None = None
-            ) -> str | model.Decisions | None:
-    """Fold one trade once, and run `check(t, fold)` on it, so every invariant that reads a fold
-    shares the one result. Returns None for a trade another invariant already reports as
-    `_unfoldable` (and for a `check` that finds nothing), a ready failure line for a fold or check
-    that raises or that `check` returns, else the fold itself when `check` is None."""
-    if _unfoldable(store.events(con, trade_id=t["id"])):
-        return None
-    try:
-        d = model.decisions_of(con, t["id"])
-        return d if check is None else check(t, d)
-    except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
-        return f"trade {t['id']}: fold failed: {type(exc).__name__}: {exc}"
-
-
 def _record(con: sqlite3.Connection) -> list[str]:
     """Every trade's record fits: by effective time, its entry, its moves and its reports agree
-    with each other and with its run, by `model.record_problem`, the api's own rules. A fold that
-    fails (a malformed correction payload) and a rule that raises on a payload that folds (a price
-    that is not a number) are both reported here, so integrity still never raises."""
-    def record_problem(t: sqlite3.Row, d: model.Decisions) -> str | None:
-        started, stopped = _run_times(con, t["run_id"])
-        problem = model.record_problem(t["id"], d, side=t["side"],
-                                       started=min(started, default=None),
-                                       stopped=min(stopped, default=None))
-        return f"trade {t['id']}: {problem}" if problem else None
-
-    return [line for t in store.trades(con)
-            if (line := _folded(con, t, record_problem)) is not None]
+    with each other and with its run, by `model.record_problem`, the api's own rules. A trade
+    `_unfoldable` reports is skipped. A fold that fails (a malformed correction payload) and a
+    rule that raises on a payload that folds (a price that is not a number) are both reported
+    here, so integrity still never raises."""
+    failures = []
+    for t in store.trades(con):
+        if _unfoldable(store.events(con, trade_id=t["id"])):
+            continue
+        try:
+            d = model.decisions_of(con, t["id"])
+            started, stopped = _run_times(con, t["run_id"])
+            problem = model.record_problem(t["id"], d, side=t["side"],
+                                           started=min(started, default=None),
+                                           stopped=min(stopped, default=None))
+        except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
+            problem = f"fold failed: {type(exc).__name__}: {exc}"
+        if problem:
+            failures.append(f"trade {t['id']}: {problem}")
+    return failures
 
 
 def _correction_target(con: sqlite3.Connection) -> list[str]:
@@ -176,27 +168,17 @@ def _version_text_hash(con: sqlite3.Connection) -> list[str]:
             if v["text_hash"] != hashlib.sha256(strategy.normalise(v["text"]).encode()).hexdigest()]
 
 
-def _run_currency(con: sqlite3.Connection) -> list[str]:
-    """Every non-void trade is in its run's currency, as corrected (a hand-written correction
-    can change it). An unfoldable trade is skipped, and a fold that fails is left for `record`."""
-    failures = []
-    for t in store.trades(con):
-        d = _folded(con, t)
-        if d is None or isinstance(d, str):
-            continue
-        run_row = store.run(con, t["run_id"])
-        if run_row is None:
-            failures.append(f"trade {t['id']}: its run {t['run_id']} does not exist")
-            continue
-        rc = run_row["currency"]
-        if not d.voided and d.currency != rc:
-            failures.append(f"trade {t['id']}: in {d.currency}, but its run {t['run_id']} is in "
-                            f"{rc}")
-    return failures
+def _run_exists(con: sqlite3.Connection) -> list[str]:
+    """Every trade's run row exists: its start and stop are read from it, and its currency is
+    the one every reply and figure of the trade names."""
+    return [f"trade {id}: its run {run_id} does not exist"
+            for id, run_id in con.execute(
+                "SELECT t.id, t.run_id FROM trades t LEFT JOIN runs r ON r.id = t.run_id"
+                " WHERE r.id IS NULL")]
 
 
 def _finite_number(v) -> bool:
-    return isinstance(v, int | float) and not isinstance(v, bool) and rules._finite(v)
+    return isinstance(v, int | float) and not isinstance(v, bool) and rules.finite(v)
 
 
 # What each of checks.Result's fields holds, as trade() writes it.
@@ -265,7 +247,7 @@ INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "nothing_after_void": _nothing_after_void,
     "one_report": _one_report,
     "version_text_hash": _version_text_hash,
-    "run_currency": _run_currency,
+    "run_exists": _run_exists,
     "entered_checks": _entered_checks,
 }
 

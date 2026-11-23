@@ -4,12 +4,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from desk import api, store
+from desk import api, store, views
 
 NOW = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
 START = NOW - timedelta(days=30)
 BASE = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, stop=98.0,
-            target=104.0, size=10, currency="USD", instrument="stock",
+            target=104.0, size=10, instrument="stock",
             reasons="Invented reasons.")
 NO_SCOPE = ("stats needs one scope: a run, a strategy, or a strategy with a version; every "
             "strategy pooled would be account-level P&L, which the desk does not report")
@@ -90,7 +90,7 @@ def test_stats_per_run_per_version_and_per_strategy(con):
     out(con, b, 99.0, h(7))      # -0.5 R, -10
     v2 = version(con, 'timeframes = ["15m", "1h"]\n')
     cad, usd = run(con, currency="CAD"), run(con)
-    c = enter(con, cad, at=h(6), currency="CAD")
+    c = enter(con, cad, at=h(6))
     out(con, c, 102.0, h(5))     # +1 R, +20 CAD
     d = enter(con, usd, at=h(4))
 
@@ -132,8 +132,8 @@ def test_mode_and_tags_narrow_exactly(con, monkeypatch):
                                   {"tags": ["paper"], "trades": (ids[live],)}]
 
     read = []    # narrowing comes before any trade is read
-    real = api._trade_view
-    monkeypatch.setattr(api, "_trade_view", lambda c, row, now: read.append(row["id"]) or real(
+    real = views.trade_view
+    monkeypatch.setattr(views, "trade_view", lambda c, row, now: read.append(row["id"]) or real(
         c, row, now))
     api.stats(con, strategy="s", mode="replay", tags=["Paper"], now=NOW)
     assert read == [ids[cap]]
@@ -166,8 +166,8 @@ def test_conforming_only_reads_the_results_now_and_names_what_it_left_out(con, m
     y = enter(con, r, at=h(3), target=None)       # unknown reward to risk, and a second open
 
     built = []
-    real = api._other
-    monkeypatch.setattr(api, "_other",
+    real = views.other_of
+    monkeypatch.setattr(views, "other_of",
                         lambda *a, **kw: built.append(a[0]["id"]) or real(*a, **kw))
     s = api.stats(con, run=r, conforming_only=True, now=NOW)
     assert len(built) == 5     # each run's Others once, never once per pair of trades

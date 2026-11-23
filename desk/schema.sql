@@ -1,4 +1,4 @@
--- The v5 store: strategies, versions, runs, trades and an append-only log of decisions.
+-- The v6 store: strategies, versions, runs, trades and an append-only log of decisions.
 -- The database holds only the owner's decisions; everything else is derived by folding events.
 
 CREATE TABLE strategies (
@@ -35,8 +35,7 @@ CREATE TABLE trades (
     ticker      TEXT NOT NULL,
     side        TEXT NOT NULL CHECK (side IN ('long','short')),
     instrument  TEXT NOT NULL CHECK (instrument IN ('stock','etf','future')),
-    point_value REAL NOT NULL CHECK (point_value > 0),
-    currency    TEXT NOT NULL
+    point_value REAL NOT NULL CHECK (point_value > 0)
 ) STRICT;
 
 -- Every decision. `at` is when it takes effect (UTC); `recorded_at` is when it was written.

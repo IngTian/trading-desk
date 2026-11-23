@@ -14,7 +14,7 @@ NOW = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 T1, T2, T3, T4 = (NOW + timedelta(hours=h) for h in (1, 2, 3, 4))
 LATER = NOW + timedelta(days=1)
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
-            size=10, currency="USD", instrument="stock", reasons="Dip into support.")
+            size=10, instrument="stock", reasons="Dip into support.")
 TEXT = "---\nname: Dip buyer\n---\n\n# Dip buyer\n\n```rules\ntimeframes = [\"1h\"]\n```\n"
 RUN = "dip-buyer-r1"
 
@@ -57,8 +57,8 @@ def tid(con, ticker):
 
 
 def raw_trade(con, id, *, at=T1, run=RUN, entered=True, entry_type="limit"):
-    con.execute("INSERT INTO trades (id, run_id, ticker, side, instrument, point_value, currency)"
-                " VALUES (?, ?, 'ACME', 'long', 'stock', 1.0, 'USD')", (id, run))
+    con.execute("INSERT INTO trades (id, run_id, ticker, side, instrument, point_value)"
+                " VALUES (?, ?, 'ACME', 'long', 'stock', 1.0)", (id, run))
     if entered:
         ev(con, "entered", at, trade=id, run=run, payload={
             "entry_type": entry_type, "entry": 100.0, "stop": 98.5, "target": 103.0, "size": 10,
@@ -363,16 +363,6 @@ def test_entered_checks_reports_a_malformed_record_and_never_raises(con, key, va
     assert found(con)[1][0].startswith(f"entered_checks: event {id} (trade RAW-1): {says}")
 
 
-def test_integrity_reports_a_run_currency_mismatch_written_by_hand(con):
-    assert found(con)[0] == 0
-    t = tid(con, "ACME")
-    ev(con, "corrected", T4, trade=t, corrects=con.execute(
-        "SELECT id FROM events WHERE trade_id = ? AND kind = 'entered'", (t,)).fetchone()[0],
-       payload={"fields": {"currency": "CAD"}, "reason": "by hand"})
-    count, lines = found(con)
-    assert any(f"trade {t}: in CAD, but its run {RUN} is in USD" in ln for ln in lines)
-
-
 # --- the file itself ---------------------------------------------------------------------------
 
 def test_a_damaged_file_is_a_violation_never_a_traceback(capsys):
@@ -408,7 +398,7 @@ def test_a_trade_whose_run_is_missing_is_reported(con):
     raw_trade(con, "ghost-1", run="ghost-r1")    # an entered event, and no run row (FKs off)
     lines = []
     integrity.run(con, emit=lines.append)
-    assert "run_currency: trade ghost-1: its run ghost-r1 does not exist" in lines
+    assert "run_exists: trade ghost-1: its run ghost-r1 does not exist" in lines
     assert not [ln for ln in lines if ln.startswith("record:") and "ghost-1" in ln]
 
 

@@ -44,8 +44,8 @@ def _money(side: str, entry: float, stop: float | None, exit: float, size: int,
     """(R, cash) of a trade filled at `entry` and out at `exit`. R is withheld without a stop, and
     for a stop at or beyond the fill, where abs() would read a stop-out as a win (as
     checks._stop_distance refuses it), and when it is not finite (a vanishing risk)."""
-    move = model._signed(side, entry, exit)
-    risky = stop is not None and model._signed(side, entry, stop) < 0
+    move = model.signed(side, entry, exit)
+    risky = stop is not None and model.signed(side, entry, stop) < 0
     r = move / abs(entry - stop) if risky else None
     return (r if r is None or math.isfinite(r) else None), move * size * point_value
 

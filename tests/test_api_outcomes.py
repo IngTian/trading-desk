@@ -12,7 +12,7 @@ B = datetime(2026, 3, 2, 14, 0, tzinfo=UTC)
 LATER = B + timedelta(hours=24)
 GOLD = "---\nname: Gold\n---\n\n# Gold\n\n```rules\ntimeframes = [\"1h\", \"4h\"]\n```\n"
 BASE = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, stop=98.0, target=104.0,
-            size=10, currency="USD", instrument="stock", reasons="Invented.")
+            size=10, instrument="stock", reasons="Invented.")
 
 
 def h(n):

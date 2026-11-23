@@ -16,7 +16,7 @@ def utc(day, hour, minute=0):   # a moment in the replayed history
 
 run = api.start_run(con, "pullback", mode="replay", currency="USD", tags=["paper"], at=utc(2, 14))
 t = api.trade(con, run.id, ticker="ACME", side="long", entry_type="limit",
-              entry=100.0, stop=98.5, target=103.0, size=10, currency="USD",
+              entry=100.0, stop=98.5, target=103.0, size=10,
               instrument="stock",
               reasons="Held the rising trend line on the hourly; a limit at the dip's low.",
               screenshots=["https://www.tradingview.com/x/AbCd1234/"], at=utc(2, 14))

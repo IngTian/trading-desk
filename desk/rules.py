@@ -20,7 +20,7 @@ ORDER = ("min_reward_risk", "max_risk_per_trade", "stop_required", "target_requi
 INDICATORS = ("stop_atr", "rsi", "macd", "ema", "sma")
 _COMPARES = ("at_least", "at_most", "between")
 _SIDES = ("long", "short")
-_DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+DAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 _OUTPUTS = ("histogram", "line", "signal")
 _DEFAULTS = {"stop_atr": {"length": 14}, "rsi": {"length": 14},
              "macd": {"fast": 12, "slow": 26, "signal": 9, "output": "histogram"},
@@ -114,7 +114,7 @@ def _is_number(v) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool)
 
 
-def _finite(v) -> bool:
+def finite(v) -> bool:
     try:
         return math.isfinite(v)
     except OverflowError:   # an int too large for a float
@@ -124,7 +124,7 @@ def _finite(v) -> bool:
 def _number(path: str, v, *, positive: bool = False) -> None:
     if not _is_number(v):
         raise _no(path, f"{shown(v)} is not a number", f"{path.rsplit('.', 1)[-1]} = 2")
-    if not _finite(v):
+    if not finite(v):
         raise _no(path, "must be finite, and not too large to read")
     if positive and v <= 0:
         raise _no(path, f"{shown(v)} must be above zero")
@@ -168,7 +168,7 @@ def _one(path: str, table: dict, *, fact: bool = False) -> None:
             raise _no(where, f"{shown(v)} is a yes/no or text; a yes/no belongs in the checklist")
         _number(where, v)
     elif (not isinstance(v, list) or len(v) != 2 or not all(_is_number(x) for x in v)
-          or not all(_finite(x) for x in v)):
+          or not all(finite(x) for x in v)):
         raise _no(where, f"{shown(v)} is not two numbers", "between = [1, 3]")
     elif v[0] > v[1]:
         raise _no(where, f"{shown(v)} has lo above hi", f"between = [{v[1]}, {v[0]}]")
@@ -235,9 +235,9 @@ def _hours(path: str, table: dict) -> None:
     if table["start"] >= table["end"]:
         raise _no(path, "start must be before end; a window that crosses midnight is not "
                         "supported")
-    days = table.get("days", list(_DAYS))
-    if not isinstance(days, list) or not days or any(d not in _DAYS for d in days):
-        raise _no(f"{path}.days", f"{shown(days)} is not a list of days; use {', '.join(_DAYS)}",
+    days = table.get("days", list(DAYS))
+    if not isinstance(days, list) or not days or any(d not in DAYS for d in days):
+        raise _no(f"{path}.days", f"{shown(days)} is not a list of days; use {', '.join(DAYS)}",
                   'days = ["mon", "tue"]')
 
 

@@ -16,8 +16,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 
-from desk.model import Plan, _signed, canonical_ticker
-from desk.rules import _DAYS, INDICATORS, ORDER, Rules, _finite, indicators
+from desk.model import Plan, canonical_ticker, signed
+from desk.rules import DAYS, INDICATORS, ORDER, Rules, finite, indicators
 
 
 @dataclass(frozen=True)
@@ -72,7 +72,7 @@ def _within(figure: float, limit: float, at_least: bool) -> bool:
 
 
 def _shown(figure: float, limit: float, at_least: bool, places: int = 2,
-           money: bool = False, signed: bool = False) -> str:
+           money: bool = False, explicit_sign: bool = False) -> str:
     """The figure with as many decimals as it takes for the digits to agree with `ok`.
 
     `ok` MUST NOT CONTRADICT THE DIGITS BESIDE IT, in either direction: residue must not
@@ -86,7 +86,7 @@ def _shown(figure: float, limit: float, at_least: bool, places: int = 2,
             break
     else:
         places = 6
-    if signed:
+    if explicit_sign:
         # A figure that prints as zero carries no sign.
         figure = 0.0 if abs(figure) < 0.5 * 10 ** -places else figure
         return f"{figure:+.{places}f}"
@@ -117,7 +117,7 @@ def _stop_distance(plan: Plan, what: str) -> tuple[float | None, str]:
     if plan.stop == plan.entry:
         return None, f"the stop is at the entry, so there is no risk distance and {what} " \
                      f"cannot be computed"
-    if _signed(plan.side, plan.stop, plan.entry) < 0:
+    if signed(plan.side, plan.stop, plan.entry) < 0:
         return None, (f"the stop {plan.stop:g} is {_side_word(plan.stop, plan.entry)} the entry "
                       f"{plan.entry:g}, which is not the risk side for a {plan.side}, so {what} "
                       f"cannot be computed")
@@ -136,7 +136,7 @@ def reward_risk(plan: Plan) -> tuple[float | None, str]:
         return None, why
     # The reward is signed and the risk is a distance on the risk side: dividing two signed
     # figures would cancel the signs and pass an inverted trade.
-    return _signed(plan.side, plan.entry, plan.target) / risk, ""
+    return signed(plan.side, plan.entry, plan.target) / risk, ""
 
 
 # --------------------------------------------------------- the trade's own ---
@@ -194,8 +194,8 @@ def _order_required(name: str, plan: Plan, required: bool, price: float | None,
         return Result(name, False, None, limit, f"the plan has no {word}", None)
     # For a long the stop sits below the entry and the target above it; for a short the other
     # way round.
-    right_side = (_signed(plan.side, plan.entry, price) if reward
-                  else _signed(plan.side, price, plan.entry)) > 0
+    right_side = (signed(plan.side, plan.entry, price) if reward
+                  else signed(plan.side, price, plan.entry)) > 0
     side_of_entry = "the reward side" if reward else "the risk side"
     return Result(
         name, right_side, None, limit,
@@ -212,11 +212,11 @@ def _allowed(name: str, word: str, value: str, allowed: list) -> Result:
 
 def _trading_hours(plan: Plan, v: dict, ctx: Context) -> Result:
     local = ctx.at.astimezone()
-    day = _DAYS[local.weekday()]
-    days = v.get("days", list(_DAYS))
+    day = DAYS[local.weekday()]
+    days = v.get("days", list(DAYS))
     start, end = dt.time.fromisoformat(v["start"]), dt.time.fromisoformat(v["end"])
     ok = start <= local.time() < end and day in days
-    limit = f"{v['start']}-{v['end']}" + ("" if set(days) == set(_DAYS) else f" {','.join(days)}")
+    limit = f"{v['start']}-{v['end']}" + ("" if set(days) == set(DAYS) else f" {','.join(days)}")
     return Result("trading_hours", ok, None, limit,
                   f"{local:%H:%M %Z} on a {day} is {'inside' if ok else 'outside'} {limit}", None)
 
@@ -279,7 +279,7 @@ def _daily_loss_limit(plan: Plan, v: dict, ctx: Context) -> Result:
     could = [o for o in no_r if (o.cash < 0 if kept else o.cash > 0)]
     ok = None if could else kept
     day = ctx.at.astimezone().date().isoformat()
-    shown = _shown(known, -x, at_least=True, signed=True)
+    shown = _shown(known, -x, at_least=True, explicit_sign=True)
     fact = f"the realised R of {day} is {shown} against a floor of -{x} R"
     if no_r:
         lower, higher = any(o.cash < 0 for o in no_r), any(o.cash > 0 for o in no_r)
@@ -411,7 +411,7 @@ def _stated(name: str, limit: str, compute: Callable[[], Result]) -> Result:
         r = compute()
     except OverflowError:
         r = Result(name, None, math.inf, limit, "", None)
-    if r.figure is None or _finite(r.figure):
+    if r.figure is None or finite(r.figure):
         return r
     return replace(r, ok=None, figure=None,
                    says=f"its figure is too large to state, so {name} cannot be checked")

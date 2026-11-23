@@ -11,14 +11,14 @@ AT = "2026-11-10T10:00:00+00:00"
 
 @pytest.fixture
 def con(tmp_path):
-    """A fresh v5 store with one strategy, one version, one run and one trade."""
+    """A fresh v6 store with one strategy, one version, one run and one trade."""
     db = tmp_path / "test.db"
     store.create(db)
     with store.open(db) as conn:
         store.add_strategy(conn, "alpha", AT)
         store.add_version(conn, "alpha", 1, "text", "h1", {"size": 1}, ["15m"], [], AT)
         store.add_run(conn, "alpha-r1", "alpha", 1, "live", ["paper"], "USD")
-        store.add_trade(conn, "ACME-20261110", "alpha-r1", "ACME", "long", "stock", 1.0, "USD")
+        store.add_trade(conn, "ACME-20261110", "alpha-r1", "ACME", "long", "stock", 1.0)
         yield conn
 
 
@@ -158,7 +158,7 @@ def test_a_v1_file_is_refused_as_the_wrong_schema_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 5"):
+    with pytest.raises(store.NotADeskDatabase, match="schema version 1, expected 6"):
         store.open(old)
     assert _md5(old) == before
 
@@ -172,7 +172,7 @@ def test_a_0_5_desk_db_is_refused_untouched_naming_its_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 2, expected 5") as e:
+    with pytest.raises(store.NotADeskDatabase, match="schema version 2, expected 6") as e:
         store.open(old)
     # F11: the tmp path may hold "v2", so the old wording is matched with what followed it
     assert "no migration" in str(e.value) and "v2 desk.db" not in str(e.value)
@@ -188,12 +188,12 @@ def test_a_0_6_desk_db_is_refused_untouched_naming_its_version(tmp_path):
     c.commit()
     c.close()
     before = _md5(old)
-    with pytest.raises(store.NotADeskDatabase, match="schema version 3, expected 5"):
+    with pytest.raises(store.NotADeskDatabase, match="schema version 3, expected 6"):
         store.open(old)
     assert _md5(old) == before
 
 
-def test_the_v5_schema_has_no_trackers_table(con):
+def test_the_v6_schema_has_no_trackers_table(con):
     names = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
     assert not {n for n in names if "tracker" in n}
 
