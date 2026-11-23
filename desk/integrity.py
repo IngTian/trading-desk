@@ -90,35 +90,27 @@ def _run_times(con: sqlite3.Connection, run_id: str) -> tuple[list[dt.datetime],
                  for kind in ("run_started", "run_stopped"))
 
 
-def _folded(con: sqlite3.Connection, t: sqlite3.Row, check: Callable | None = None
-            ) -> str | model.Decisions | None:
-    """Fold one trade once, and run `check(t, fold)` on it, so every invariant that reads a fold
-    shares the one result. Returns None for a trade another invariant already reports as
-    `_unfoldable` (and for a `check` that finds nothing), a ready failure line for a fold or check
-    that raises or that `check` returns, else the fold itself when `check` is None."""
-    if _unfoldable(store.events(con, trade_id=t["id"])):
-        return None
-    try:
-        d = model.decisions_of(con, t["id"])
-        return d if check is None else check(t, d)
-    except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
-        return f"trade {t['id']}: fold failed: {type(exc).__name__}: {exc}"
-
-
 def _record(con: sqlite3.Connection) -> list[str]:
     """Every trade's record fits: by effective time, its entry, its moves and its reports agree
-    with each other and with its run, by `model.record_problem`, the api's own rules. A fold that
-    fails (a malformed correction payload) and a rule that raises on a payload that folds (a price
-    that is not a number) are both reported here, so integrity still never raises."""
-    def record_problem(t: sqlite3.Row, d: model.Decisions) -> str | None:
-        started, stopped = _run_times(con, t["run_id"])
-        problem = model.record_problem(t["id"], d, side=t["side"],
-                                       started=min(started, default=None),
-                                       stopped=min(stopped, default=None))
-        return f"trade {t['id']}: {problem}" if problem else None
-
-    return [line for t in store.trades(con)
-            if (line := _folded(con, t, record_problem)) is not None]
+    with each other and with its run, by `model.record_problem`, the api's own rules. A trade
+    `_unfoldable` reports is skipped. A fold that fails (a malformed correction payload) and a
+    rule that raises on a payload that folds (a price that is not a number) are both reported
+    here, so integrity still never raises."""
+    failures = []
+    for t in store.trades(con):
+        if _unfoldable(store.events(con, trade_id=t["id"])):
+            continue
+        try:
+            d = model.decisions_of(con, t["id"])
+            started, stopped = _run_times(con, t["run_id"])
+            problem = model.record_problem(t["id"], d, side=t["side"],
+                                           started=min(started, default=None),
+                                           stopped=min(stopped, default=None))
+        except Exception as exc:  # noqa: BLE001 -- integrity must report, never raise
+            problem = f"fold failed: {type(exc).__name__}: {exc}"
+        if problem:
+            failures.append(f"trade {t['id']}: {problem}")
+    return failures
 
 
 def _correction_target(con: sqlite3.Connection) -> list[str]:
