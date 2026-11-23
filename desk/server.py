@@ -123,7 +123,7 @@ TOOLS: dict[str, Tool] = {
         "missing. `check_only: true` runs the same checks and records nothing (a screenshot is "
         "read but not copied); its reply is a CheckView: the `checks` and `checklist` an entry "
         "would be shown, and the trade's identity (run, at, ticker, side, instrument, "
-        "point_value, currency), to show the user before they commit. Otherwise each "
+        "point_value, the run's currency), to show the user before they commit. Otherwise each "
         "screenshot file is copied into the desk's own storage when the trade is recorded, and "
         "the reply is the trade: its id "
         "(`<ticker>-<YYYYMMDD>`), its decisions, its outcome and `checks_shown`.\n\n"
@@ -149,8 +149,6 @@ TOOLS: dict[str, Tool] = {
                          "filled only at the entry price or better.", enum=["market", "limit"]),
         "entry": _p("number", "The entry price: a market entry's fill, a limit's price."),
         "size": _p("integer", "How many shares, or contracts for a future; above zero."),
-        "currency": _p("string", "The trade's currency, which is its run's.",
-                       enum=["CAD", "USD"]),
         "reasons": _p("string", "Why the user takes the trade, exactly as they wrote it."),
         "stop": _p("number", "The stop: the price that exits the position to cap a loss; "
                    "left out: none."),
@@ -176,7 +174,7 @@ TOOLS: dict[str, Tool] = {
                             "additionalProperties": False}),
         "check_only": _p("boolean", "true: run the same checks and record nothing; left out or "
                          "false: record the trade."),
-    }, ("run", "ticker", "side", "entry_type", "entry", "size", "currency", "reasons")),
+    }, ("run", "ticker", "side", "entry_type", "entry", "size", "reasons")),
     "move_order": Tool(api.move_order, (
         "Move a trade's stop, its target or both, from `at` on. Refused once the trade has "
         "exited, and on a limit order its run's stop cancelled. The reply is the trade, with the "

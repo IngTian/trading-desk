@@ -19,7 +19,7 @@ def rec(type="market", price=100.0, stop=98.0, target=104.0, moves=(), fill=None
     return model.Decisions(
         entry=model.Entry(type=type, price=price, stop=stop, target=target, size=10, at=h(1)),
         moves=tuple(model.Move(at=h(a), stop=s, target=g, reason="r") for a, s, g in moves),
-        voided=False, reasons="r", screenshots=(), point_value=1.0, currency="USD",
+        voided=False, reasons="r", screenshots=(), point_value=1.0,
         filled=None if fill is None else model.Report(at=h(fill[0]), price=fill[1], reason="r"),
         cancelled=None if cancel is None else model.Report(at=h(cancel), price=None, reason="r",
                                                            why=why),

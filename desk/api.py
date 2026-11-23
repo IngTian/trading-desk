@@ -358,7 +358,7 @@ def _trade_view(con, row: sqlite3.Row, now: datetime) -> TradeView:
     return TradeView(id=row["id"], run=row["run_id"], strategy=run["strategy_id"],
                      version=run["version"], ticker=row["ticker"], side=row["side"],
                      instrument=row["instrument"], point_value=d.point_value,
-                     currency=d.currency, decisions=d, outcome=_outcome(con, row, d),
+                     currency=run["currency"], decisions=d, outcome=_outcome(con, row, d),
                      checks_shown=kept, checklist=_checklist_view(_version(con, run)[1],
                                                                    d.checklist))
 
@@ -445,7 +445,7 @@ def _others(con, run_row: sqlite3.Row, skip: str | None = None) -> tuple[checks.
 def _plan(row: sqlite3.Row, d: model.Decisions) -> model.Plan:
     """The trade's plan as recorded: the identity row and the entry as corrected."""
     e = d.entry
-    return model.Plan(row["ticker"], row["side"], row["instrument"], d.point_value, d.currency,
+    return model.Plan(row["ticker"], row["side"], row["instrument"], d.point_value,
                       e.price, e.stop, e.target, e.size)
 
 
@@ -533,7 +533,7 @@ def _checklist_view(items: tuple[str, ...], answers) -> tuple[dict, ...]:
 
 
 def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_type: str,
-          entry: float, size: int, currency: str, reasons: str, stop: float | None = None,
+          entry: float, size: int, reasons: str, stop: float | None = None,
           target: float | None = None, screenshots=(), at: datetime | None = None,
           instrument: str | None = None, point_value: float | None = None, market=None,
           checklist=None, check_only=None, now: datetime | None = None) -> TradeView | CheckView:
@@ -589,12 +589,6 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                       "no reward-to-risk can be measured; put the stop away from the entry.")
     _right_side(side, entry, stop, target)
     _size(size)
-    _currency(currency)
-    if currency != row["currency"]:  # a run's currency never changes, so no lock is needed
-        raise Refused(f"Run {shown(run)} is in {row['currency']}; this trade is in {currency}. A "
-                      f"run "
-                      f"is in one currency: enter it on a {currency} run, or give "
-                      f"currency={shown(row['currency'])}.")
     _text("reasons", reasons)
     if check_only is not None and not isinstance(check_only, bool):
         raise Refused(f"check_only must be true, false or left out; got {shown(check_only)}.")
@@ -602,7 +596,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
     market = _market(rules, market)
     answers = _answers(items, checklist)
     shots = [_screenshot(s) for s in _strings("screenshots", screenshots)]
-    plan = model.Plan(symbol, side, kind, float(point_value), currency, float(entry),
+    plan = model.Plan(symbol, side, kind, float(point_value), float(entry),
                       stop and float(stop), target and float(target), size)
     record = bool(set(checks.RECORD) & set(rules.values))   # else no rule reads another trade
 
@@ -613,7 +607,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
         _within_run(_run_view(con, row), when)
         others = _others(con, row) if record else ()
         return CheckView(run=run, at=when, ticker=symbol, side=side, instrument=kind,
-                         point_value=float(point_value), currency=currency,
+                         point_value=float(point_value), currency=row["currency"],
                          checks=as_shown(others, None), checklist=_checklist_view(items, answers))
     if not reasons.strip():
         raise Refused("reasons is empty; say why you are taking this trade, in your own words.")
@@ -641,7 +635,7 @@ def trade(con: sqlite3.Connection, run: str, *, ticker: str, side: str, entry_ty
                     os.close(dfd)
         id = _generate_trade_id(symbol, when.astimezone().strftime("%Y%m%d"),
                                 [t["id"] for t in store.trades(con)])
-        store.add_trade(con, id, run, symbol, side, kind, float(point_value), currency)
+        store.add_trade(con, id, run, symbol, side, kind, float(point_value))
         store.append(con, kind="entered", run_id=run, trade_id=id, at=_at(when),
                      recorded_at=_at(now),
                      payload={"entry_type": entry_type, "entry": float(entry),

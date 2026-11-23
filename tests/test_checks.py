@@ -14,7 +14,7 @@ from desk.checks import Context, Other
 from desk.model import Plan
 
 AT = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)     # a Monday
-P = Plan("ACME", "long", "stock", 1.0, "USD", 100.0, 98.0, 104.0, 10)   # risk 2, reward 4
+P = Plan("ACME", "long", "stock", 1.0, 100.0, 98.0, 104.0, 10)   # risk 2, reward 4
 
 
 def run(values, plan=P, **ctx):

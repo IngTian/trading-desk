@@ -176,23 +176,13 @@ def _version_text_hash(con: sqlite3.Connection) -> list[str]:
             if v["text_hash"] != hashlib.sha256(strategy.normalise(v["text"]).encode()).hexdigest()]
 
 
-def _run_currency(con: sqlite3.Connection) -> list[str]:
-    """Every non-void trade is in its run's currency, as corrected (a hand-written correction
-    can change it). An unfoldable trade is skipped, and a fold that fails is left for `record`."""
-    failures = []
-    for t in store.trades(con):
-        d = _folded(con, t)
-        if d is None or isinstance(d, str):
-            continue
-        run_row = store.run(con, t["run_id"])
-        if run_row is None:
-            failures.append(f"trade {t['id']}: its run {t['run_id']} does not exist")
-            continue
-        rc = run_row["currency"]
-        if not d.voided and d.currency != rc:
-            failures.append(f"trade {t['id']}: in {d.currency}, but its run {t['run_id']} is in "
-                            f"{rc}")
-    return failures
+def _run_exists(con: sqlite3.Connection) -> list[str]:
+    """Every trade's run row exists: its start and stop are read from it, and its currency is
+    the one every reply and figure of the trade names."""
+    return [f"trade {id}: its run {run_id} does not exist"
+            for id, run_id in con.execute(
+                "SELECT t.id, t.run_id FROM trades t LEFT JOIN runs r ON r.id = t.run_id"
+                " WHERE r.id IS NULL")]
 
 
 def _finite_number(v) -> bool:
@@ -265,7 +255,7 @@ INVARIANTS: dict[str, Callable[[sqlite3.Connection], list[str]]] = {
     "nothing_after_void": _nothing_after_void,
     "one_report": _one_report,
     "version_text_hash": _version_text_hash,
-    "run_currency": _run_currency,
+    "run_exists": _run_exists,
     "entered_checks": _entered_checks,
 }
 

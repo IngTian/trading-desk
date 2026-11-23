@@ -149,7 +149,7 @@ def run(con, mode, timeframes):
 def enter(con, run, entry_type, entry, **kw):
     return api.trade(con, run, **{**dict(ticker="ACME", side="long", entry_type=entry_type,
                                          entry=entry, stop=entry * 0.95, target=entry * 1.2,
-                                         size=10, currency="USD", instrument="stock",
+                                         size=10, instrument="stock",
                                          reasons="Invented reasons.", at=T, now=T), **kw})
 
 

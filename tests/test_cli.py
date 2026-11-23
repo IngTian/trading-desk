@@ -15,7 +15,7 @@ def _store_with_a_trade():
         api.save_strategy(con, "dip-buyer", TEXT, now=NOW)
         api.start_run(con, "dip-buyer", mode="replay", currency="USD", at=NOW, now=NOW)
         api.trade(con, "dip-buyer-r1", ticker="ACME", side="long", entry_type="limit",
-                  entry=100.0, stop=98.5, target=103.0, size=10, currency="USD",
+                  entry=100.0, stop=98.5, target=103.0, size=10,
                   instrument="stock", reasons="Dip into support.", at=NOW, now=NOW)
 
 
@@ -25,8 +25,8 @@ def _damage(n):
         con.execute("PRAGMA foreign_keys = OFF")
         for i in range(n):
             con.execute(
-                "INSERT INTO trades (id, run_id, ticker, side, instrument, point_value, currency)"
-                " VALUES (?, 'dip-buyer-r1', 'ZZZ', 'long', 'stock', 1, 'USD')", (f"bad-{i}",))
+                "INSERT INTO trades (id, run_id, ticker, side, instrument, point_value)"
+                " VALUES (?, 'dip-buyer-r1', 'ZZZ', 'long', 'stock', 1)", (f"bad-{i}",))
         con.commit()
 
 

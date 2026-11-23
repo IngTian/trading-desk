@@ -56,7 +56,7 @@ with store.open() as con:
     run = api.start_run(con, "example", mode="live", currency="USD", at=now, now=now)
     # Invented figures: a market buy of 10 shares of a made-up ticker.
     t = api.trade(con, run.id, ticker="ACME", side="long", entry_type="market", entry=100.0,
-                  stop=98.5, target=103.0, size=10, currency="USD", instrument="stock",
+                  stop=98.5, target=103.0, size=10, instrument="stock",
                   reasons="Smoke test.", at=now, now=now)
     assert api.get_trade(con, t.id).id == t.id
     kinds = [e["kind"] for e in store.events(con, trade_id=t.id)]
@@ -75,7 +75,7 @@ with store.open() as con:
     # Replay: check_only writes nothing, and the recorded trade reads the same way.
     replay = api.start_run(con, "example", mode="replay", currency="USD", at=now, now=now)
     plan = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5,
-                target=104.0, size=10, currency="USD", instrument="stock",
+                target=104.0, size=10, instrument="stock",
                 reasons="Smoke test.", at=now, now=now)
     before = len(store.events(con))
     seen = api.trade(con, replay.id, check_only=True, **plan)
@@ -158,7 +158,7 @@ try:
          markdown=files("desk").joinpath("strategy.example.md").read_text(encoding="utf-8"))
     run = call("start_run", strategy="example", mode="replay", currency="USD", at=at)["id"]
     t = call("trade", run=run, ticker="ACME", side="long", entry_type="limit", entry=100.0,
-             stop=98.5, target=104.0, size=10, currency="USD", instrument="stock",
+             stop=98.5, target=104.0, size=10, instrument="stock",
              reasons="Smoke test.", at=at)
     call("report", trade=t["id"], state="filled", at="2026-03-02T12:15:00Z", reason="Smoke test.")
     call("report", trade=t["id"], state="exited", kind="target", at="2026-03-02T12:30:00Z",

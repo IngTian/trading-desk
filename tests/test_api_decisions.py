@@ -15,7 +15,7 @@ T2 = NOW + timedelta(hours=2)
 T3 = NOW + timedelta(hours=3)
 LATER = NOW + timedelta(days=1)  # the wall clock when a record-keeping event is written
 BASE = dict(ticker="ACME", side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0,
-            size=10, currency="USD", instrument="stock", reasons="Dip into support.")
+            size=10, instrument="stock", reasons="Dip into support.")
 RULES = "```rules\ntimeframes = [\"1h\"]\nmin_reward_risk = 2\n```\n"
 
 
@@ -281,7 +281,7 @@ def test_a_correction_may_change_each_entry_field(con):
     e = v.decisions.entry
     assert (e.price, e.stop, e.target, e.size, e.at) == (101.0, 99.0, 105.0, 2, T2)
     assert (v.point_value, v.currency) == (50.0, "USD")
-    assert (v.decisions.point_value, v.decisions.currency) == (50.0, "USD")
+    assert v.decisions.point_value == 50.0
     assert events(con, t.id)[-1][3]["fields"]["at"] == T2.isoformat()
 
 

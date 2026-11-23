@@ -31,7 +31,7 @@ TEXT = ('---\nname: Tester\n---\n\n# Tester\n\nAll figures here are invented.\n\
         'timeframes = ["15m"]\n\n[facts]\nrvol = { at_least = 2.0 }\n```\n\n## Checklist\n\n'
         '- Invented item.\n')
 ENTRY = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, stop=98.0,
-             target=104.0, size=10, currency="USD", instrument="stock", reasons="Invented.")
+             target=104.0, size=10, instrument="stock", reasons="Invented.")
 MCP = [sys.executable, "-c", "from desk.cli import main; raise SystemExit(main(['mcp']))"]
 
 

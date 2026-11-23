@@ -25,7 +25,7 @@ def con(tmp_path):
         store.add_strategy(c, "dip-buyer", T0.isoformat())
         store.add_version(c, "dip-buyer", 1, "text", "hash", {}, ["1h"], [], T0.isoformat())
         store.add_run(c, "dip-buyer-r1", "dip-buyer", 1, "replay", [], "USD")
-        store.add_trade(c, "gc-1", "dip-buyer-r1", "GC", "long", "future", 100.0, "USD")
+        store.add_trade(c, "gc-1", "dip-buyer-r1", "GC", "long", "future", 100.0)
         yield c
 
 
@@ -43,7 +43,7 @@ def test_an_entered_trade_is_its_entry_and_identity_row(con):
     assert (d.moves, d.exited, d.voided) == ((), None, False)
     assert d.reasons == "Dip into support."
     assert d.screenshots == ({"link": "https://example.com/c.png"},)
-    assert (d.point_value, d.currency) == (100.0, "USD")
+    assert d.point_value == 100.0
 
 
 def test_moves_recorded_out_of_order_are_read_in_at_order(con):
@@ -97,14 +97,13 @@ def test_of_two_corrections_naming_one_event_the_later_wins_field_by_field(con):
     assert (e.stop, e.target) == (97.0, 104.0)
 
 
-def test_a_corrected_entry_at_point_value_and_currency_are_read_in_place(con):
+def test_a_corrected_entry_at_and_point_value_are_read_in_place(con):
     entered = log(con, "entered", T0, ENTERED)
     later = T0 + timedelta(minutes=15)
-    log(con, "corrected", FAR, {"fields": {"at": later.isoformat(), "point_value": 50.0,
-                                           "currency": "CAD"}, "reason": "Wrong contract."},
-        corrects=entered)
+    log(con, "corrected", FAR, {"fields": {"at": later.isoformat(), "point_value": 50.0},
+                                "reason": "Wrong contract."}, corrects=entered)
     d = model.decisions_of(con, "gc-1")
-    assert (d.entry.at, d.point_value, d.currency) == (later, 50.0, "CAD")
+    assert (d.entry.at, d.point_value) == (later, 50.0)
 
 
 def test_a_corrected_move_at_reorders_the_moves(con):
@@ -239,7 +238,7 @@ def dec(type="limit", price=100.0, stop=98.0, target=104.0, moves=(), fill=None,
     return model.Decisions(
         entry=model.Entry(type=type, price=price, stop=stop, target=target, size=10, at=t(1)),
         moves=tuple(model.Move(at=t(a), stop=s, target=g, reason="r") for a, s, g in moves),
-        voided=voided, reasons="r", screenshots=(), point_value=1.0, currency="USD",
+        voided=voided, reasons="r", screenshots=(), point_value=1.0,
         filled=None if fill is None else model.Report(at=t(fill[0]), price=fill[1], reason="r"),
         cancelled=None if cancel is None else model.Report(at=t(cancel), price=None, reason="r",
                                                            why=why),

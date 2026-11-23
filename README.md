@@ -63,7 +63,7 @@ You tell the agent what you did and why, and it calls the desk's tools. A sessio
      links.
 4. **After entry**: `move_order` and `report`. The desk learns nothing on its own, so report each
    limit's fill or cancellation, and each exit with its kind and, for a hand exit, its price.
-5. **Fix a mistake**: `correct_trade` and `void_trade`. A trade's currency cannot be corrected.
+5. **Fix a mistake**: `correct_trade` and `void_trade`.
 6. **Read back**: `get_trade`, with `checks_now` and `checks_differ`; and `list_trades`.
 7. **Stop the run.** `stop_run` cancels its unfilled limit orders and lists their ids in
    `cancelled`; its open trades stay open until you report their exit.
@@ -185,7 +185,7 @@ guards, `trading-desk integrity`, and how to keep a session apart from your real
 **0.11.0, on PyPI, Beta:** the tools and the data format may change before 1.0, and each change is
 listed under [Versions](https://github.com/IngTian/trading-desk/blob/main/docs/versions.md).
 
-- It reads a desk.db at schema version 5. One an earlier version wrote is refused untouched: move
+- It reads a desk.db at schema version 6. One an earlier version wrote is refused untouched: move
   it aside and restart the MCP server, which creates a new one, since there is no migration.
 - A config.toml that sets `db` is refused, naming the step to take.
 

@@ -12,5 +12,5 @@ What 0.11 does not do: place orders, or send alerts; keep account balances or ac
 convert currencies; take more than one fill or one exit per trade; expire orders (report an expired
 order cancelled, with why `not filled`); move a pending limit's price (cancel it and enter again);
 remove a stop or a target by correction (void the trade and enter again); correct a trade's run,
-ticker, side or currency (void it and enter it again); trade anything but stocks, ETFs and futures;
+ticker or side (void it and enter it again); trade anything but stocks, ETFs and futures;
 or read a desk.db an earlier version wrote.

@@ -10,7 +10,7 @@ NOW = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
 START = NOW - timedelta(days=1)
 TEXT = '---\nname: Tester\n---\n\n```rules\ntimeframes = ["15m"]\n```\n'
 ENTRY = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, size=1,
-             currency="USD", instrument="stock", reasons="Invented.")
+             instrument="stock", reasons="Invented.")
 
 
 @pytest.fixture

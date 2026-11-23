@@ -11,7 +11,7 @@ from desk import api, config, model, store
 NOW = datetime(2026, 3, 2, 12, 0, tzinfo=UTC)
 T1 = NOW + timedelta(hours=1)
 BASE = dict(side="long", entry_type="limit", entry=100.0, stop=98.5, target=103.0, size=10,
-            currency="USD", instrument="stock", reasons="Dip into support.")
+            instrument="stock", reasons="Dip into support.")
 REPLACE = os.replace
 
 
@@ -170,7 +170,7 @@ def test_a_trade_id_is_safe_to_type_unquoted_and_collides_with_a_suffix(con):
     dict(entry_type="stop"), dict(entry=0), dict(entry=-1), dict(entry=float("nan")),
     dict(entry=float("inf")), dict(stop=0), dict(stop=-2), dict(target=float("nan")),
     dict(target=0), dict(stop=100.0), dict(size=0), dict(size=-1), dict(size=1.5),
-    dict(size=True), dict(currency="EUR"), dict(reasons=""), dict(reasons="   "),
+    dict(size=True), dict(reasons=""), dict(reasons="   "),
     dict(side="up"), dict(ticker=" ")])
 def test_bad_figures_are_refused_and_write_nothing(con, kw):
     with pytest.raises(api.Refused):
@@ -275,12 +275,6 @@ def test_screenshots_that_are_not_a_list_of_strings_are_refused(con, shots):
 def test_text_arguments_that_are_not_text_are_refused(con, kw, name):
     with pytest.raises(api.Refused, match=f"{name} must be text"):
         enter(con, **kw)
-    assert store.trades(con) == []
-
-
-def test_a_trade_in_another_currency_is_refused_and_writes_nothing(con):
-    with pytest.raises(api.Refused, match="is in USD; this trade is in CAD"):
-        enter(con, currency="CAD")
     assert store.trades(con) == []
 
 

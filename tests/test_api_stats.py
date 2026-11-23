@@ -9,7 +9,7 @@ from desk import api, store
 NOW = datetime(2026, 3, 2, 15, 0, tzinfo=UTC)
 START = NOW - timedelta(days=30)
 BASE = dict(ticker="ACME", side="long", entry_type="market", entry=100.0, stop=98.0,
-            target=104.0, size=10, currency="USD", instrument="stock",
+            target=104.0, size=10, instrument="stock",
             reasons="Invented reasons.")
 NO_SCOPE = ("stats needs one scope: a run, a strategy, or a strategy with a version; every "
             "strategy pooled would be account-level P&L, which the desk does not report")
@@ -90,7 +90,7 @@ def test_stats_per_run_per_version_and_per_strategy(con):
     out(con, b, 99.0, h(7))      # -0.5 R, -10
     v2 = version(con, 'timeframes = ["15m", "1h"]\n')
     cad, usd = run(con, currency="CAD"), run(con)
-    c = enter(con, cad, at=h(6), currency="CAD")
+    c = enter(con, cad, at=h(6))
     out(con, c, 102.0, h(5))     # +1 R, +20 CAD
     d = enter(con, usd, at=h(4))
 

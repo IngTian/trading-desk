@@ -78,7 +78,6 @@ class Plan:
     side: str
     instrument: str
     point_value: float
-    currency: str
     entry: float
     # Optional because the rules are what demand them: stop_required and target_required
     # exist precisely because a plan can arrive without one, and a check withholds its figure
@@ -125,9 +124,8 @@ class Decisions:
     voided: bool
     reasons: str
     screenshots: tuple[dict, ...]
-    # From the trade's identity row unless a correction changed them.
+    # From the trade's identity row unless a correction changed it.
     point_value: float
-    currency: str
     # The standing reports, last and defaulted so a Decisions built without them still works.
     filled: Report | None = None
     cancelled: Report | None = None
@@ -212,7 +210,6 @@ def fold(con: sqlite3.Connection, trade_id: str
         voided=any(kind[id] == "voided" and corrects[id] is None for id in kind),
         reasons=p["reasons"], screenshots=tuple(p["screenshots"]),
         point_value=p.get("point_value", row["point_value"]),
-        currency=p.get("currency", row["currency"]),
         # Read as stored, not coerced: a damaged price folds, and record_problem meets it.
         filled=report(filled, price=payload.get(filled, {}).get("price")),
         cancelled=report(cancelled, why=payload.get(cancelled, {}).get("why")),
